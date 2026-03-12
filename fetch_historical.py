@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 
 load_dotenv()
 cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
@@ -142,30 +145,31 @@ def judge_signals(s: dict) -> tuple[bool, bool]:
 
 
 def print_stats(df: pd.DataFrame):
-    total_days   = df["date"].nunique()
+    total_days   = df["signal_date"].nunique()
     total_stocks = len(df)
-    d1 = df[df["day1"] == True]
-    d2 = df[df["day2"] == True]
+    # 翌日データが確定している行のみで統計
+    d1 = df[(df["day1"] == True) & (df["next_surge_%"].notna())]
+    d2 = df[(df["day2"] == True) & (df["next_surge_%"].notna())]
 
-    print(f"\n=== 📊 累積学習データ統計 ===")
+    print(f"\n=== 📊 累積学習データ統計（翌日上昇率ベース）===")
     print(f"  蓄積日数   : {total_days}日")
     print(f"  総サンプル : {total_stocks}銘柄")
 
     if len(d1) > 0:
-        hit = (d1["actual_surge_%"] >= SURGE_THRESHOLD).sum()
+        hit = (d1["next_surge_%"] >= SURGE_THRESHOLD).sum()
         print(f"\n  🌱 1日目シグナル")
         print(f"    発火回数    : {len(d1)}回")
         print(f"    急騰成功率  : {hit}/{len(d1)}回 ({hit/len(d1)*100:.1f}%)")
-        print(f"    翌日平均    : {d1['actual_surge_%'].mean():.2f}%")
-        print(f"    翌日中央値  : {d1['actual_surge_%'].median():.2f}%")
+        print(f"    翌日平均    : {d1['next_surge_%'].mean():.2f}%")
+        print(f"    翌日中央値  : {d1['next_surge_%'].median():.2f}%")
 
     if len(d2) > 0:
-        hit = (d2["actual_surge_%"] >= SURGE_THRESHOLD).sum()
+        hit = (d2["next_surge_%"] >= SURGE_THRESHOLD).sum()
         print(f"\n  🚀 2日目シグナル")
         print(f"    発火回数    : {len(d2)}回")
         print(f"    急騰成功率  : {hit}/{len(d2)}回 ({hit/len(d2)*100:.1f}%)")
-        print(f"    翌日平均    : {d2['actual_surge_%'].mean():.2f}%")
-        print(f"    翌日中央値  : {d2['actual_surge_%'].median():.2f}%")
+        print(f"    翌日平均    : {d2['next_surge_%'].mean():.2f}%")
+        print(f"    翌日中央値  : {d2['next_surge_%'].median():.2f}%")
 
 
 def main():
@@ -183,7 +187,7 @@ def main():
     # 既存の蓄積データを読み込む
     if os.path.exists(ACCUM_CSV):
         existing = pd.read_csv(ACCUM_CSV, encoding="utf-8-sig")
-        done_dates = set(existing["date"].unique())
+        done_dates = set(existing["signal_date"].unique())
         print(f"  既存データ: {len(existing)}件（{len(done_dates)}日分）\n")
     else:
         existing = pd.DataFrame()
@@ -232,14 +236,25 @@ def main():
 
             day1, day2 = judge_signals(s)
 
-            # 当日の実際の上昇率
-            surge_rows = df[df["Date"] == pd.Timestamp(date_disp)]
-            actual = round((surge_rows.iloc[0]["Close"] - surge_rows.iloc[0]["Open"]) /
-                           surge_rows.iloc[0]["Open"] * 100, 2) if not surge_rows.empty else row._6
-            stop = bool(surge_rows.iloc[0]["stop_high"]) if not surge_rows.empty else False
+            # 翌日の上昇率を記録（シグナルの予測精度を測る）
+            today_rows_df  = df[df["Date"] == pd.Timestamp(date_disp)]
+            future_rows    = df[df["Date"] > pd.Timestamp(date_disp)]
+            
+            # 当日ストップ高判定
+            stop = bool(today_rows_df.iloc[0]["stop_high"]) if not today_rows_df.empty else False
+            
+            # 翌日上昇率（翌営業日の終値-始値/始値）
+            if not future_rows.empty:
+                n = future_rows.iloc[0]
+                next_surge = round((n["Close"] - n["Open"]) / n["Open"] * 100, 2) if n["Open"] > 0 else None
+                next_date  = n["Date"].strftime("%Y-%m-%d")
+            else:
+                next_surge = None
+                next_date  = None
 
             day_rows.append({
-                "date":           date_disp,
+                "signal_date":    date_disp,
+                "next_date":      next_date,
                 "code":           code4,
                 "score":          s["total"],
                 "trend":          s["trend"],
@@ -247,7 +262,7 @@ def main():
                 "ratio":          s["ratio"],
                 "day1":           day1,
                 "day2":           day2,
-                "actual_surge_%": actual,
+                "next_surge_%":   next_surge,
                 "stop_high":      stop,
             })
             time.sleep(1.0)
@@ -259,8 +274,8 @@ def main():
     if all_rows:
         new_df   = pd.DataFrame(all_rows)
         combined = pd.concat([existing, new_df], ignore_index=True) if not existing.empty else new_df
-        combined = combined.drop_duplicates(subset=["date","code"], keep="last")
-        combined = combined.sort_values("date").reset_index(drop=True)
+        combined = combined.drop_duplicates(subset=["signal_date","code"], keep="last")
+        combined = combined.sort_values("signal_date").reset_index(drop=True)
         combined.to_csv(ACCUM_CSV, index=False, encoding="utf-8-sig")
         print(f"\n✅ {len(all_rows)}件追加（累積: {len(combined)}件 / {combined['date'].nunique()}日分）")
         print_stats(combined)
