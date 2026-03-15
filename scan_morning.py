@@ -558,6 +558,7 @@ def main():
         df_a = pd.read_csv(SCAN_CSV, encoding="utf-8-sig")
         latest_date = df_a["scan_date"].max()
         candidates_a = df_a[df_a["scan_date"] == latest_date].copy()
+        candidates_a = candidates_a.sort_values(["score", "ratio"], ascending=[False, False])
         print(f"  スキャン日: {latest_date}  候補数: {len(candidates_a)}件\n")
 
         buy_a = caution_a = pass_a = 0
@@ -634,28 +635,42 @@ def main():
             new_candidates = pd.concat([ex_c, new_candidates], ignore_index=True)
         new_candidates.to_csv(CANDIDATES_LOG_CSV, index=False, encoding="utf-8-sig")
 
-    # ── 6. 本日のアクションプラン ──
+     # ── 6. 本日のアクションプラン ──
     print(f"\n{'='*60}")
     print(f"【本日のアクションプラン】")
     print(f"{'='*60}")
 
     if condition == "PANIC":
-        print(f"  🚨 全ポジション見送り。ニュースと先物を引き続き監視。")
+        print(f"  🚨 全ポジション見送り。ノーポジが最強戦略です。")
+        print(f"\n  ⏰ 本日のチェックリスト")
+        print(f"  □ 新規エントリーは一切しない")
+        print(f"  □ 保有中のポジションがあれば損切りを検討")
+        print(f"  □ 米国先物・ニュースの動向を引き続き監視")
+        print(f"  □ 地合い回復のシグナル（騰落比40%超）を待つ")
     elif condition == "WEAK":
         print(f"  ⚠️  スコア{strategy_a_thr}以上の戦略A候補のみ、少額で検討。")
         print(f"  ⚠️  損切りを{stop_loss_pct:.0f}%に設定（通常より引き締め）。")
+        print(f"\n  ⏰ チェックリスト（8:50まで）")
+        print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
+        print(f"  □ 候補銘柄の最新ニュース・IR確認")
+        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
     elif condition == "STRONG":
         print(f"  🚀 地合い良好。戦略Aの優良銘柄を優先。")
         print(f"  ✅ 戦略Bも通常通りエントリー可。")
-    else:
+        print(f"\n  ⏰ チェックリスト（8:50まで）")
+        print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
+        print(f"  □ 候補銘柄の最新ニュース・IR確認")
+        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
+    else:  # NORMAL
         print(f"  ✅ 通常通りスキャン結果に従ってエントリー。")
         print(f"  📌 9:00直後の値動きで方向感を確認してから判断もOK。")
-
-    print(f"\n  ⏰ チェックリスト（8:50まで）")
-    print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
-    print(f"  □ 候補銘柄の最新ニュース・IR確認")
-    print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
-    print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
+        print(f"\n  ⏰ チェックリスト（8:50まで）")
+        print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
+        print(f"  □ 候補銘柄の最新ニュース・IR確認")
+        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
 
     # ── 7. 朝判定ログ保存 ──
     log_row = {
