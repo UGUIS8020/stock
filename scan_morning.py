@@ -37,6 +37,78 @@ US_TICKERS = {
 NIKKEI_TICKER  = "^N225"
 USD_JPY_TICKER = "USDJPY=X"
 
+COPPER_TICKER   = "HG=F"
+CRUDE_TICKER    = "CL=F"
+SEMI_TICKER     = "SOXX"
+
+MACRO_SECTORS = [
+    {
+        "label":       "銅先物上昇 → 非鉄金属セクター",
+        "trigger_key": "copper",
+        "threshold":   0.8,      # 銅先物 +0.8%以上
+        "direction":   "up",
+        "stocks": [
+            ("5016", "JX金属",        "4,000円台"),
+            ("5713", "住友金属鉱山",   "4,000円台"),
+            ("5706", "三井金属",       "3,000円台"),
+            ("5108", "三菱マテリアル", "2,000円台"),
+            ("5714", "DOWAホールディングス", "4,000円台"),
+        ],
+    },
+    {
+        "label":       "ドル円上昇(円安) → 輸出・自動車セクター",
+        "trigger_key": "usdjpy_change",
+        "threshold":   0.3,      # ドル円 +0.3%以上（≒+0.5円程度）
+        "direction":   "up",
+        "stocks": [
+            ("7203", "トヨタ自動車",   "3,000円台"),
+            ("7267", "本田技研工業",   "1,500円台"),
+            ("7270", "SUBARU",        "3,000円台"),
+            ("7201", "日産自動車",     "400円台"),
+            ("6954", "ファナック",     "4,000円台"),
+        ],
+    },
+    {
+        "label":       "原油上昇 → エネルギー・商社セクター",
+        "trigger_key": "crude",
+        "threshold":   1.0,      # 原油 +1.0%以上
+        "direction":   "up",
+        "stocks": [
+            ("5020", "ENEOS",         "800円台"),
+            ("5019", "出光興産",       "900円台"),
+            ("8002", "丸紅",           "2,500円台"),
+            ("8031", "三井物産",       "3,000円台"),
+            ("8053", "住友商事",       "3,000円台"),
+        ],
+    },
+    {
+        "label":       "半導体関連(SOXX)上昇 → 半導体製造装置",
+        "trigger_key": "semi",
+        "threshold":   1.0,      # SOXX +1.0%以上
+        "direction":   "up",
+        "stocks": [
+            ("8035", "東京エレクトロン", "25,000円台"),
+            ("6857", "アドバンテスト",   "6,000円台"),
+            ("6963", "ローム",           "2,000円台"),
+            ("4063", "信越化学工業",     "5,000円台"),
+            ("6146", "ディスコ",         "40,000円台"),
+        ],
+    },
+    {
+        "label":       "ドル円下落(円高) → 内需・小売セクター",
+        "trigger_key": "usdjpy_change",
+        "threshold":   -0.5,     # ドル円 -0.5%以下（円高）
+        "direction":   "down",
+        "stocks": [
+            ("8267", "イオン",         "3,000円台"),
+            ("3382", "セブン＆アイ",   "2,000円台"),
+            ("9983", "ファーストリテイリング", "50,000円台"),
+            ("2502", "アサヒグループ", "2,000円台"),
+            ("2914", "日本たばこ産業", "4,000円台"),
+        ],
+    },
+]
+
 
 def fetch_us_market():
     """米国株指数の前日比(%)を取得"""
@@ -80,6 +152,66 @@ def fetch_usdjpy():
     except Exception:
         pass
     return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [3] マクロ指標取得関数（fetch_us_market() の後に追加）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 
+def fetch_macro_indicators(usdjpy_current):
+    """
+    銅先物・原油先物・半導体ETF の前日比(%)を取得。
+    ドル円の変化率は既存の fetch_usdjpy() 結果から計算。
+ 
+    戻り値:
+      {
+        "copper":        前日比(%) or None,
+        "crude":         前日比(%) or None,
+        "semi":          前日比(%) or None,
+        "usdjpy_change": 前日比(%) or None,
+        "details":       表示用テキスト dict,
+      }
+    """
+    result  = {}
+    details = {}
+ 
+    for key, ticker, label in [
+        ("copper", COPPER_TICKER, "銅先物(HG=F)"),
+        ("crude",  CRUDE_TICKER,  "原油先物(CL=F)"),
+        ("semi",   SEMI_TICKER,   "半導体ETF(SOXX)"),
+    ]:
+        try:
+            data = yf.Ticker(ticker).history(period="3d")
+            if len(data) >= 2:
+                prev  = float(data["Close"].iloc[-2])
+                close = float(data["Close"].iloc[-1])
+                chg   = round((close - prev) / prev * 100, 2)
+                result[key]  = chg
+                details[key] = {"close": close, "change": chg, "label": label}
+            else:
+                result[key]  = None
+                details[key] = {"label": label, "error": True}
+        except Exception:
+            result[key]  = None
+            details[key] = {"label": label, "error": True}
+ 
+    # ドル円変化率：前日終値と比較
+    try:
+        data = yf.Ticker(USD_JPY_TICKER).history(period="3d")
+        if len(data) >= 2 and usdjpy_current:
+            prev_usdjpy = float(data["Close"].iloc[-2])
+            chg = round((usdjpy_current - prev_usdjpy) / prev_usdjpy * 100, 2)
+            result["usdjpy_change"]  = chg
+            details["usdjpy_change"] = {"close": usdjpy_current, "change": chg, "label": "ドル円変化率"}
+        else:
+            result["usdjpy_change"]  = None
+            details["usdjpy_change"] = {"label": "ドル円変化率", "error": True}
+    except Exception:
+        result["usdjpy_change"]  = None
+        details["usdjpy_change"] = {"label": "ドル円変化率", "error": True}
+ 
+    result["details"] = details
+    return result
 
 
 # ══════════════════════════════════════════════════════
@@ -177,7 +309,7 @@ def predict_market(us_data, nikkei, usdjpy):
     else:
         breakdown.append("  指数一致度   : データ不足  → 0点")
 
-    # ── 総合判定 ──────────────────────────────────────
+     # ── 総合判定 ──────────────────────────────────────
     if score >= 7:
         condition         = "STRONG"
         strategy_a_thr    = 7.5
@@ -186,13 +318,13 @@ def predict_market(us_data, nikkei, usdjpy):
         condition         = "NORMAL"
         strategy_a_thr    = 7.5
         stop_loss_pct     = -5.0
-    elif score >= 1:
+    elif score >= 3:          # ← 1 を 3 に変更
         condition         = "WEAK"
         strategy_a_thr    = 8.0
         stop_loss_pct     = -4.0
     else:
         condition         = "PANIC"
-        strategy_a_thr    = 99.0   # 実質全見送り
+        strategy_a_thr    = 99.0
         stop_loss_pct     = -3.0
 
     details["score"]          = score
@@ -218,31 +350,16 @@ def judge_entry_a(row, condition, strategy_a_thr):
         return "CAUTION", "スコア過熱(9.0↑) - 逆行リスクあり"
 
     if condition == "WEAK":
-        return "CAUTION", f"地合い軟調 - スコア高いが慎重に"
+        return "CAUTION", "地合い軟調 - スコア高いが慎重に"
 
     return "BUY", "スコア優良 + 地合い良好"
 
 
 def judge_entry_b(row, condition, stop_loss_pct):
-    """
-    リバウンドスコアを主軸にした逆張り判定。
-    scan_daily.pyで計算されたrebound_scoreを参照する。
-
-    スコア基準（0〜10点）:
-      RSI       : 0〜4点（RSI<20で4点、<30で3点、<40で2点、<50で1点）
-      出来高倍率 : 0〜3点（3倍超で3点、2倍超で2点、1.5倍超で1点）
-      MA25乖離   : 0〜3点（-15%超で3点、-10%超で2点、-5%超で1点）
-
-    判定:
-      7点以上  → BUY（リバウンド期待大）
-      5〜6点   → CAUTION（中程度）
-      4点以下  → PASS（根拠不十分）
-    """
     drop      = float(row["today_rise"])
     rb_score  = int(row.get("rebound_score", 0))
     rb_reason = str(row.get("rebound_reason", "指標なし"))
 
-    # 地合いフィルター（最優先）
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 逆張り非推奨（続落リスク）"
 
@@ -251,19 +368,97 @@ def judge_entry_b(row, condition, stop_loss_pct):
             return "CAUTION", f"地合い軟調だがリバウンド高({rb_score}点) 少額のみ / {rb_reason}"
         return "PASS", f"地合い軟調 + リバウンドスコア{rb_score}点 - 見送り"
 
-    # 暴落-20%超は原因不明リスクが高いため別判定
     if drop <= -20:
         if rb_score >= 7:
             return "CAUTION", f"暴落-20%超 材料確認必須({rb_score}点) / {rb_reason}"
         return "PASS", f"暴落-20%超 + リバウンドスコア{rb_score}点 - 見送り"
 
-    # メイン判定
     if rb_score >= 7:
         return "BUY",     f"リバウンド期待大({rb_score}点) / {rb_reason}"
     elif rb_score >= 5:
         return "CAUTION", f"リバウンド中程度({rb_score}点) / {rb_reason}"
     else:
         return "PASS",    f"リバウンドスコア低({rb_score}点) - 見送り"
+    
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [4] 戦略D 判定・表示関数（judge_entry_b() の後に追加）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 
+def scan_strategy_d(macro, condition):
+    """
+    マクロ指標を元に「今日+2%が狙える大型株」を提示する。
+ 
+    - condition が PANIC の場合は全見送り
+    - 各セクターのトリガーを確認し、閾値を超えたものだけ表示
+    - 銘柄ごとの個別判定は行わず、「セクター追い風」を伝えるにとどめる
+      （エントリー判断はユーザーが最終確認）
+    """
+    print(f"\n{'='*60}")
+    print(f"【戦略D】大型株マクロ連動候補")
+    print(f"  参考: 銅/原油/ドル円/半導体の動きから恩恵銘柄を提示")
+    print(f"{'='*60}")
+ 
+    if condition == "PANIC":
+        print(f"  🚨 地合いPANIC - 戦略D も全見送り推奨")
+        return
+ 
+    details = macro.get("details", {})
+ 
+    # マクロ指標サマリー表示
+    print(f"\n  📊 マクロ指標（前日比）:")
+    for key, info in details.items():
+        if isinstance(info, dict) and "change" in info:
+            icon  = "📈" if info["change"] >= 0 else "📉"
+            label = info["label"]
+            chg   = info["change"]
+            close = info.get("close", "")
+            close_str = f"  ({close:,.2f})" if close else ""
+            print(f"    {icon} {label:<20}: {chg:>+.2f}%{close_str}")
+        else:
+            label = info.get("label", key) if isinstance(info, dict) else key
+            print(f"    ❓ {label:<20}: 取得失敗")
+ 
+    # セクタートリガー判定
+    triggered = []
+    for sector in MACRO_SECTORS:
+        key       = sector["trigger_key"]
+        threshold = sector["threshold"]
+        direction = sector["direction"]
+        val       = macro.get(key)
+ 
+        if val is None:
+            continue
+ 
+        hit = (direction == "up"   and val >= threshold) or \
+              (direction == "down" and val <= threshold)
+ 
+        if hit:
+            triggered.append((sector, val))
+ 
+    if not triggered:
+        print(f"\n  本日はマクロ連動トリガーなし（全指標が閾値未満）")
+        print(f"  → 戦略A/B の候補を優先してください")
+        return
+ 
+    print(f"\n  {'─'*56}")
+    for sector, val in triggered:
+        sign  = "+" if val >= 0 else ""
+        label = sector["label"]
+        print(f"\n  🎯 {label}  ({sign}{val:.2f}%)")
+        print(f"  {'コード':<6} {'銘柄名':<18} {'株価帯':>10}  目安")
+        print(f"  {'─'*50}")
+ 
+        for code, name, price_range in sector["stocks"]:
+            caution = ""
+            if condition == "WEAK":
+                caution = " ⚠️少額"
+            print(f"  {code:<6} {name:<18} {price_range:>10}  +2%狙い{caution}")
+ 
+    print(f"\n  ⚠️  注意事項:")
+    print(f"  □ 寄り付き後の実際の値動きで追従を確認してからエントリー")
+    print(f"  □ 大型株は小型株より動きが鈍い場合あり（+1%で満足も可）")
+    print(f"  □ 損切りは寄り付きから-2〜-3%（小型株より引き締め）")
 
 
 def calc_stop_loss(buy_price, pct=-5.0):
@@ -425,6 +620,10 @@ def main():
                 print(f"  {icon:<10} {str(row['code']):<6} {str(row['name'])[:16]:<18} "
                       f"{drop_str:>8} {float(row['buy_price']):>7.0f}円 "
                       f"{stop:>7}円 {rb_score:>6}点  {reason}")
+                
+    # ── 4.5 戦略D: 大型株マクロ連動スキャン ──
+    macro = fetch_macro_indicators(usdjpy)
+    scan_strategy_d(macro, condition)
 
     # ── 5. 候補銘柄ログ保存 ──
     if candidate_rows:
@@ -486,3 +685,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
