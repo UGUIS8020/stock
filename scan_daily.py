@@ -370,25 +370,28 @@ def verify_scan_a(top20_codes, name_dict, df_today):
         t        = df_today[df_today["code4"] == code4]
 
         if not t.empty and t.iloc[0]["Open"] > 0:
-            t_row     = t.iloc[0]
-            open_p    = float(t_row["Open"])
-            close_p   = float(t_row["Close"])
-            rise      = round((close_p - open_p) / open_p * 100, 2)
-            rise_str  = f"{rise:>+.1f}%"
+            t_row    = t.iloc[0]
+            open_p   = float(t_row["Open"])
+            close_p  = float(t_row["Close"])
+            high_p   = float(t_row["High"])                          # ← 追加
+            rise     = round((close_p - open_p) / open_p * 100, 2)  # 終値ベース（実損益）
+            max_rise = round((high_p  - open_p) / open_p * 100, 2)  # ← 追加（高値ベース）
+            rise_str = f"{rise:>+.1f}% (高値:{max_rise:>+.1f}%)"    # ← 変更
         else:
-            open_p = close_p = rise = None
+            open_p = close_p = high_p = rise = max_rise = None
             rise_str = "  N/A"
 
+        # ── グレード判定を高値ベースに変更 ──────────────────
         if is_top20:
             status = "✅ S級(TOP20)"; grade = "S"; s_hit += 1
-        elif rise is not None and rise >= 5.0:
-            status = "✨ A級(+5%超)"; grade = "A"; a_hit += 1
-        elif rise is not None and rise >= 2.0:
-            status = "📈 B級(+2%超)"; grade = "B"; b_hit += 1
-        elif rise is not None and rise < 0:
-            status = "❌ 逆行";        grade = "FAIL"; down += 1
+        elif max_rise is not None and max_rise >= 5.0:
+            status = "✨ A級(高値+5%超)"; grade = "A"; a_hit += 1
+        elif max_rise is not None and max_rise >= 2.0:
+            status = "📈 B級(高値+2%超)"; grade = "B"; b_hit += 1
+        elif max_rise is not None and max_rise < 0:
+            status = "❌ 逆行";           grade = "FAIL"; down += 1
         else:
-            status = "➖ 横ばい";      grade = "FLAT"; miss += 1
+            status = "➖ 横ばい";         grade = "FLAT"; miss += 1
 
         df.loc[(df["scan_date"] == row["scan_date"]) &
                (df["code"] == row["code"]), "actual_top20"] = int(is_top20)
@@ -404,7 +407,9 @@ def verify_scan_a(top20_codes, name_dict, df_today):
             "morning_judgment": morning_judgments.get(code4, "UNKNOWN"),
             "open_price":       open_p,
             "close_price":      close_p,
-            "result_pct":       rise,
+            "high_price":       high_p,        # ← 追加
+            "result_pct":       rise,          # 終値ベース（実損益）
+            "max_rise_pct":     max_rise,      # ← 追加（高値ベース）
             "grade":            grade,
             "is_top20":         int(is_top20),
             "market_condition": row.get("market_condition", "UNKNOWN"),
@@ -413,15 +418,15 @@ def verify_scan_a(top20_codes, name_dict, df_today):
     total = len(unverified)
     success_rate = None
     if total > 0:
-        meaningful  = s_hit + a_hit + b_hit
+        meaningful   = s_hit + a_hit + b_hit
         success_rate = round(meaningful / total * 100, 1)
         print(f"\n  【集計】")
-        print(f"  ✅ S級(TOP20)  : {s_hit}件")
-        print(f"  ✨ A級(+5%超)  : {a_hit}件")
-        print(f"  📈 B級(+2%超)  : {b_hit}件")
-        print(f"  ➖ 横ばい      : {miss}件")
-        print(f"  ❌ 逆行        : {down}件")
-        print(f"  意味ある上昇(+2%以上): {meaningful}/{total}件 ({success_rate}%)")
+        print(f"  ✅ S級(TOP20)      : {s_hit}件")
+        print(f"  ✨ A級(高値+5%超)  : {a_hit}件")
+        print(f"  📈 B級(高値+2%超)  : {b_hit}件")
+        print(f"  ➖ 横ばい          : {miss}件")
+        print(f"  ❌ 逆行            : {down}件")
+        print(f"  利確チャンスあり(高値+2%以上): {meaningful}/{total}件 ({success_rate}%)")
 
     df.to_csv(SCAN_CSV, index=False, encoding="utf-8-sig")
 
