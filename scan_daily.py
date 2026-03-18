@@ -360,7 +360,16 @@ def verify_scan_a(top20_codes, name_dict, df_today):
     morning_judgments = {}
     if os.path.exists("out/candidates_log.csv"):
         cl = pd.read_csv("out/candidates_log.csv", encoding="utf-8-sig")
-        cl_prev = cl[cl["date"] == scan_date]
+
+        # scan_dateの翌営業日を計算（土日をスキップ）
+        next_date_ts = pd.Timestamp(scan_date) + pd.Timedelta(days=1)
+        if next_date_ts.weekday() == 5:    # 土曜 → 月曜
+            next_date_ts += pd.Timedelta(days=2)
+        elif next_date_ts.weekday() == 6:  # 日曜 → 月曜
+            next_date_ts += pd.Timedelta(days=1)
+        next_date = next_date_ts.strftime("%Y-%m-%d")
+
+        cl_prev = cl[cl["date"] == next_date]
         morning_judgments = dict(zip(cl_prev["code"].astype(str), cl_prev["judgment"]))
 
     for _, row in unverified.iterrows():
