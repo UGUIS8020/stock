@@ -471,6 +471,100 @@ def show_market_log_summary():
     print(f"{'='*60}")
 
 
+# ══════════════════════════════════════════════════════
+# 分足データ収集（scan_daily.py末尾に追加）
+# ══════════════════════════════════════════════════════
+
+INTRADAY_DIR = "out/intraday"
+
+# 戦略D固定銘柄
+STRATEGY_D_CODES = [
+    "5016",  # JX金属
+    "5713",  # 住友金属鉱山
+    "5706",  # 三井金属
+    "7203",  # トヨタ
+    "8031",  # 三井物産
+    "8035",  # 東京エレクトロン
+    "6857",  # アドバンテスト
+    "5020",  # ENEOS
+    "4063",  # 信越化学工業
+]
+
+def save_intraday(scan_a_codes, scan_b_codes):
+    """
+    候補銘柄と固定銘柄の1分足データを保存する。
+    yfinanceは直近7日分のみ取得可能なので毎日実行が必須。
+    """
+    import yfinance as yf
+    os.makedirs(INTRADAY_DIR, exist_ok=True)
+
+    # 保存対象をまとめる（重複除去）
+    all_codes = set(scan_a_codes) | set(scan_b_codes) | set(STRATEGY_D_CODES)
+
+    print(f"\n{'='*60}")
+    print(f"【分足データ収集】{len(all_codes)}銘柄")
+    print(f"{'='*60}")
+
+    saved = 0
+    skipped = 0
+
+    for code in sorted(all_codes):
+        save_path = f"{INTRADAY_DIR}/{code}_{TODAY}.csv"
+
+        # 既に保存済みならスキップ
+        if os.path.exists(save_path):
+            skipped += 1
+            continue
+
+        try:
+            ticker = yf.Ticker(f"{code}.T")
+            hist   = ticker.history(period="2d", interval="1m")
+
+            if hist.empty:
+                continue
+
+            hist = hist.reset_index()
+            hist.columns = [str(c) for c in hist.columns]
+
+            # datetime列を特定
+            dt_col = "Datetime" if "Datetime" in hist.columns else hist.columns[0]
+            hist[dt_col] = pd.to_datetime(hist[dt_col])
+
+            # タイムゾーン変換
+            if hist[dt_col].dt.tz is not None:
+                hist[dt_col] = hist[dt_col].dt.tz_convert("Asia/Tokyo")
+
+            # 当日分のみ抽出
+            hist["date_only"] = hist[dt_col].dt.strftime("%Y-%m-%d")
+            today_hist = hist[hist["date_only"] == TODAY].copy()
+
+            if today_hist.empty:
+                continue
+
+            today_hist["time"] = today_hist[dt_col].dt.strftime("%H:%M")
+
+            # 保存列を整理
+            save_df = today_hist.rename(columns={
+                dt_col: "datetime",
+                "Open":   "open",
+                "High":   "high",
+                "Low":    "low",
+                "Close":  "close",
+                "Volume": "volume",
+            })
+
+            cols = ["datetime", "time", "open", "high", "low", "close", "volume"]
+            cols = [c for c in cols if c in save_df.columns]
+            save_df[cols].to_csv(save_path, index=False, encoding="utf-8-sig")
+            saved += 1
+
+        except Exception as e:
+            print(f"  ⚠️ {code}: {e}")
+
+    print(f"  ✅ 保存: {saved}銘柄  スキップ(既存): {skipped}銘柄")
+    print(f"  📁 保存先: {INTRADAY_DIR}/")
+
+
 # ══════════════════════════════════════════════
 # メイン
 # ══════════════════════════════════════════════
@@ -553,6 +647,7 @@ def main():
             continue
         if today_row.empty:
             continue
+
         t = today_row.iloc[0]
         vol      = float(t["Volume"])
         turnover = float(t["turnover"])
@@ -562,17 +657,26 @@ def main():
         today_rise = float(t["today_rise"])
         close      = float(t["Close"])
 
-        results_a.append({"code": code4, "name": name, **s})
+        # 戦略A: 当日 -5%超の銘柄のみ
+        if today_rise > -5.0:
+            results_a.append({
+                "code": code4,
+                "name": name,
+                "today_rise": round(today_rise, 2),
+                "close": close,
+                **s
+            })
 
-        # ★ 変更: -5%以下に拡大、リバウンドスコアで絞り込み
+        # 戦略B: 当日 -5%以下の銘柄をリバウンド候補として抽出
         if today_rise <= -5.0:
             rb_score, rb_reasons = calc_rebound_score(code4)
             if rb_score >= 3:
                 results_b.append({
-                    "code": code4, "name": name,
+                    "code": code4,
+                    "name": name,
                     "today_rise": round(today_rise, 2),
                     "close": close,
-                    "rebound_score":  rb_score,
+                    "rebound_score": rb_score,
                     "rebound_reason": " / ".join(rb_reasons),
                     **s
                 })
@@ -688,7 +792,12 @@ def main():
 
     scan_strategy_c(df_today, name_dict, exclude_codes, mc)
 
-    print(f"\n✅ 完了")
+      # ── 分足データ収集 ──
+    scan_a_codes = [r["code"] for r in save_a]
+    scan_b_codes = [r["code"] for r in save_b] if results_b else []
+    save_intraday(scan_a_codes, scan_b_codes)
+
+    print(f"\n✅ 完了")    
 
 
 if __name__ == "__main__":
