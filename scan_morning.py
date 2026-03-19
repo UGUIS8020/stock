@@ -130,15 +130,19 @@ def fetch_us_market():
     return results
 
 
+# --- 設定 ---
+NIKKEI_TICKER = "NKD=F"  # CME日経先物
+
 def fetch_nikkei():
-    """日経平均の前日比(%)を取得（先物代用）"""
+    """CME先物を使用して、寄り付き前の地合いをより正確に判定"""
     try:
-        data = yf.Ticker(NIKKEI_TICKER).history(period="3d")
+        data = yf.Ticker(NIKKEI_TICKER).history(period="5d")
         if len(data) >= 2:
-            prev  = float(data["Close"].iloc[-2])
-            close = float(data["Close"].iloc[-1])
-            return {"close": close, "change": round((close - prev) / prev * 100, 2)}
-    except Exception:
+            prev = float(data["Close"].iloc[-2])
+            current = float(data["Close"].iloc[-1])
+            change_pct = round((current - prev) / prev * 100, 2)
+            return {"close": current, "change": change_pct}
+    except Exception as e:
         pass
     return None
 
@@ -611,10 +615,9 @@ def main():
             print(f"  ❓ {name:<12}: 取得失敗")
 
     if nikkei:
-        icon = "📈" if nikkei["change"] >= 0 else "📉"
-        print(f"  {icon} 日経225     : {nikkei['close']:>10,.2f}  ({nikkei['change']:>+.2f}%)")
+        print(f"  🌐 日経先物(CME): {nikkei['close']:>10,.0f}  ({nikkei['change']:>+.2f}%)")
     else:
-        print(f"  ❓ 日経225     : 取得失敗")
+        print(f"  ❓ 日経先物(CME): 取得失敗")
 
     if usdjpy:
         print(f"  💴 ドル円      : {usdjpy:>10.2f} 円")
