@@ -343,6 +343,53 @@ def verify_watchlist(df_today, name_dict):
         print(f"  累積: {len(verified)}件  +5%達成:{hit}件({hit/len(verified)*100:.1f}%)  平均:{avg:+.2f}%")
 
 
+def verify_strategy_c(df_today, name_dict):
+    """戦略C（PANIC日逆行高銘柄）の翌日成績を検証する"""
+    if not os.path.exists(STRATEGY_C_CSV):
+        return
+    sc = pd.read_csv(STRATEGY_C_CSV, encoding="utf-8-sig")
+
+    # 翌日検証列がなければ追加
+    for col in ["next_open", "next_close", "next_rise"]:
+        if col not in sc.columns:
+            sc[col] = None
+
+    # 直近日付の未検証データを対象
+    latest_date = sc["date"].max()
+    unverified  = sc[(sc["date"] == latest_date) & sc["next_rise"].isna()]
+    if unverified.empty:
+        return
+
+    print(f"\n=== 📋 【戦略C】前日PANIC逆行高銘柄の翌日検証 ===")
+    updated = 0
+
+    for idx, row in unverified.iterrows():
+        code4 = str(row["code"])
+        t     = df_today[df_today["code4"] == code4]
+        if t.empty or t.iloc[0]["Open"] <= 0:
+            continue
+        t      = t.iloc[0]
+        rise   = round((t["Close"] - t["Open"]) / t["Open"] * 100, 2)
+        sc.at[idx, "next_rise"]  = rise
+        sc.at[idx, "next_open"]  = t["Open"]
+        sc.at[idx, "next_close"] = t["Close"]
+
+        status = "✅" if rise >= 5 else ("⚠️" if rise >= 0 else "❌")
+        name   = name_dict.get(code4, row["name"])
+        print(f"  {status} [{code4}]{name}  "
+              f"寄付き:{t['Open']:.0f}円→終値:{t['Close']:.0f}円  {rise:+.1f}%")
+        updated += 1
+
+    if updated > 0:
+        sc.to_csv(STRATEGY_C_CSV, index=False, encoding="utf-8-sig")
+        verified = sc[sc["next_rise"].notna()]
+        hit = (verified["next_rise"] >= 5).sum()
+        avg = verified["next_rise"].mean()
+        print(f"  累積: {len(verified)}件  "
+              f"+5%達成:{hit}件({hit/len(verified)*100:.1f}%)  "
+              f"平均:{avg:+.2f}%")
+
+
 def verify_scan_a(top20_codes, name_dict, df_today):
     if not os.path.exists(SCAN_CSV):
         return None
@@ -618,6 +665,7 @@ def main():
     condition = print_market_condition(mc)
 
     verify_watchlist(df_today, name_dict)
+    verify_strategy_c(df_today, name_dict)
     success_rate = verify_scan_a(top20_codes, name_dict, df_today)
 
     save_market_log(mc, success_rate)
