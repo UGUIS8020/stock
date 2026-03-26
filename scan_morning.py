@@ -279,6 +279,7 @@ def predict_market(us_data, nikkei, usdjpy):
         breakdown.append("  ドル円       : 取得失敗  → 0点")
 
     # ── Layer 3: 日経先物 ─────────────────────────── (0〜3点)
+    nk_chg = 0.0  # default（取得失敗時はPANIC判定に使わない）
     if nikkei:
         nk_chg = nikkei["change"]
         if nk_chg >= 1.0:
@@ -298,6 +299,7 @@ def predict_market(us_data, nikkei, usdjpy):
         breakdown.append("  日経先物     : 取得失敗  → 0点")
 
     # ── Layer 4: 米指数のばらつきボーナス ────────── (0〜2点)
+    up_count = 0  # default（STRONG判定に使用）
     if len(us_changes) == 3:
         up_count = sum(1 for c in us_changes if c > 0)
         if up_count == 3:
@@ -314,15 +316,21 @@ def predict_market(us_data, nikkei, usdjpy):
         breakdown.append("  指数一致度   : データ不足  → 0点")
 
      # ── 総合判定 ──────────────────────────────────────
-    if score >= 7:
+    # STRONG: 米3指数のうち2つ以上上昇していることも要求（過剰判定防止）
+    if score >= 7 and up_count >= 2:
         condition         = "STRONG"
         strategy_a_thr    = 7.5
         stop_loss_pct     = -5.0
+    # PANICも日経先物が実際に急落していることを確認（過剰判定防止）
+    elif score <= 1 and nk_chg <= -1.0:
+        condition         = "PANIC"
+        strategy_a_thr    = 99.0
+        stop_loss_pct     = -3.0
     elif score >= 4:
         condition         = "NORMAL"
         strategy_a_thr    = 7.5
         stop_loss_pct     = -5.0
-    elif score >= 3:          # ← 1 を 3 に変更
+    elif score >= 2:
         condition         = "WEAK"
         strategy_a_thr    = 8.0
         stop_loss_pct     = -4.0
@@ -343,15 +351,23 @@ def predict_market(us_data, nikkei, usdjpy):
 # ══════════════════════════════════════════════════════
 def judge_entry_a(row, condition, strategy_a_thr):
     score = float(row["score"])
+    ratio = float(row.get("ratio", 0))
 
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 全見送り"
 
+    # 過熱銘柄（高スコア＋出来高急増）は地合いSTRONG時のみBUY
+    # NORMAL/WEAK では過熱銘柄が逆行しやすいためCAUTION維持
+    if score >= 9.0:
+        if ratio >= 12.0:
+            if condition == "STRONG":
+                return "BUY", "高スコア過熱 + 地合いSTRONG - 強い流れに乗る"
+            else:
+                return "CAUTION", "高スコア過熱 + 地合い非STRONG - 逆行リスクあり"
+        return "BUY", "高スコア優良 + 地合い良好"
+
     if score < strategy_a_thr:
         return "PASS", f"地合い{condition} + スコア不十分(閾値{strategy_a_thr})"
-
-    if score >= 9.0:
-        return "CAUTION", "スコア過熱(9.0↑) - 逆行リスクあり"
 
     if condition == "WEAK":
         return "CAUTION", "地合い軟調 - スコア高いが慎重に"
@@ -363,26 +379,26 @@ def judge_entry_b(row, condition, stop_loss_pct):
     drop      = float(row["today_rise"])
     rb_score  = int(row.get("rebound_score", 0))
     rb_reason = str(row.get("rebound_reason", "指標なし"))
+    rsi       = float(row.get("rsi", 50))  # RSIがなければ中立値で無効化
 
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 逆張り非推奨（続落リスク）"
 
-    if condition == "WEAK":
-        if rb_score >= 7:
-            return "CAUTION", f"地合い軟調だがリバウンド高({rb_score}点) 少額のみ / {rb_reason}"
-        return "PASS", f"地合い軟調 + リバウンドスコア{rb_score}点 - 見送り"
-
+    # 暴落しすぎ銘柄は地合い問わず除外（続落リスク高）
     if drop <= -20:
-        if rb_score >= 7:
-            return "CAUTION", f"暴落-20%超 材料確認必須({rb_score}点) / {rb_reason}"
-        return "PASS", f"暴落-20%超 + リバウンドスコア{rb_score}点 - 見送り"
+        return "PASS", f"暴落{drop:.1f}% + 続落リスク高 - 見送り"
 
-    if rb_score >= 7:
-        return "BUY",     f"リバウンド期待大({rb_score}点) / {rb_reason}"
-    elif rb_score >= 5:
+    # RB高得点でもRSI極端なら落ちナイフ注意
+    if rb_score >= 8:
+        if rsi <= 15:
+            return "CAUTION", f"RB高得点({rb_score}点)だがRSI極端({rsi:.0f}) - ナイフ落下注意"
+        return "BUY", f"リバウンド期待大({rb_score}点) / {rb_reason}"
+
+    # 中程度は要注意止まり（買いにしない）
+    if rb_score >= 6:
         return "CAUTION", f"リバウンド中程度({rb_score}点) / {rb_reason}"
-    else:
-        return "PASS",    f"リバウンドスコア低({rb_score}点) - 見送り"
+
+    return "PASS", f"リバウンドスコア低({rb_score}点) - 見送り"
     
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
