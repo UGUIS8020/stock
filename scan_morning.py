@@ -34,7 +34,6 @@ US_TICKERS = {
     "ナスダック": "^IXIC",
     "S&P500":   "^GSPC",
 }
-NIKKEI_TICKER  = "^N225"
 USD_JPY_TICKER = "USDJPY=X"
 
 COPPER_TICKER   = "HG=F"
@@ -699,6 +698,7 @@ def main():
             judgment, reason = judge_entry_a(row, condition, strategy_a_thr)
             candidate_rows.append({
                 "date": TODAY, "strategy": "A",
+                "condition": condition,
                 "code": row["code"], "name": row["name"],
                 "score": row["score"], "ratio": row["ratio"],
                 "judgment": judgment, "reason": reason,
@@ -740,6 +740,7 @@ def main():
                 judgment, reason = judge_entry_b(row, condition, stop_loss_pct)
                 candidate_rows.append({
                     "date": TODAY, "strategy": "B",
+                    "condition": condition,
                     "code": row["code"], "name": row["name"],
                     "score": row["score"], "ratio": row.get("today_rise"),
                     "judgment": judgment, "reason": reason,

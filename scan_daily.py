@@ -33,6 +33,8 @@ PANIC_NIKKEI_THRESHOLD  = -2.0
 PANIC_AD_THRESHOLD      = 0.20
 WEAK_NIKKEI_THRESHOLD   = -1.0
 WEAK_AD_THRESHOLD       = 0.35
+STRONG_NIKKEI_THRESHOLD = 0.5
+STRONG_AD_THRESHOLD     = 0.60
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs("out", exist_ok=True)
@@ -70,10 +72,17 @@ def judge_market_condition(df_today):
         ad_ratio <= WEAK_AD_THRESHOLD
     )
 
+    is_strong = (
+        (nikkei_change is not None and nikkei_change >= STRONG_NIKKEI_THRESHOLD) and
+        ad_ratio >= STRONG_AD_THRESHOLD
+    )
+
     if is_panic:
         condition = "PANIC"
     elif is_weak:
         condition = "WEAK"
+    elif is_strong:
+        condition = "STRONG"
     else:
         condition = "NORMAL"
 
@@ -111,6 +120,11 @@ def print_market_condition(mc):
         print(f"")
         print(f"  ⚠️  戦略A は見送り推奨")
         print(f"  ✅  戦略B は慎重に検討（損切り厳守）")
+    elif cond == "STRONG":
+        print(f"  判定       : 🚀 STRONG（強気相場）")
+        print(f"")
+        print(f"  🚀  戦略A 積極エントリー推奨")
+        print(f"  ✅  戦略B も通常通り検討可")
     else:
         print(f"  判定       : ✅ NORMAL（通常相場）")
     print(f"{'='*60}")
@@ -509,7 +523,7 @@ def show_market_log_summary():
     print(f"\n{'='*60}")
     print(f"【地合い×戦略A 成功率 累積分析】（{len(df)}日分）")
     print(f"{'='*60}")
-    for cond in ["NORMAL", "WEAK", "PANIC"]:
+    for cond in ["STRONG", "NORMAL", "WEAK", "PANIC"]:
         sub = df[df["condition"] == cond]
         if sub.empty:
             continue
@@ -840,7 +854,7 @@ def main():
 
     scan_strategy_c(df_today, name_dict, exclude_codes, mc)
 
-      # ── 分足データ収集 ──
+    # ── 分足データ収集 ──
     scan_a_codes = [r["code"] for r in save_a]
     scan_b_codes = [r["code"] for r in save_b] if results_b else []
     save_intraday(scan_a_codes, scan_b_codes)
