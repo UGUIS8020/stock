@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls c:/Users/Owner/Desktop/website/stock/out/*.csv)",
+      "Bash(python -c \"import sys; data=sys.stdin.buffer.read\\(\\); print\\(data.decode\\(''''utf-8'''', errors=''''replace''''\\)\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/project_scan_system.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
+      "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/project_performance_analysis.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
+      "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/project_code_changes.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
+      "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/MEMORY.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
+      "Bash(python analyze_multiday.py)"
+    ]
+  }
+}

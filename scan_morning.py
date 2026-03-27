@@ -130,7 +130,9 @@ def fetch_us_market():
 
 
 # --- 設定 ---
-NIKKEI_TICKER = "NKD=F"  # CME日経先物
+NIKKEI_TICKER     = "NKD=F"  # CME日経先物（シカゴ）
+SGX_NIKKEI_TICKER = "NK=F"   # SGX日経先物（シンガポール・東京開場直前まで動く）
+MARKET_LOG_CSV    = "out/market_log.csv"
 
 def fetch_nikkei():
     """CME先物を使用して、寄り付き前の地合いをより正確に判定"""
@@ -141,7 +143,43 @@ def fetch_nikkei():
             current = float(data["Close"].iloc[-1])
             change_pct = round((current - prev) / prev * 100, 2)
             return {"close": current, "change": change_pct}
-    except Exception as e:
+    except Exception:
+        pass
+    return None
+
+
+def fetch_sgx():
+    """SGX日経先物を取得。
+    SGXはシンガポール取引所で東京開場直前まで動くため、
+    CME先物より直近の市場動向を反映している。
+    3/27の誤判定例: CME -2.08%（8:30取得）→ 実際は東京開場前に急反転していた。
+    """
+    try:
+        data = yf.Ticker(SGX_NIKKEI_TICKER).history(period="5d")
+        if len(data) >= 2:
+            prev    = float(data["Close"].iloc[-2])
+            current = float(data["Close"].iloc[-1])
+            change_pct = round((current - prev) / prev * 100, 2)
+            return {"close": current, "change": change_pct}
+    except Exception:
+        pass
+    return None
+
+
+def get_prev_day_condition():
+    """market_log.csvから前日（最新）の実績地合いを取得する。
+    WEAK翌日はリバウンドが起きやすいパターンに対応するため使用。
+    （3/12→3/13、3/17→3/18、3/26→3/27 いずれもWEAK翌日がNORMALに回復）
+    """
+    try:
+        if os.path.exists(MARKET_LOG_CSV):
+            df = pd.read_csv(MARKET_LOG_CSV, encoding="utf-8-sig")
+            if not df.empty:
+                # 本日以外の最新行（= 前日）を取得
+                df_prev = df[df["date"] < TODAY].sort_values("date")
+                if not df_prev.empty:
+                    return str(df_prev.iloc[-1]["condition"])
+    except Exception:
         pass
     return None
 
@@ -220,18 +258,19 @@ def fetch_macro_indicators(usdjpy_current):
 # ══════════════════════════════════════════════════════
 # 地合い予測（多層スコアリング）
 # ══════════════════════════════════════════════════════
-def predict_market(us_data, nikkei, usdjpy):
+def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None):
     """
-    4つの独立したシグナルをスコア化して地合いを判定する。
+    5つの独立したシグナルをスコア化して地合いを判定する。
 
-    満点構成（最大10点）
+    満点構成（最大11点）
     ─────────────────────────────────────────
     レイヤー1: 米3指数平均        0〜3点  (weight: 大)
     レイヤー2: ドル円             0〜2点  (weight: 中)
-    レイヤー3: 日経先物           0〜3点  (weight: 大)
+    レイヤー3: 日経先物           0〜3点  (SGX優先・CMEフォールバック)
     レイヤー4: 米指数のばらつき    0〜2点  (spread bonus)
+    レイヤー5: 前日WEAK補正        0〜1点  (リバウンドパターン対応)
     ─────────────────────────────────────────
-    合計 8〜10点 → STRONG
+    合計 8〜11点 → STRONG
          5〜7点  → NORMAL
          3〜4点  → WEAK
          0〜2点  → PANIC
@@ -277,10 +316,14 @@ def predict_market(us_data, nikkei, usdjpy):
     else:
         breakdown.append("  ドル円       : 取得失敗  → 0点")
 
-    # ── Layer 3: 日経先物 ─────────────────────────── (0〜3点)
+    # ── Layer 3: 日経先物（SGX優先・CMEフォールバック）──── (0〜3点)
+    # SGX日経先物は東京開場直前まで動くため、CMEより直近の動きを反映する。
+    # 3/27誤判定の教訓: CME -2.08%（8:30時点）が東京開場前に急反転 → SGXで検知可能
     nk_chg = 0.0  # default（取得失敗時はPANIC判定に使わない）
-    if nikkei:
-        nk_chg = nikkei["change"]
+    nk_data   = sgx if sgx is not None else nikkei
+    nk_source = "SGX先物" if sgx is not None else "CME先物"
+    if nk_data:
+        nk_chg = nk_data["change"]
         if nk_chg >= 1.0:
             pts = 3; label = "強い上昇"
         elif nk_chg >= 0.0:
@@ -293,7 +336,12 @@ def predict_market(us_data, nikkei, usdjpy):
             pts = -1; label = "急落"
         score += pts
         details["nikkei_change"] = nk_chg
-        breakdown.append(f"  日経先物     : {nk_chg:>+.2f}%  → {pts:>+d}点 ({label})")
+        breakdown.append(f"  {nk_source:<10}: {nk_chg:>+.2f}%  → {pts:>+d}点 ({label})")
+        # CMEとSGXが両方取得できた場合、乖離があれば参考表示
+        if sgx is not None and nikkei is not None:
+            cme_chg = nikkei["change"]
+            if abs(sgx["change"] - cme_chg) >= 0.5:
+                breakdown.append(f"  ※CME先物    : {cme_chg:>+.2f}%（SGXと{sgx['change']-cme_chg:>+.2f}%乖離）")
     else:
         breakdown.append("  日経先物     : 取得失敗  → 0点")
 
@@ -313,6 +361,17 @@ def predict_market(us_data, nikkei, usdjpy):
         breakdown.append(f"  指数一致度   : {up_count}/3 上昇  → {pts:>+d}点 ({label})")
     else:
         breakdown.append("  指数一致度   : データ不足  → 0点")
+
+    # ── Layer 5: 前日WEAK/PANICリバウンドボーナス ─── (0〜1点)
+    # [検証] WEAK翌日はリバウンドが起きやすいパターンが確認されている
+    # 3/12 WEAK→3/13 NORMAL(61.3%)、3/17 WEAK→3/18 NORMAL(75%)、3/26 WEAK→3/27 NORMAL(65.9%)
+    # 売られすぎの翌朝は反発需要が入りやすく、CME先物の下落が過大評価されやすい
+    if prev_condition in ("WEAK", "PANIC"):
+        pts = 1
+        score += pts
+        breakdown.append(f"  前日地合い補正: {prev_condition}→リバウンド期待  → {pts:>+d}点")
+    else:
+        breakdown.append(f"  前日地合い補正: {prev_condition or '取得失敗'}  → +0点")
 
      # ── 総合判定 ──────────────────────────────────────
     # STRONG: 米3指数のうち2つ以上上昇していることも要求（過剰判定防止）
@@ -355,6 +414,7 @@ def judge_entry_a(row, condition, strategy_a_thr):
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 全見送り"
 
+    # [検証] スコア9.0〜が利確率46.2%（最高）
     # 過熱銘柄（高スコア＋出来高急増）は地合いSTRONG時のみBUY
     # NORMAL/WEAK では過熱銘柄が逆行しやすいためCAUTION維持
     if score >= 9.0:
@@ -365,6 +425,10 @@ def judge_entry_a(row, condition, strategy_a_thr):
                 return "CAUTION", "高スコア過熱 + 地合い非STRONG - 逆行リスクあり"
         return "BUY", "高スコア優良 + 地合い良好"
 
+    # [検証] スコア8.0〜8.5が利確率25%（全帯域中最低）
+    # 要因不明だが「前日からすでに出来高ピーク」の銘柄が多い可能性あり
+    # データ蓄積が2週間と少ないため閾値変更は保留。1ヶ月後に再評価予定。
+
     if score < strategy_a_thr:
         return "PASS", f"地合い{condition} + スコア不十分(閾値{strategy_a_thr})"
 
@@ -374,12 +438,13 @@ def judge_entry_a(row, condition, strategy_a_thr):
     return "BUY", "スコア優良 + 地合い良好"
 
 
-def judge_entry_b(row, condition, stop_loss_pct):
+def judge_entry_b(row, condition):
     drop      = float(row["today_rise"])
     rb_score  = int(row.get("rebound_score", 0))
     rb_reason = str(row.get("rebound_reason", "指標なし"))
-    rsi       = float(row.get("rsi", 50))  # RSIがなければ中立値で無効化
 
+    # PANIC日は全見送り
+    # [検証] PANIC日 avg -0.84%、+5%達成率4.0%（211件中最悪）
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 逆張り非推奨（続落リスク）"
 
@@ -387,15 +452,22 @@ def judge_entry_b(row, condition, stop_loss_pct):
     if drop <= -20:
         return "PASS", f"暴落{drop:.1f}% + 続落リスク高 - 見送り"
 
-    # RB高得点でもRSI極端なら落ちナイフ注意
-    if rb_score >= 8:
-        if rsi <= 15:
-            return "CAUTION", f"RB高得点({rb_score}点)だがRSI極端({rsi:.0f}) - ナイフ落下注意"
-        return "BUY", f"リバウンド期待大({rb_score}点) / {rb_reason}"
+    # [検証] RBスコア7以上は「落ちナイフ」サイン ─ 見送り
+    # RSI極端値 + 出来高急増 + MA25大幅乖離が重なるほど
+    # 売りが一巡せず翌日も続落するパターンが多い
+    # （RB7: +5%達成0%/17件 avg -0.31%、RB8: +5%達成0%/12件 avg -2.11%）
+    # ※ 高得点 = リバウンド期待大 という直感は実績上は逆
+    if rb_score >= 7:
+        return "PASS", f"落ちナイフ警戒({rb_score}点) - 指標が極端すぎ続落リスク高"
 
-    # 中程度は要注意止まり（買いにしない）
-    if rb_score >= 6:
-        return "CAUTION", f"リバウンド中程度({rb_score}点) / {rb_reason}"
+    # [検証] WEAK日が戦略Bに最も有利（avg +2.17%、+5%達成率15.7%）
+    # 「地合いは軟調だが1銘柄だけ前日大幅安」という局面が最もリバウンド確率が高い
+    # RBスコア3〜6の「適度な売られすぎ」が買いの甘味ゾーン
+    if rb_score >= 3:
+        if condition == "WEAK":
+            return "BUY", f"地合い軟調リバウンド狙い({rb_score}点) / {rb_reason}"
+        # NORMAL日は利確チャンスはあるが期待値は低め（avg -0.2%）なので慎重に
+        return "CAUTION", f"リバウンド候補({rb_score}点) / {rb_reason}"
 
     return "PASS", f"リバウンドスコア低({rb_score}点) - 見送り"
     
@@ -615,9 +687,11 @@ def main():
 
     # ── 1. データ取得 ──
     print("  海外市場データ取得中...")
-    us_data = fetch_us_market()
-    nikkei  = fetch_nikkei()
-    usdjpy  = fetch_usdjpy()
+    us_data        = fetch_us_market()
+    nikkei         = fetch_nikkei()
+    sgx            = fetch_sgx()
+    usdjpy         = fetch_usdjpy()
+    prev_condition = get_prev_day_condition()
 
     print(f"\n{'='*60}")
     print(f"【海外市場】（前日終値ベース）")
@@ -629,6 +703,11 @@ def main():
         else:
             print(f"  ❓ {name:<12}: 取得失敗")
 
+    # SGXとCMEの両方を表示（乖離がある場合に視覚的に確認できる）
+    if sgx:
+        print(f"  🌐 日経先物(SGX): {sgx['close']:>10,.0f}  ({sgx['change']:>+.2f}%)  ← 直近値")
+    else:
+        print(f"  ❓ 日経先物(SGX): 取得失敗")
     if nikkei:
         print(f"  🌐 日経先物(CME): {nikkei['close']:>10,.0f}  ({nikkei['change']:>+.2f}%)")
     else:
@@ -637,8 +716,15 @@ def main():
     if usdjpy:
         print(f"  💴 ドル円      : {usdjpy:>10.2f} 円")
 
+    if prev_condition:
+        print(f"  📅 前日地合い  : {prev_condition}")
+    else:
+        print(f"  📅 前日地合い  : 取得失敗（market_log.csvなし）")
+
     # ── 2. 地合い予測（多層スコアリング）──
-    condition, score, breakdown, market_details = predict_market(us_data, nikkei, usdjpy)
+    condition, score, breakdown, market_details = predict_market(
+        us_data, nikkei, usdjpy, sgx=sgx, prev_condition=prev_condition
+    )
     strategy_a_thr = market_details["strategy_a_thr"]
     stop_loss_pct  = market_details["stop_loss_pct"]
     cond_icon      = condition_icon(condition)
@@ -737,7 +823,7 @@ def main():
             print("  " + "─" * 85)
 
             for _, row in candidates_b.iterrows():
-                judgment, reason = judge_entry_b(row, condition, stop_loss_pct)
+                judgment, reason = judge_entry_b(row, condition)
                 candidate_rows.append({
                     "date": TODAY, "strategy": "B",
                     "condition": condition,
@@ -827,6 +913,24 @@ def main():
     print(f"\n✅ 朝スキャン完了（ログ: {MORNING_LOG_CSV}）")
     print(f"   候補銘柄ログ: {CANDIDATES_LOG_CSV}（{len(candidate_rows)}件記録）")
     print(f"{'='*60}\n")
+
+    # BUY/CAUTION候補がある場合のみ、自動でAI総合レポートを起動
+    has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
+    if has_buy and condition != "PANIC":
+        try:
+            import ai_filter
+            ai_filter.main()
+        except Exception as e:
+            print(f"⚠️  AI分析でエラーが発生しました: {e}")
+            print("   → python ai_filter.py を手動で実行してください")
+
+        # ai_filter完了後、9:00〜9:12のリアルタイム監視を起動
+        try:
+            import market_watch
+            market_watch.main()
+        except Exception as e:
+            print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
+            print("   → python market_watch.py を手動で実行してください")
 
 
 if __name__ == "__main__":

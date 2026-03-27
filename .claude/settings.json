@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; print\\(sys.stdin.buffer.read\\(\\).decode\\(''''utf-8'''', errors=''''replace''''\\)\\)\")",
+      "Bash(python -W ignore analyze_multiday.py)",
+      "WebSearch"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Owner\\.claude\\projects\\c--Users-Owner-Desktop-website-stock\\memory"
+    ]
+  }
+}
