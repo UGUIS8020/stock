@@ -8,7 +8,13 @@
       "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/project_performance_analysis.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
       "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/project_code_changes.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
       "Bash(cp \"C:/Users/Owner/.claude/projects/c--Users-Owner-Desktop-website-stock/memory/MEMORY.md\" \"c:/Users/Owner/Desktop/website/stock/docs/\")",
-      "Bash(python analyze_multiday.py)"
+      "Bash(python analyze_multiday.py)",
+      "Bash(python simulate_b.py)",
+      "Bash(python -c \"import scan_morning; import ai_filter; print\\(''OK''\\)\")",
+      "Bash(python simulate_panic_close.py)",
+      "Bash(python simulate_panic_tp.py)",
+      "Bash(python simulate_r_close.py)",
+      "Bash(python -c \"import simulate_r_close\")"
     ]
   }
 }

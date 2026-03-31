@@ -184,6 +184,93 @@ def get_prev_day_condition():
     return None
 
 
+def fetch_prev_day_breadth():
+    """
+    前日の日本市場騰落データをキャッシュから計算する（Layer 6用）。
+
+    シミュレーション検証結果（2025-04〜2026-03）:
+      出来高加重平均変化(vw_change)が翌日パフォーマンスと最も相関が高かった
+      → vw_change >= +1.0% かつ ad_ratio >= 0.60 の日がSTRONG判定補強に有効
+
+    戻り値:
+      {
+        "ad_ratio":   float,   # 騰落比（値上がり/全銘柄）
+        "vw_change":  float,   # 出来高加重平均騰落(%)
+        "top20":      float,   # 上位20%平均騰落(%)
+        "nk_est":     float,   # 全銘柄中央値騰落(%)
+        "score":      int,     # 0〜2点
+        "summary":    str,     # 表示用テキスト
+      }
+    """
+    import glob
+    import numpy as np
+
+    CACHE_DIR = "out/cache"
+    cache_files = glob.glob(f"{CACHE_DIR}/*.csv")
+    if not cache_files:
+        return None
+
+    changes, volumes = [], []
+    for f in cache_files:
+        try:
+            df = pd.read_csv(f, usecols=["Date", "Close", "Volume"])
+            df["Close"]  = pd.to_numeric(df["Close"],  errors="coerce")
+            df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+            df = df.dropna().sort_values("Date")
+            if len(df) < 2:
+                continue
+            prev_c = float(df["Close"].iloc[-2])
+            last_c = float(df["Close"].iloc[-1])
+            last_v = float(df["Volume"].iloc[-1])
+            if prev_c > 0 and last_v > 0:
+                chg = (last_c - prev_c) / prev_c * 100
+                changes.append(chg)
+                volumes.append(last_v)
+        except Exception:
+            continue
+
+    if len(changes) < 100:
+        return None
+
+    changes = np.array(changes)
+    volumes = np.array(volumes)
+
+    up       = (changes > 0).sum()
+    total    = len(changes)
+    ad_ratio = up / total
+    nk_est   = float(np.median(changes))
+    top20    = float(np.percentile(changes, 80))
+    vw_total = volumes.sum()
+    vw_change = float((changes * volumes).sum() / vw_total) if vw_total > 0 else nk_est
+
+    # スコア採点（0〜2点）
+    # シミュレーション: composite score の ad_ratio・vw_change・top20 成分に対応
+    score = 0
+    if ad_ratio >= 0.60 and vw_change >= 1.0:
+        score = 2
+    elif ad_ratio >= 0.55 or vw_change >= 0.3:
+        score = 1
+
+    breadth_label = (
+        "強い（全面高）"   if score == 2 else
+        "普通"             if score == 1 else
+        "弱い（全面安寄り）"
+    )
+
+    return {
+        "ad_ratio":  round(ad_ratio, 4),
+        "vw_change": round(vw_change, 2),
+        "top20":     round(top20, 2),
+        "nk_est":    round(nk_est, 2),
+        "score":     score,
+        "summary":   (
+            f"騰落比{ad_ratio*100:.1f}% / "
+            f"出来高加重{vw_change:+.2f}% / "
+            f"上位20%均{top20:+.2f}%  → {score}点（{breadth_label}）"
+        ),
+    }
+
+
 def fetch_usdjpy():
     """ドル円レートを取得"""
     try:
@@ -258,22 +345,29 @@ def fetch_macro_indicators(usdjpy_current):
 # ══════════════════════════════════════════════════════
 # 地合い予測（多層スコアリング）
 # ══════════════════════════════════════════════════════
-def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None):
+def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_breadth=None):
     """
-    5つの独立したシグナルをスコア化して地合いを判定する。
+    6つの独立したシグナルをスコア化して地合いを判定する。
 
-    満点構成（最大11点）
+    満点構成（最大13点）
     ─────────────────────────────────────────
     レイヤー1: 米3指数平均        0〜3点  (weight: 大)
     レイヤー2: ドル円             0〜2点  (weight: 中)
     レイヤー3: 日経先物           0〜3点  (SGX優先・CMEフォールバック)
     レイヤー4: 米指数のばらつき    0〜2点  (spread bonus)
     レイヤー5: 前日WEAK補正        0〜1点  (リバウンドパターン対応)
+    レイヤー6: 前日日本市場騰落    0〜2点  ★新規追加
     ─────────────────────────────────────────
-    合計 8〜11点 → STRONG
-         5〜7点  → NORMAL
+    合計 9〜13点 → STRONG  ※閾値引き上げ（旧7→新8）
+         5〜8点  → NORMAL
          3〜4点  → WEAK
          0〜2点  → PANIC
+
+    [シミュレーション根拠]
+    2025-04〜2026-03の1年間・4432銘柄で検証。
+    前日の出来高加重平均変化(vw_change)が翌日パフォーマンスと最も相関が高く、
+    複合スコア>=8の日は勝率54.5%・日平均+0.170%・Sharpe3.21を達成。
+    旧STRONGは勝率51.4%・日平均-0.057%と非採算だった。
     """
     score     = 0
     details   = {}
@@ -373,9 +467,21 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None):
     else:
         breakdown.append(f"  前日地合い補正: {prev_condition or '取得失敗'}  → +0点")
 
-     # ── 総合判定 ──────────────────────────────────────
-    # STRONG: 米3指数のうち2つ以上上昇していることも要求（過剰判定防止）
-    if score >= 7 and up_count >= 2:
+    # ── Layer 6: 前日日本市場騰落（キャッシュから計算）─── (0〜2点)
+    # [シミュレーション根拠] vw_change(出来高加重平均騰落)が翌日パフォーマンスと
+    # 最も相関が高い指標（corr=+0.071）。ad_ratio>=0.60 & vw>=1.0% の組み合わせで
+    # 複合スコア>=8 → 勝率54.5%・日平均+0.170%・Sharpe3.21（検証期間2025-04〜2026-03）
+    if prev_breadth is not None:
+        pts = prev_breadth["score"]
+        score += pts
+        breakdown.append(f"  前日市場騰落  : {prev_breadth['summary']}  → {pts:>+d}点")
+    else:
+        breakdown.append("  前日市場騰落  : キャッシュ未取得  → +0点")
+
+    # ── 総合判定 ──────────────────────────────────────
+    # STRONG: 閾値を7→8に引き上げ（シミュレーションで旧7は日平均-0.057%、新8は+0.170%）
+    # 米3指数のうち2つ以上上昇していることも要求（過剰判定防止）
+    if score >= 8 and up_count >= 2:
         condition         = "STRONG"
         strategy_a_thr    = 7.5
         stop_loss_pct     = -5.0
@@ -408,34 +514,64 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None):
 # 候補銘柄の買い判定
 # ══════════════════════════════════════════════════════
 def judge_entry_a(row, condition, strategy_a_thr):
-    score = float(row["score"])
-    ratio = float(row.get("ratio", 0))
+    score      = float(row["score"])
+    ratio      = float(row.get("ratio", 0))
+    today_rise = float(row.get("today_rise", 0))
 
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 全見送り"
 
-    # [検証] スコア9.0〜が利確率46.2%（最高）
-    # 過熱銘柄（高スコア＋出来高急増）は地合いSTRONG時のみBUY
-    # NORMAL/WEAK では過熱銘柄が逆行しやすいためCAUTION維持
+    # [検証] スコア9.0〜: TP+3%到達率は高いがNORMAL/WEAK日は勝率37%・平均-0.24%と損失
+    # （simulate_precise.py: NORMAL日 score9+ 489件 WR37.2% avg-0.237%）
+    # STRONG日のみBUY、その他はCAUTIONに統一。
     if score >= 9.0:
+        if condition == "STRONG":
+            return "BUY", "高スコア + 地合いSTRONG - 強い流れに乗る"
         if ratio >= 12.0:
-            if condition == "STRONG":
-                return "BUY", "高スコア過熱 + 地合いSTRONG - 強い流れに乗る"
-            else:
-                return "CAUTION", "高スコア過熱 + 地合い非STRONG - 逆行リスクあり"
-        return "BUY", "高スコア優良 + 地合い良好"
+            return "CAUTION", "高スコア過熱 + 地合い非STRONG - 逆行リスクあり（出尽くし）"
+        return "CAUTION", "高スコア + 地合い非STRONG - NORMAL/WEAK日は平均-0.24%のため見送り"
 
-    # [検証] スコア8.0〜8.5が利確率25%（全帯域中最低）
-    # 要因不明だが「前日からすでに出来高ピーク」の銘柄が多い可能性あり
-    # データ蓄積が2週間と少ないため閾値変更は保留。1ヶ月後に再評価予定。
+    # ── STRONG日専用判定 ─────────────────────────────────
+    # [sweep.py パラメータスイープ検証 2025-04〜2026-03]
+    # 最優秀条件: score5〜7 / ratio<3倍 / today_rise<2% / TP+3% / SL-1% / top3
+    #   訓練Sharpe5.24 / 検証Sharpe4.21 / 年率+10.8% / DD-1.6%（アウトオブサンプル確認済み）
+    # 除外条件: score<5 → 初動前で不安定
+    #           score>=7 → 出尽くし（出来高ピーク過ぎ）
+    #           ratio>=3倍 → 急増しすぎ（過熱）
+    #           today_rise>=2% → 前日すでに動いた（出尽くし）
+    if condition == "STRONG":
+        if score < 5.0:
+            return "PASS", f"STRONG日 + スコア低すぎ({score:.1f}) - score5未満は不安定"
+        if score >= 7.0:
+            return "PASS", f"STRONG日 + 高スコア({score:.1f}) - score7以上は出尽くし"
+        if ratio >= 3.0:
+            return "PASS", f"STRONG日 + 出来高過多({ratio:.1f}倍) - ratio3倍超は過熱"
+        if today_rise >= 2.0:
+            return "PASS", f"STRONG日 + 前日急騰({today_rise:+.1f}%) - 出尽くし"
+        return "BUY", (f"STRONG日 + score{score:.1f} + ratio{ratio:.1f}倍 + "
+                       f"前日{today_rise:+.1f}% - スイープ検証済み最良条件")
 
+    # ── NORMAL日専用判定 ──────────────────────────────────
+    # [sim_precise_trades.csv検証 NORMAL日16,102件]
+    # 最良ゾーン: 前日微下落(-2〜0%) × スコア3〜6 × ratio<3倍 → WR47.9% / avg+0.089%
+    # ※スイープ検証でNORMAL日は過剰適合の疑い（検証データで有効ゼロ）→ CAUTION止まり
+    if condition == "NORMAL":
+        if score >= 7.0:
+            return "PASS", f"NORMAL日 + 高スコア({score:.1f}) - 出尽くしavg-0.256%"
+        if ratio >= 3.0:
+            return "PASS", f"NORMAL日 + 出来高過多({ratio:.1f}倍) - ratio3倍超はavg-0.226%以下"
+        if today_rise > 2.0:
+            return "PASS", f"NORMAL日 + 前日急騰({today_rise:+.1f}%) - 出尽くしavg-0.203%"
+        if -2.0 <= today_rise <= 0.0:
+            return "CAUTION", (f"NORMAL日 + 前日微下落({today_rise:+.1f}%) + score{score:.1f} "
+                               f"- 有望条件だが検証不足・少額様子見")
+        return "PASS", f"NORMAL日 + 有望条件外（前日比{today_rise:+.1f}%）"
+
+    # ── WEAK日 ───────────────────────────────────────────
     if score < strategy_a_thr:
         return "PASS", f"地合い{condition} + スコア不十分(閾値{strategy_a_thr})"
 
-    if condition == "WEAK":
-        return "CAUTION", "地合い軟調 - スコア高いが慎重に"
-
-    return "BUY", "スコア優良 + 地合い良好"
+    return "CAUTION", "地合い軟調 - スコア高いが慎重に"
 
 
 def judge_entry_b(row, condition):
@@ -444,7 +580,6 @@ def judge_entry_b(row, condition):
     rb_reason = str(row.get("rebound_reason", "指標なし"))
 
     # PANIC日は全見送り
-    # [検証] PANIC日 avg -0.84%、+5%達成率4.0%（211件中最悪）
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 逆張り非推奨（続落リスク）"
 
@@ -452,22 +587,38 @@ def judge_entry_b(row, condition):
     if drop <= -20:
         return "PASS", f"暴落{drop:.1f}% + 続落リスク高 - 見送り"
 
-    # [検証] RBスコア7以上は「落ちナイフ」サイン ─ 見送り
-    # RSI極端値 + 出来高急増 + MA25大幅乖離が重なるほど
-    # 売りが一巡せず翌日も続落するパターンが多い
-    # （RB7: +5%達成0%/17件 avg -0.31%、RB8: +5%達成0%/12件 avg -2.11%）
-    # ※ 高得点 = リバウンド期待大 という直感は実績上は逆
-    if rb_score >= 7:
-        return "PASS", f"落ちナイフ警戒({rb_score}点) - 指標が極端すぎ続落リスク高"
+    # [simulate_b_full.py検証結果 2025-04〜2026-03]
+    # ─────────────────────────────────────────────────────
+    # 閾値 -4〜-5% × NORMAL日（引け決済）:
+    #   全RB:   勝率50.5% / avg +0.219% / 累計+255% ← プラス ★
+    #   RB3〜4: 勝率48.4% / avg +0.073% ← プラス ★
+    #   RB5〜6: 勝率51.9% / avg +0.319% ← 最良 ★
+    #   RB7〜9: 勝率53.3% / avg +0.425% ← 最優秀（旧「落ちナイフ」は誤り）
+    # 閾値 -5%以下 × NORMAL日（引け決済）:
+    #   全RB:   勝率47.2% / avg +0.020% ← ほぼゼロ
+    # WEAK日（閾値問わず）: 勝率30% / avg -1.26% ← 最悪・変わらず
+    # 出口戦略: 引け決済 ≒ TP+5%/SL-5% > TP+3%/SL-3%
+    # ─────────────────────────────────────────────────────
 
-    # [検証] WEAK日が戦略Bに最も有利（avg +2.17%、+5%達成率15.7%）
-    # 「地合いは軟調だが1銘柄だけ前日大幅安」という局面が最もリバウンド確率が高い
-    # RBスコア3〜6の「適度な売られすぎ」が買いの甘味ゾーン
-    if rb_score >= 3:
-        if condition == "WEAK":
-            return "BUY", f"地合い軟調リバウンド狙い({rb_score}点) / {rb_reason}"
-        # NORMAL日は利確チャンスはあるが期待値は低め（avg -0.2%）なので慎重に
-        return "CAUTION", f"リバウンド候補({rb_score}点) / {rb_reason}"
+    # WEAK日は全見送り
+    if condition == "WEAK":
+        return "PASS", f"地合いWEAK + 逆張り非推奨 - WEAK日avg-1.26%（740件）"
+
+    # NORMAL日 × RBスコア3以上 → BUY（TP+3%/SL-7%推奨・ギャップアップ+2%超は当日除外）
+    # 【根拠】evolve_b.py GA(20000人×100世代): STRONG/NORMAL×TP+2〜4%/SL-5〜7%が最優秀
+    #         引け決済より平均+0.2〜0.3%高いリターン（Sharpe+3〜4）
+    if condition == "NORMAL" and rb_score >= 3:
+        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - avg+0.4%・勝率63%（TP+3%/SL-7%推奨） / {rb_reason}"
+
+    # STRONG日 × RB4以上 → BUY（ギャップアップ+2%超は当日除外）
+    # 【根拠】evolve_b.py GA(100000人×100世代): STRONG×RB4+×TP+3%/SL-7%が最優秀
+    #         Out avg+0.5%・勝率60%・Sharpe+3.9（185/200戦略がWF検証通過）
+    if condition == "STRONG" and rb_score >= 4:
+        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - Out avg+0.5%・勝率60%（TP+3%/SL-7%推奨） / {rb_reason}"
+
+    # STRONG日 × RB3 → CAUTION（スコアやや低め）
+    if condition == "STRONG" and rb_score == 3:
+        return "CAUTION", f"地合いSTRONG + リバウンド候補({rb_score}点) - RB3はやや低め・様子見 / {rb_reason}"
 
     return "PASS", f"リバウンドスコア低({rb_score}点) - 見送り"
     
@@ -692,6 +843,8 @@ def main():
     sgx            = fetch_sgx()
     usdjpy         = fetch_usdjpy()
     prev_condition = get_prev_day_condition()
+    print("  前日市場騰落データ計算中...")
+    prev_breadth   = fetch_prev_day_breadth()
 
     print(f"\n{'='*60}")
     print(f"【海外市場】（前日終値ベース）")
@@ -723,7 +876,8 @@ def main():
 
     # ── 2. 地合い予測（多層スコアリング）──
     condition, score, breakdown, market_details = predict_market(
-        us_data, nikkei, usdjpy, sgx=sgx, prev_condition=prev_condition
+        us_data, nikkei, usdjpy, sgx=sgx, prev_condition=prev_condition,
+        prev_breadth=prev_breadth
     )
     strategy_a_thr = market_details["strategy_a_thr"]
     stop_loss_pct  = market_details["stop_loss_pct"]
@@ -744,11 +898,14 @@ def main():
     print()
 
     if condition == "STRONG":
-        print(f"  戦略A      : 🚀 積極エントリー可（閾値 ≥{strategy_a_thr}）")
-        print(f"  戦略B      : ✅ 通常通り（損切り{stop_loss_pct:.0f}%）")
+        print(f"  戦略A      : 積極エントリー可")
+        print(f"  推奨条件   : score5〜7 / ratio<3倍 / 前日比<+2% / 上位3件")
+        print(f"  TP/SL      : +3%利確 / -1%損切り")
+        print(f"  ※スイープ検証: Sharpe4.21 / 年率+10.8% / DD-1.6%（アウトオブサンプル確認済み）")
     elif condition == "NORMAL":
-        print(f"  戦略A      : ✅ 通常通り（閾値 ≥{strategy_a_thr}）")
-        print(f"  戦略B      : ✅ 通常通り（損切り{stop_loss_pct:.0f}%）")
+        print(f"  戦略A      : ✅ 有望条件のみ（前日微下落 × スコア3〜6 × ratio<3倍）")
+        print(f"  戦略B      : ✅ BUY（-4%以下・RB3以上）→ TP+3%/SL-7%推奨")
+        print(f"  ※GA検証   : 100000人×100世代 → STRONG/NORMAL WR60-63%・avg+0.4-0.6%（191/200戦略WF通過）")
     elif condition == "WEAK":
         print(f"  戦略A      : ⚠️  スコア{strategy_a_thr}以上のみ検討")
         print(f"  戦略B      : ⚠️  損切り{stop_loss_pct:.0f}%に引き締め")

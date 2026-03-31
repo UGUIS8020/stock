@@ -3,8 +3,9 @@ market_watch.py - 寄り付き後リアルタイム監視 + AI買い価格判断
 
 scan_morning.py → ai_filter.py → market_watch.py の順で自動起動される。
 
-9:00〜9:10の間、候補銘柄の価格を15秒ごとに取得・表示し、
+9:00〜9:30の間、候補銘柄の価格を15秒ごとに取得・表示し、
 9:05頃にClaudeへ価格推移を送信して「いくらで買うべきか」を判断させる。
+AIが「様子見（継続監視）」と返した場合は10分後に再判断する。
 
 実行方法:
     python market_watch.py          # 9:00まで待機して自動開始
@@ -40,7 +41,8 @@ POLL_INTERVAL_SEC  = 15    # 価格取得間隔（秒）
 WATCH_START_HOUR   = 9     # 監視開始時刻
 WATCH_START_MIN    = 0
 AI_JUDGE_MIN       = 5     # AI判断開始（9:05）
-WATCH_END_MIN      = 12    # 監視終了（9:12）
+WATCH_END_MIN      = 30    # 監視終了（9:30）
+AI_RETRY_MIN       = 10    # 様子見後の再判断間隔（分）
 
 
 # ══════════════════════════════════════════════
@@ -66,7 +68,7 @@ WATCH_END_MIN      = 12    # 監視終了（9:12）
 # ※ 要再評価タイミング: 約2026-04-25（データ100件超）
 # ─────────────────────────────────────────────
 
-def decide_timing(condition, judgment):
+def decide_timing(condition, judgment, ai_recommendation=""):
     """地合い・判定からエントリータイミング戦略を返す。
 
     戻り値:
@@ -84,39 +86,65 @@ def decide_timing(condition, judgment):
             "style":                 "SKIP",
             "ai_trigger_min":        None,
             "confirm_threshold_pct": None,
-            "description":           "🚨 PANIC日 → 全見送り",
+            "description":           "PANIC日 → 全見送り",
+        }
+
+    # WEAK日のCAUTION → AI推奨が「様子見」なら条件付きエントリー検討、それ以外は観察のみ
+    # 【根拠】WEAK日CAUTION銘柄は損失傾向（バックテスト）。
+    #         ただしAI「様子見」は期日付き材料等の個別要因を捉えている可能性がある。
+    #         +2%確認後にAI判断を起動。「見送り推奨」や判定なしはデータ蓄積のみ。
+    if condition == "WEAK" and judgment == "CAUTION":
+        if ai_recommendation == "様子見":
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        3,
+                "confirm_threshold_pct": 0.0,
+                "description":           "WEAK日CAUTION + AI様子見 → 9:03以降 即AI判断（事前様子見済み）",
+            }
+        return {
+            "style":                 "OBSERVE",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           "WEAK日CAUTION → 9:30まで観察のみ（買い禁止・データ蓄積用）",
         }
 
     if condition == "WEAK":
-        # WEAK日: 寄り付き成行（8:55までに注文）
+        # WEAK日BUY: 寄り付き成行（8:55までに注文）
         # 【根拠】上昇継続50%・反落0件・終日下落0件（12件）
         # ※ 要再評価: 2026-04-25頃（WEAK日サンプル30件超になったら）
         return {
             "style":                 "OPEN_MARKET",
-            "ai_trigger_min":        3,   # 9:03に最終確認
-            "confirm_threshold_pct": 0.0, # プラスならOK
-            "description":           "⚡ WEAK日 → 寄り付き成行推奨（上昇継続率50%・反落ゼロ）",
+            "ai_trigger_min":        3,
+            "confirm_threshold_pct": 0.0,
+            "description":           "WEAK日BUY → 寄り付き成行推奨（上昇継続率50%・反落ゼロ）",
         }
 
     if condition in ("NORMAL", "STRONG"):
-        # NORMAL/STRONG日: 9:05以降に上昇確認後エントリー
-        # 【根拠】NORMAL日は終日下落42%。上昇確認なしの寄り付き買いは損失リスク大。
-        # STRONG日はサンプル不足のため暫定的にNORMALと同扱い。
-        # ※ 要再評価: 2026-04-25頃（NORMAL日サンプル50件超になったら）
-        threshold = 0.3 if condition == "STRONG" else 0.5
-        return {
-            "style":                 "WAIT_CONFIRM",
-            "ai_trigger_min":        5,        # 9:05にAI判断
-            "confirm_threshold_pct": threshold, # この%以上の上昇で買い確認
-            "description":           f"⏳ {condition}日 → 9:05以降 前日比+{threshold}%以上を確認後エントリー（終日下落42%のため慎重に）",
-        }
+        if judgment == "CAUTION":
+            # CAUTION: 通常より高い上昇確認閾値でエントリー
+            threshold = 0.5 if condition == "STRONG" else 1.0
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        5,
+                "confirm_threshold_pct": threshold,
+                "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後に慎重エントリー",
+            }
+        else:
+            # BUY: 通常の上昇確認閾値
+            threshold = 0.3 if condition == "STRONG" else 0.5
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        5,
+                "confirm_threshold_pct": threshold,
+                "description":           f"{condition}日BUY → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
+            }
 
     # UNKNOWN など
     return {
         "style":                 "WAIT_CONFIRM",
         "ai_trigger_min":        5,
         "confirm_threshold_pct": 0.5,
-        "description":           "❓ 地合い不明 → 9:05以降 上昇確認後エントリー",
+        "description":           "地合い不明 → 9:05以降 上昇確認後エントリー",
     }
 
 
@@ -179,12 +207,13 @@ def load_candidates():
     candidates = []
     for _, row in targets.sort_values("score", ascending=False).iterrows():
         candidates.append({
-            "code":     str(row["code"]),
-            "name":     str(row["name"]),
-            "strategy": str(row["strategy"]),
-            "score":    float(row["score"]),
-            "judgment": str(row["judgment"]),
-            "reason":   str(row["reason"]),
+            "code":              str(row["code"]),
+            "name":              str(row["name"]),
+            "strategy":          str(row["strategy"]),
+            "score":             float(row["score"]),
+            "judgment":          str(row["judgment"]),
+            "reason":            str(row["reason"]),
+            "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
         })
     return candidates, condition
 
@@ -301,10 +330,12 @@ def watch_loop(candidates, condition, market_info, start_now=False):
     """9:00〜9:12の間、価格を監視してAI判断を行う"""
 
     # 銘柄ごとにタイミング戦略を決定
-    timings    = {c["code"]: decide_timing(condition, c["judgment"]) for c in candidates}
-    histories  = {c["code"]: [] for c in candidates}
-    ai_results = {c["code"]: None for c in candidates}
-    ai_done    = {c["code"]: False for c in candidates}
+    timings         = {c["code"]: decide_timing(condition, c["judgment"], c.get("ai_recommendation", "")) for c in candidates}
+    histories       = {c["code"]: [] for c in candidates}
+    ai_results      = {c["code"]: {} for c in candidates}
+    ai_done         = {c["code"]: False for c in candidates}
+    ai_next_trigger = {c["code"]: -1 for c in candidates}  # 様子見後の再判断時刻（分、-1=未設定）
+    gap_checked     = {c["code"]: False for c in candidates}  # 戦略Bギャップチェック済みフラグ
 
     print(f"\n{'='*60}")
     print(f"【リアルタイム監視】{len(candidates)}銘柄  地合い:{condition}")
@@ -392,6 +423,33 @@ def watch_loop(candidates, condition, market_info, start_now=False):
                 ai_done[code]    = True
                 continue
 
+            # OBSERVE: AI判断しない（価格記録のみ）
+            if timing["style"] == "OBSERVE":
+                ai_results[code] = {"判断": "観察中", "根拠": timing["description"]}
+                ai_done[code]    = True  # AI呼び出し不要
+                continue
+
+            # 戦略Bギャップアップフィルター（初回価格取得後に1回だけ判定）
+            # 【根拠】evolve_b.py GA(20000人×100世代): gap上限+1〜2%が最適
+            #         +2%以内の小幅ギャップアップは買い需要の証拠で有効エントリー
+            #         +2%超のギャップアップは出尽くしリスクで見送り
+            if (c["strategy"] == "B"
+                    and not gap_checked[code]
+                    and len(histories[code]) >= 1):
+                gap_checked[code] = True
+                gap_pct = histories[code][-1]["change_pct"]
+                if gap_pct > 2.0:
+                    timings[code] = {
+                        "style":                 "SKIP",
+                        "ai_trigger_min":        None,
+                        "confirm_threshold_pct": None,
+                        "description":           f"戦略B ギャップアップ({gap_pct:+.1f}%) → +2%超・出尽くしリスクで見送り",
+                    }
+                    ai_results[code] = {"判断": "見送り", "根拠": timings[code]["description"]}
+                    ai_done[code]    = True
+                    print(f"  ⛔ {code} {c['name']}: ギャップアップ({gap_pct:+.1f}%) → +2%超・戦略B見送り")
+                    continue
+
             # OPEN_MARKET: ai_trigger_min 経過後に上昇確認 → AI判断
             # WAIT_CONFIRM: ai_trigger_min 経過後に閾値確認 → AI判断
             trigger_min = timing.get("ai_trigger_min", AI_JUDGE_MIN)
@@ -418,6 +476,10 @@ def watch_loop(candidates, condition, market_info, start_now=False):
                 _print_ai_result(c, ai_results[code])
                 continue
 
+            # 様子見後の再判断待機中はスキップ
+            if ai_next_trigger[code] > 0 and now_min < ai_next_trigger[code]:
+                continue
+
             # AI判断実行
             print(f"\n  🤖 AI判断中: {code} {c['name']}  "
                   f"（{timing['style']} / 現在{latest_chg:+.1f}%）...")
@@ -425,15 +487,22 @@ def watch_loop(candidates, condition, market_info, start_now=False):
                 raw    = ask_claude_entry(c, histories[code], condition, market_info, timing)
                 result = parse_ai_entry(raw)
                 ai_results[code] = result
-                ai_done[code]    = True
                 _print_ai_result(c, result)
+
+                # 「様子見」なら AI_RETRY_MIN 後に再判断、それ以外は終了
+                if result.get("判断") == "様子見（継続監視）":
+                    ai_next_trigger[code] = now_min + AI_RETRY_MIN
+                    print(f"  🔄 {code}: {AI_RETRY_MIN}分後（{now.hour}:{now.minute + AI_RETRY_MIN:02d}頃）に再判断します")
+                else:
+                    ai_done[code] = True
             except Exception as e:
                 print(f"  ❌ AI判断エラー: {e}")
                 ai_done[code] = True
 
         time.sleep(POLL_INTERVAL_SEC)
 
-    # 最終サマリー表示
+    # 観察データ保存 → 最終サマリー表示
+    _save_observe_log(candidates, timings, histories)
     _print_final_summary(candidates, ai_results, histories)
 
 
@@ -462,6 +531,44 @@ def _print_ai_result(candidate, result):
     print(f"  {'─'*56}\n")
 
 
+OBSERVE_LOG_CSV = "out/observe_log.csv"
+
+def _save_observe_log(candidates, timings, histories):
+    """OBSERVEスタイルの銘柄の価格推移をCSVに保存する（後日検証用）"""
+    observe_candidates = [
+        c for c in candidates if timings[c["code"]]["style"] == "OBSERVE"
+    ]
+    if not observe_candidates:
+        return
+
+    rows = []
+    for c in observe_candidates:
+        code = c["code"]
+        for h in histories.get(code, []):
+            rows.append({
+                "date":       TODAY,
+                "code":       code,
+                "name":       c["name"],
+                "condition":  "WEAK",
+                "judgment":   c["judgment"],
+                "score":      c["score"],
+                "time":       h["time"],
+                "price":      h["price"],
+                "change_pct": h["change_pct"],
+                "volume":     h["volume"],
+                "momentum":   h["momentum"],
+            })
+
+    if not rows:
+        return
+
+    df     = pd.DataFrame(rows)
+    exists = os.path.exists(OBSERVE_LOG_CSV)
+    df.to_csv(OBSERVE_LOG_CSV, mode="a", header=not exists,
+              index=False, encoding="utf-8-sig")
+    print(f"\n  💾 観察データ保存: {OBSERVE_LOG_CSV}（{len(observe_candidates)}銘柄 × {len(rows)//max(len(observe_candidates),1)}ポイント）")
+
+
 def _print_final_summary(candidates, ai_results, histories):
     """全銘柄の最終サマリーを表示"""
     print(f"\n{'='*60}")
@@ -481,7 +588,7 @@ def _print_final_summary(candidates, ai_results, histories):
         price    = result.get("推奨買い価格")
         sell     = result.get("指値売り価格")
         stop     = result.get("損切り価格")
-        icon     = {"買い実行": "🟢", "見送り": "🔴", "様子見（継続監視）": "🟡"}.get(judgment, "⚪")
+        icon     = {"買い実行": "🟢", "見送り": "🔴", "様子見（継続監視）": "🟡", "観察中": "🔵"}.get(judgment, "⚪")
 
         first_price = hist[0]["price"] if hist else None
         last_price  = hist[-1]["price"] if hist else None
@@ -492,7 +599,9 @@ def _print_final_summary(candidates, ai_results, histories):
         if first_price and last_price:
             print(f"     値動き  : {first_price:,.0f}円 → {last_price:,.0f}円  ({last_chg:+.2f}%)")
         if price:
-            print(f"     買い価格: {price:,.0f}円  売り:{sell:,.0f}円  損切:{stop:,.0f}円")
+            sell_str = f"{sell:,.0f}円" if sell else "未設定"
+            stop_str = f"{stop:,.0f}円" if stop else "未設定"
+            print(f"     買い価格: {price:,.0f}円  売り:{sell_str}  損切:{stop_str}")
 
     print(f"\n  ⚠️  AIの判断は参考情報です。最終判断はご自身で行ってください。")
     print(f"{'='*60}\n")

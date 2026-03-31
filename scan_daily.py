@@ -729,8 +729,8 @@ def main():
                 **s
             })
 
-        # 戦略B: 当日 -5%以下の銘柄をリバウンド候補として抽出
-        if today_rise <= -5.0:
+        # 戦略B: 当日 -4%以下の銘柄をリバウンド候補として抽出
+        if today_rise <= -4.0:
             rb_score, rb_reasons = calc_rebound_score(code4)
             if rb_score >= 3:
                 results_b.append({
@@ -782,8 +782,8 @@ def main():
 
     save_a = [{"scan_date": TODAY, "code": r["code"], "name": r["name"],
                "score": r["score"], "trend": r["trend"], "accel": r["accel"],
-               "ratio": r["ratio"], "actual_top20": pd.NA,
-               "market_condition": condition}
+               "ratio": r["ratio"], "today_rise": r.get("today_rise", 0),
+               "actual_top20": pd.NA, "market_condition": condition}
               for _, r in top_a.iterrows()]
     new_a = pd.DataFrame(save_a).astype({"actual_top20": "object"})
     if os.path.exists(SCAN_CSV):
