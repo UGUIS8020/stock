@@ -309,33 +309,48 @@ def fetch_macro_indicators(usdjpy_current):
         ("semi",   SEMI_TICKER,   "半導体ETF(SOXX)"),
     ]:
         try:
-            data = yf.Ticker(ticker).history(period="3d")
+            data = yf.Ticker(ticker).history(period="5d")
             if len(data) >= 2:
                 prev  = float(data["Close"].iloc[-2])
                 close = float(data["Close"].iloc[-1])
                 chg   = round((close - prev) / prev * 100, 2)
+                # 前日比も保持（遅行反応対応: 前日に大きく動いた指標も翌日考慮）
+                prev2_chg = None
+                if len(data) >= 3:
+                    prev2 = float(data["Close"].iloc[-3])
+                    prev2_chg = round((prev - prev2) / prev2 * 100, 2)
                 result[key]  = chg
-                details[key] = {"close": close, "change": chg, "label": label}
+                result[f"{key}_prev"] = prev2_chg   # 前日変化率
+                details[key] = {"close": close, "change": chg, "prev_change": prev2_chg, "label": label}
             else:
                 result[key]  = None
+                result[f"{key}_prev"] = None
                 details[key] = {"label": label, "error": True}
         except Exception:
             result[key]  = None
+            result[f"{key}_prev"] = None
             details[key] = {"label": label, "error": True}
  
-    # ドル円変化率：前日終値と比較
+    # ドル円変化率：前日終値と比較（遅行反応対応のため前日変化率も保持）
     try:
-        data = yf.Ticker(USD_JPY_TICKER).history(period="3d")
+        data = yf.Ticker(USD_JPY_TICKER).history(period="5d")
         if len(data) >= 2 and usdjpy_current:
             prev_usdjpy = float(data["Close"].iloc[-2])
             chg = round((usdjpy_current - prev_usdjpy) / prev_usdjpy * 100, 2)
-            result["usdjpy_change"]  = chg
-            details["usdjpy_change"] = {"close": usdjpy_current, "change": chg, "label": "ドル円変化率"}
+            prev2_chg = None
+            if len(data) >= 3:
+                prev2_usdjpy = float(data["Close"].iloc[-3])
+                prev2_chg = round((prev_usdjpy - prev2_usdjpy) / prev2_usdjpy * 100, 2)
+            result["usdjpy_change"]       = chg
+            result["usdjpy_change_prev"]  = prev2_chg
+            details["usdjpy_change"] = {"close": usdjpy_current, "change": chg, "prev_change": prev2_chg, "label": "ドル円変化率"}
         else:
-            result["usdjpy_change"]  = None
+            result["usdjpy_change"]       = None
+            result["usdjpy_change_prev"]  = None
             details["usdjpy_change"] = {"label": "ドル円変化率", "error": True}
     except Exception:
-        result["usdjpy_change"]  = None
+        result["usdjpy_change"]       = None
+        result["usdjpy_change_prev"]  = None
         details["usdjpy_change"] = {"label": "ドル円変化率", "error": True}
  
     result["details"] = details
@@ -358,7 +373,7 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
     レイヤー5: 前日WEAK補正        0〜1点  (リバウンドパターン対応)
     レイヤー6: 前日日本市場騰落    0〜2点  ★新規追加
     ─────────────────────────────────────────
-    合計 9〜13点 → STRONG  ※閾値引き上げ（旧7→新8）
+    合計 8〜13点 → STRONG  ※閾値引き上げ（旧7→新8）
          5〜8点  → NORMAL
          3〜4点  → WEAK
          0〜2点  → PANIC
@@ -513,6 +528,21 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
 # ══════════════════════════════════════════════════════
 # 候補銘柄の買い判定
 # ══════════════════════════════════════════════════════
+# 急騰フラグ判定
+# 【根拠】backtest_log.csv分析: score>=9.5 & ratio>=10倍の銘柄は
+#         高値+10%以上到達率10.6% / TP+8%設定で平均+1.02%（通常銘柄TP+3%の3倍）
+SURGE_SCORE_MIN = 9.5
+SURGE_RATIO_MIN = 10.0
+
+def is_surge_flag(row):
+    """急騰フラグ判定: スコア9.5以上 & 出来高比率10倍以上"""
+    try:
+        return float(row["score"]) >= SURGE_SCORE_MIN and float(row["ratio"]) >= SURGE_RATIO_MIN
+    except Exception:
+        return False
+
+
+# ══════════════════════════════════════════════════════
 def judge_entry_a(row, condition, strategy_a_thr):
     score      = float(row["score"])
     ratio      = float(row.get("ratio", 0))
@@ -652,24 +682,40 @@ def scan_strategy_d(macro, condition):
             chg       = info["change"]
             close     = info.get("close", "")
             close_str = f"  ({close:,.2f})" if close else ""
-            print(f"    {icon} {label:<20}: {chg:>+.2f}%{close_str}")
+            prev_chg  = info.get("prev_change")
+            prev_str  = f"  前日:{prev_chg:+.2f}%" if prev_chg is not None else ""
+            print(f"    {icon} {label:<20}: {chg:>+.2f}%{close_str}{prev_str}")
         else:
             label = info.get("label", key) if isinstance(info, dict) else key
             print(f"    ❓ {label:<20}: 取得失敗")
 
-    # セクタートリガー判定
+    # セクタートリガー判定（当日 OR 前日の遅行反応も考慮）
     triggered = []
     for sector in MACRO_SECTORS:
         key       = sector["trigger_key"]
         threshold = sector["threshold"]
         direction = sector["direction"]
-        val       = macro.get(key)
+        val       = macro.get(key)          # 当日変化率
+        val_prev  = macro.get(f"{key}_prev")  # 前日変化率
+
         if val is None:
             continue
-        hit = (direction == "up"   and val >= threshold) or \
-              (direction == "down" and val <= threshold)
-        if hit:
-            triggered.append((sector, val))
+
+        # 当日トリガー
+        hit_today = (direction == "up"   and val >= threshold) or \
+                    (direction == "down" and val <= threshold)
+        # 前日トリガー（遅行反応: 前日に閾値の1.5倍以上動いた場合も対象）
+        hit_prev = False
+        lag_note = ""
+        if val_prev is not None:
+            lag_threshold = threshold * 1.5
+            hit_prev = (direction == "up"   and val_prev >= lag_threshold) or \
+                       (direction == "down" and val_prev <= -lag_threshold)
+            if hit_prev and not hit_today:
+                lag_note = f"（前日{val_prev:+.2f}%の遅行反応）"
+
+        if hit_today or hit_prev:
+            triggered.append((sector, val, val_prev, lag_note))
 
     if not triggered:
         print(f"\n  本日はマクロ連動トリガーなし（全指標が閾値未満）")
@@ -677,10 +723,11 @@ def scan_strategy_d(macro, condition):
         return
 
     print(f"\n  {'─'*64}")
-    for sector, val in triggered:
+    for sector, val, val_prev, lag_note in triggered:
         sign  = "+" if val >= 0 else ""
         label = sector["label"]
-        print(f"\n  🎯 {label}  ({sign}{val:.2f}%)")
+        lag_str = f"  ⏰ {lag_note}" if lag_note else ""
+        print(f"\n  🎯 {label}  ({sign}{val:.2f}%){lag_str}")
         print(f"  {'コード':<6} {'銘柄名':<18} {'現在値':>8} {'スコア':>6} {'比率':>6}  判定")
         print(f"  {'─'*62}")
 
@@ -937,8 +984,10 @@ def main():
         print(f"  {'判定':<10} {'コード':<6} {'銘柄名':<18} {'スコア':>6} {'比率':>6}  理由")
         print("  " + "─" * 70)
 
+        surge_candidates = []
         for _, row in candidates_a.iterrows():
             judgment, reason = judge_entry_a(row, condition, strategy_a_thr)
+            surge = is_surge_flag(row)
             candidate_rows.append({
                 "date": TODAY, "strategy": "A",
                 "condition": condition,
@@ -947,18 +996,37 @@ def main():
                 "judgment": judgment, "reason": reason,
             })
             icon = judge_icon(judgment)
+            surge_mark = " ⚡" if surge else ""
             if judgment == "BUY":      buy_a    += 1
             elif judgment == "CAUTION": caution_a += 1
             else:                       pass_a    += 1
             print(f"  {icon:<10} {str(row['code']):<6} {str(row['name'])[:16]:<18} "
-                  f"{float(row['score']):>6.2f} {float(row['ratio']):>5.1f}倍  {reason}")
+                  f"{float(row['score']):>6.2f} {float(row['ratio']):>5.1f}倍{surge_mark}  {reason}")
+            if surge:
+                surge_candidates.append(row)
 
         print(f"\n  【集計】 ✅買い:{buy_a}件  ⚠️要注意:{caution_a}件  ❌見送り:{pass_a}件")
+
+        # 急騰フラグ銘柄の専用表示
+        if surge_candidates:
+            print(f"\n  {'='*56}")
+            print(f"  ⚡【急騰候補】score>={SURGE_SCORE_MIN} & ratio>={SURGE_RATIO_MIN:.0f}倍以上  {len(surge_candidates)}件")
+            print(f"  {'='*56}")
+            print(f"  過去実績: 高値+10%以上到達率10.6% / TP+8%設定で平均+1.02%")
+            print(f"  推奨: TP+8% / SL-1%（引け決済は不可 → 高値で反落するケース多）")
+            print(f"  {'─'*56}")
+            for row in surge_candidates:
+                jdg, _ = judge_entry_a(row, condition, strategy_a_thr)
+                icon = judge_icon(jdg)
+                note = "→ 地合い不問で注目" if jdg != "BUY" else "→ BUY推奨"
+                print(f"  {icon} [{row['code']}]{str(row['name'])[:16]}  "
+                      f"score:{float(row['score']):.1f}  ratio:{float(row['ratio']):.1f}倍  {note}")
+                print(f"    推奨注文: 寄付き成行 / TP+8% / SL-1%")
 
     # ── 4. 戦略B候補の判定 ──
     print(f"\n{'='*60}")
     print(f"【戦略B】逆張り候補 - 本日エントリー判定")
-    print(f"  寄付き買い → 引け売り  |  損切り: 寄付きから{stop_loss_pct:.0f}%")
+    print(f"  寄付き買い → TP+3%/SL-7%推奨（GA最適解）  |  損切り: 寄付きから-7%")
     print(f"{'='*60}")
 
     if not os.path.exists(WATCHLIST_CSV):
@@ -989,7 +1057,7 @@ def main():
                     "judgment": judgment, "reason": reason,
                 })
                 icon     = judge_icon(judgment)
-                stop     = calc_stop_loss(float(row["buy_price"]), stop_loss_pct)
+                stop     = calc_stop_loss(float(row["buy_price"]), -7.0)  # 戦略B: GA最適解SL-7%
                 drop_str = f"{float(row['today_rise']):>+.1f}%"
                 rb_score = int(row.get("rebound_score", 0))
                 print(f"  {icon:<10} {str(row['code']):<6} {str(row['name'])[:16]:<18} "
@@ -1027,7 +1095,7 @@ def main():
         print(f"\n  ⏰ チェックリスト（8:50まで）")
         print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
         print(f"  □ 候補銘柄の最新ニュース・IR確認")
-        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 損切りライン: 戦略A=寄付きから-1% / 戦略B=寄付きから-7%（TP+3%/SL-7%）")
         print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
     elif condition == "STRONG":
         print(f"  🚀 地合い良好。戦略Aの優良銘柄を優先。")
@@ -1035,7 +1103,7 @@ def main():
         print(f"\n  ⏰ チェックリスト（8:50まで）")
         print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
         print(f"  □ 候補銘柄の最新ニュース・IR確認")
-        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 損切りライン: 戦略A=寄付きから-1% / 戦略B=寄付きから-7%（TP+3%/SL-7%）")
         print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
     else:  # NORMAL
         print(f"  ✅ 通常通りスキャン結果に従ってエントリー。")
@@ -1043,7 +1111,7 @@ def main():
         print(f"\n  ⏰ チェックリスト（8:50まで）")
         print(f"  □ 候補銘柄のチャートを確認（前日夜〜今朝のPTS動向）")
         print(f"  □ 候補銘柄の最新ニュース・IR確認")
-        print(f"  □ 損切りライン（寄付き{stop_loss_pct:.0f}%）を注文画面で設定")
+        print(f"  □ 損切りライン: 戦略A=寄付きから-1% / 戦略B=寄付きから-7%（TP+3%/SL-7%）")
         print(f"  □ 1銘柄あたりの投資額を確認（リスク管理）")
 
     # ── 7. 朝判定ログ保存 ──

@@ -10,6 +10,10 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import re
+import requests
+import time
+from bs4 import BeautifulSoup
 
 load_dotenv()
 cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
@@ -19,7 +23,8 @@ SCAN_CSV         = "out/scan_results.csv"
 WATCHLIST_CSV    = "out/watchlist.csv"
 MARKET_LOG_CSV   = "out/market_log.csv"
 STRATEGY_C_CSV   = "out/strategy_c_log.csv"
-BACKTEST_LOG_CSV = "out/backtest_log.csv"
+BACKTEST_LOG_CSV    = "out/backtest_log.csv"
+CANDIDATES_LOG_CSV  = "out/candidates_log.csv"
 TOP_N            = 20
 SCORE_MIN_A      = 3.0
 SCORE_MIN_B      = 3.0
@@ -404,6 +409,216 @@ def verify_strategy_c(df_today, name_dict):
               f"平均:{avg:+.2f}%")
 
 
+# ══════════════════════════════════════════════
+# TDnet 適時開示取得
+# ══════════════════════════════════════════════
+TDNET_BASE = "https://www.release.tdnet.info/inbs/"
+TDNET_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36"
+}
+
+# 好材料キーワード（タイトルに含まれる場合 → 格上げ）
+POSITIVE_KEYWORDS = [
+    "資本業務提携", "業務提携", "資本提携", "合併", "買収", "TOB",
+    "自社株買い", "自己株式取得", "増配", "特別配当", "復配",
+    "黒字転換", "上方修正", "業績予想の修正", "純利益", "営業利益.*上方",
+    "新製品", "新サービス", "特許取得", "受注", "大型契約",
+    "MBO", "上場廃止勧告", "公開買付",
+]
+# 悪材料キーワード（タイトルに含まれる場合 → 格下げ）
+NEGATIVE_KEYWORDS = [
+    "下方修正", "業績予想の修正.*減", "特別損失", "損失計上",
+    "不祥事", "不正", "訴訟", "行政処分", "上場廃止",
+    "債務超過", "破産", "民事再生", "希望退職",
+]
+
+
+def fetch_tdnet(date_str, target_codes):
+    """
+    TDnetから指定日の適時開示を取得し、対象銘柄コードでフィルタリングする。
+    date_str: YYYYMMDD形式
+    target_codes: set of str（4桁コード）
+    戻り値: {code: [{"time": "16:30", "title": "...", "sentiment": "好材料/悪材料/中立"}]}
+    """
+    results = {}
+    page = 1
+    while True:
+        url = f"{TDNET_BASE}I_list_{page:03d}_{date_str}.html"
+        try:
+            res = requests.get(url, headers=TDNET_HEADERS, timeout=10)
+            if res.status_code != 200:
+                break
+            res.encoding = "utf-8"
+            soup = BeautifulSoup(res.content, "html.parser")
+            rows = soup.select("table#main-list-table tr")
+            if not rows:
+                break
+            for tr in rows:
+                tds = tr.find_all("td")
+                rec = {}
+                for td in tds:
+                    classes = td.get("class") or []
+                    classes = classes if isinstance(classes, list) else [classes]
+                    if "kjTime"  in classes: rec["time"]  = td.text.strip()
+                    if "kjCode"  in classes: rec["code"]  = td.text.strip()
+                    if "kjTitle" in classes: rec["title"] = td.text.strip()
+                if not rec.get("code") or rec["code"] not in target_codes:
+                    continue
+                title = rec.get("title", "")
+                if any(re.search(kw, title) for kw in POSITIVE_KEYWORDS):
+                    sentiment = "好材料"
+                elif any(re.search(kw, title) for kw in NEGATIVE_KEYWORDS):
+                    sentiment = "悪材料"
+                else:
+                    sentiment = "中立"
+                entry = {"time": rec.get("time", ""), "title": title, "sentiment": sentiment}
+                results.setdefault(rec["code"], []).append(entry)
+            page += 1
+            time.sleep(0.5)
+        except Exception:
+            break
+    return results
+
+
+def check_tdnet_for_strategy_b(results_b):
+    """
+    戦略B候補に対してTDnet適時開示を確認し、表示と候補リストを更新する。
+    戻り値: results_b（tdnet_sentiment列を追加）
+    """
+    if not results_b:
+        return results_b
+
+    codes = {str(r["code"]) for r in results_b}
+    print(f"\n  📡 TDnet適時開示を確認中（{len(codes)}銘柄）...")
+    disclosures = fetch_tdnet(TODAY_STR, codes)
+
+    if not disclosures:
+        print(f"  　→ 本日の開示なし（または取得失敗）")
+        for r in results_b:
+            r["tdnet_sentiment"] = "なし"
+            r["tdnet_title"] = ""
+        return results_b
+
+    for r in results_b:
+        code = str(r["code"])
+        items = disclosures.get(code, [])
+        if not items:
+            r["tdnet_sentiment"] = "なし"
+            r["tdnet_title"] = ""
+        else:
+            # 複数開示がある場合は最も強い材料を優先
+            if any(i["sentiment"] == "好材料" for i in items):
+                r["tdnet_sentiment"] = "好材料"
+            elif any(i["sentiment"] == "悪材料" for i in items):
+                r["tdnet_sentiment"] = "悪材料"
+            else:
+                r["tdnet_sentiment"] = "中立"
+            r["tdnet_title"] = " / ".join(i["title"] for i in items)
+
+    # 結果表示
+    pos = [r for r in results_b if r["tdnet_sentiment"] == "好材料"]
+    neg = [r for r in results_b if r["tdnet_sentiment"] == "悪材料"]
+    if pos:
+        print(f"  ✨ 好材料あり ({len(pos)}件) → BUY優先候補:")
+        for r in pos:
+            print(f"     [{r['code']}]{r['name']}  {r['tdnet_title'][:50]}")
+    if neg:
+        print(f"  ⚠️  悪材料あり ({len(neg)}件) → 除外推奨:")
+        for r in neg:
+            print(f"     [{r['code']}]{r['name']}  {r['tdnet_title'][:50]}")
+
+    return results_b
+
+
+def verify_candidates_log(df_today, name_dict):
+    """scan_morning.py の BUY/CAUTION 判定を当日終値で検証し candidates_log.csv に書き戻す"""
+    if not os.path.exists(CANDIDATES_LOG_CSV):
+        return
+    cl = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig", dtype=str)
+
+    # 結果列がなければ追加
+    for col in ["open_price", "close_price", "high_price", "low_price",
+                "result_pct", "result_grade"]:
+        if col not in cl.columns:
+            cl[col] = ""
+
+    # 本日分・未検証・BUY or CAUTION のみ対象
+    mask = (
+        (cl["date"] == TODAY) &
+        (cl["judgment"].isin(["BUY", "CAUTION"])) &
+        (cl["result_pct"] == "")
+    )
+    targets = cl[mask]
+    if targets.empty:
+        return
+
+    print(f"\n=== 📋 【朝スキャン検証】本日 scan_morning.py 判定の結果 ===")
+    tp_pct = 3.0
+    sl_pct = -7.0
+    updated = 0
+    win = loss = tp_hit = sl_hit = 0
+
+    for idx, row in targets.iterrows():
+        code4 = str(row["code"])
+        t = df_today[df_today["code4"] == code4]
+        if t.empty or float(t.iloc[0]["Open"]) <= 0:
+            continue
+        t = t.iloc[0]
+        open_p  = float(t["Open"])
+        close_p = float(t["Close"])
+        high_p  = float(t["High"])
+        low_p   = float(t["Low"])
+
+        ret_close = round((close_p - open_p) / open_p * 100, 2)
+        ret_high  = round((high_p  - open_p) / open_p * 100, 2)
+        ret_low   = round((low_p   - open_p) / open_p * 100, 2)
+
+        # TP/SL 到達判定
+        if ret_high >= tp_pct and ret_low > sl_pct:
+            grade = f"TP+{tp_pct:.0f}%"
+            tp_hit += 1; win += 1
+        elif ret_low <= sl_pct and ret_high < tp_pct:
+            grade = f"SL{sl_pct:.0f}%"
+            sl_hit += 1; loss += 1
+        elif ret_close >= 0:
+            grade = "引け+"; win += 1
+        else:
+            grade = "引け-"; loss += 1
+
+        cl.at[idx, "open_price"]   = open_p
+        cl.at[idx, "close_price"]  = close_p
+        cl.at[idx, "high_price"]   = high_p
+        cl.at[idx, "low_price"]    = low_p
+        cl.at[idx, "result_pct"]   = ret_close
+        cl.at[idx, "result_grade"] = grade
+
+        strat = str(row.get("strategy", ""))
+        jdg   = str(row.get("judgment", ""))
+        name  = name_dict.get(code4, str(row.get("name", "")))
+        icon  = "✅" if grade.startswith("TP") else ("❌" if grade.startswith("SL") else ("⚠️" if ret_close >= 0 else "❌"))
+        print(f"  {icon} [{code4}]{name}  {jdg}({strat})  "
+              f"寄:{open_p:.0f}→終:{close_p:.0f}  {ret_close:+.1f}%  [{grade}]")
+        updated += 1
+
+    if updated > 0:
+        cl.to_csv(CANDIDATES_LOG_CSV, index=False, encoding="utf-8-sig")
+        total = win + loss
+        wr = win / total * 100 if total > 0 else 0
+        avg = cl[(cl["date"] == TODAY) & (cl["result_pct"] != "")]["result_pct"].astype(float).mean()
+        print(f"  ── 本日集計: {total}件  勝率{wr:.0f}%  TP到達:{tp_hit}件  SL到達:{sl_hit}件  平均{avg:+.2f}%")
+
+        # 累積集計
+        verified = cl[cl["result_pct"] != ""].copy()
+        verified["result_pct"] = verified["result_pct"].astype(float)
+        buy_v = verified[verified["judgment"] == "BUY"]
+        if len(buy_v) > 0:
+            bwr = (buy_v["result_pct"] >= 0).mean() * 100
+            bavg = buy_v["result_pct"].mean()
+            print(f"  ── BUY累積: {len(buy_v)}件  勝率{bwr:.0f}%  平均{bavg:+.2f}%")
+
+
 def verify_scan_a(top20_codes, name_dict, df_today):
     if not os.path.exists(SCAN_CSV):
         return None
@@ -680,6 +895,7 @@ def main():
 
     verify_watchlist(df_today, name_dict)
     verify_strategy_c(df_today, name_dict)
+    verify_candidates_log(df_today, name_dict)
     success_rate = verify_scan_a(top20_codes, name_dict, df_today)
 
     save_market_log(mc, success_rate)
@@ -719,7 +935,7 @@ def main():
         today_rise = float(t["today_rise"])
         close      = float(t["Close"])
 
-        # 戦略A: 当日 -5%超の銘柄のみ
+        # 戦略A: 当日 -5%以上の暴落銘柄を除外（急落中の銘柄は順張り対象外）
         if today_rise > -5.0:
             results_a.append({
                 "code": code4,
@@ -761,9 +977,12 @@ def main():
         else:
             return "  "
 
+    SURGE_SCORE_MIN = 9.5
+    SURGE_RATIO_MIN = 10.0
+
     print(f"\n{'='*60}")
     print(f"【戦略A】順張り候補 TOP{len(top_a)}（翌朝急騰狙い）")
-    print(f"  🏆S=最優先(スコア8.0〜8.5)  ⭐A=初動狙い  ⚠️=過熱注意(9.0以上)")
+    print(f"  🏆S=最優先(スコア8.0〜8.5)  ⭐A=初動狙い  ⚠️=過熱注意(9.0以上)  ⚡=急騰候補")
 
     if condition == "PANIC":
         print(f"  🚨 本日地合いPANIC: 参考表示のみ、エントリー非推奨")
@@ -774,11 +993,22 @@ def main():
     print(f"  {'ランク':<4} {'コード':<6} {'銘柄名':<16} {'スコア':>6} {'比率':>6} {'当日':>6} {'加速度':>8}")
     print("  " + "─" * 62)
 
+    surge_list = []
     for _, r in top_a.iterrows():
         rank = get_rank(r)
         surge_str = f"{float(r['today_rise']):>+5.1f}%"
+        is_surge = float(r["score"]) >= SURGE_SCORE_MIN and float(r["ratio"]) >= SURGE_RATIO_MIN
+        surge_mark = " ⚡" if is_surge else ""
         print(f"  {rank:<4} {r['code']:<6} {r['name']:<16} {r['score']:>6.2f} "
-              f"{r['ratio']:>5.1f}倍 {surge_str} {r['accel']:>+8.0f}%")
+              f"{r['ratio']:>5.1f}倍 {surge_str} {r['accel']:>+8.0f}%{surge_mark}")
+        if is_surge:
+            surge_list.append(r)
+
+    if surge_list:
+        print(f"\n  ⚡【急騰候補】翌朝は TP+8% / SL-1% 推奨（引け決済不可）")
+        for r in surge_list:
+            print(f"     [{r['code']}]{r['name']}  score:{r['score']:.1f}  ratio:{r['ratio']:.1f}倍"
+                  f"  過去実績: 高値+10%到達率10.6% / avg+1.02%")
 
     save_a = [{"scan_date": TODAY, "code": r["code"], "name": r["name"],
                "score": r["score"], "trend": r["trend"], "accel": r["accel"],
@@ -799,10 +1029,13 @@ def main():
             new_a = pd.concat([ex, new_a], ignore_index=True)
     new_a.to_csv(SCAN_CSV, index=False, encoding="utf-8-sig")
 
+    # ── 戦略B TDnet適時開示チェック ──
+    results_b = check_tdnet_for_strategy_b(results_b)
+
     # ── 戦略B表示 ──
     print(f"\n{'='*60}")
     print(f"【戦略B】逆張り候補（翌朝寄付き買い・翌日引け売り）")
-    print(f"  条件: 当日-5%以下 かつ リバウンドスコア3点以上")
+    print(f"  条件: 当日-4%以下 かつ リバウンドスコア3点以上")
     print(f"  期待値: +2.46%/トレード（バックテスト実績）")
 
     if condition == "PANIC":
@@ -816,24 +1049,31 @@ def main():
         print("  本日は該当銘柄なし")
     else:
         df_b = pd.DataFrame(results_b).sort_values("today_rise")
-        print(f"  {'コード':<6} {'銘柄名':<16} {'当日騰落':>8} {'終値':>8} {'RBスコア':>8} {'理由'}")
-        print("  " + "─" * 72)
+        print(f"  {'コード':<6} {'銘柄名':<16} {'当日騰落':>8} {'終値':>8} {'RBスコア':>8} {'開示':>6}  {'理由'}")
+        print("  " + "─" * 80)
         for _, r in df_b.iterrows():
             icon = "💥" if r["today_rise"] <= -20 else ("🔻" if r["today_rise"] <= -15 else "↘️")
+            sentiment = r.get("tdnet_sentiment", "なし")
+            tdnet_icon = "✨好材料" if sentiment == "好材料" else ("⚠️悪材料" if sentiment == "悪材料" else "　　　")
             print(f"  {r['code']:<6} {r['name']:<16} "
                   f"{icon}{r['today_rise']:>+6.1f}% "
                   f"{r['close']:>8.0f}円 "
                   f"{r['rebound_score']:>6}点  "
+                  f"{tdnet_icon}  "
                   f"{r['rebound_reason']}")
+            if sentiment == "好材料" and r.get("tdnet_title"):
+                print(f"         └ 開示: {r['tdnet_title'][:60]}")
         print(f"\n  ⚠️  購入前にチャートとニュースを必ず確認してください")
-        print(f"  ⚠️  損切りライン: 寄付き価格から-5%を厳守してください")
+        print(f"  ⚠️  損切りライン: 寄付き価格から-7%を厳守してください（GA最適解: TP+3%/SL-7%）")
 
         # ★ 変更: rebound_score / rebound_reason を保存列に追加
         save_b = [{"buy_date": TODAY, "code": r["code"], "name": r["name"],
                    "today_rise": r["today_rise"], "buy_price": r["close"],
                    "score": r["score"], "ratio": r["ratio"],
-                   "rebound_score":  r.get("rebound_score", 0),
-                   "rebound_reason": r.get("rebound_reason", ""),
+                   "rebound_score":   r.get("rebound_score", 0),
+                   "rebound_reason":  r.get("rebound_reason", ""),
+                   "tdnet_sentiment": r.get("tdnet_sentiment", "なし"),
+                   "tdnet_title":     r.get("tdnet_title", ""),
                    "market_condition": condition,
                    "next_rise": None, "next_open": None, "next_close": None}
                   for _, r in df_b.iterrows()]

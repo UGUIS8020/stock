@@ -13,7 +13,7 @@ call venv\Scripts\activate.bat
 echo [Step 1/2] トレードデータを最新化中...
 echo  （10〜20分かかることがあります）
 echo.
-python optimize_b.py
+python optimize\optimize_b.py
 if %errorlevel% neq 0 (
     echo.
     echo ❌ optimize_b.py でエラーが発生しました。終了します。
@@ -25,7 +25,7 @@ echo.
 echo [Step 2/2] 遺伝的アルゴリズムで最適化中...
 echo  （約2〜3分かかります）
 echo.
-python evolve_b.py --pop 20000 --gen 100
+python optimize\evolve_b.py --pop 20000 --gen 100
 if %errorlevel% neq 0 (
     echo.
     echo ❌ evolve_b.py でエラーが発生しました。

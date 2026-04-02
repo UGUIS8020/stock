@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python -c \"import sys; print\\(sys.stdin.buffer.read\\(\\).decode\\(''''utf-8'''', errors=''''replace''''\\)\\)\")",
       "Bash(python -W ignore analyze_multiday.py)",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:www.release.tdnet.info)",
+      "WebFetch(domain:web.archive.org)",
+      "WebFetch(domain:qiita.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:art-of-lives.hatenablog.com)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Owner\\.claude\\projects\\c--Users-Owner-Desktop-website-stock\\memory"
