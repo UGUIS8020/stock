@@ -1,0 +1,19 @@
+__pycache__
+venv
+.env
+
+# 大容量DBファイル（GitHub 100MB制限超え）
+out/stock.db
+*.db
+
+# 立花証券セッション情報（ログインするたびに再生成される）
+tachibana_login_response.json
+
+# Claude Code ローカル設定
+.claude/
+
+# Backup files
+.env.backup.*
+cache.log-*
+nohup.out
+venv_backup_*/

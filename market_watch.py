@@ -1,0 +1,956 @@
+"""
+market_watch.py - 寄り付き後リアルタイム監視 + AI買い価格判断
+
+scan_morning.py → ai_filter.py → market_watch.py の順で自動起動される。
+
+9:00〜9:30の間、候補銘柄の価格を15秒ごとに取得・表示し、
+9:05頃にClaudeへ価格推移を送信して「いくらで買うべきか」を判断させる。
+AIが「様子見（継続監視）」と返した場合は10分後に再判断する。
+
+実行方法:
+    python market_watch.py          # 9:00まで待機して自動開始
+    python market_watch.py --now    # 即時開始（テスト用）
+
+前提:
+    - scan_morning.py を先に実行済みであること
+    - .env に ANTHROPIC_API_KEY が設定されていること
+"""
+
+import os
+import re
+import sys
+import json
+import time
+import argparse
+import requests
+import urllib3
+import pandas as pd
+import anthropic
+import tachibana_order
+from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+
+sys.stdout.reconfigure(encoding="utf-8")
+load_dotenv()
+
+CANDIDATES_LOG_CSV   = "out/candidates_log.csv"
+MORNING_LOG_CSV      = "out/morning_log.csv"
+TACHIBANA_LOGIN_FILE = "tachibana_login_response.json"
+JST                = timezone(timedelta(hours=9))
+TODAY              = datetime.now(JST).strftime("%Y-%m-%d")
+MODEL              = "claude-haiku-4-5-20251001"
+
+# 監視設定
+POLL_INTERVAL_SEC  = 15    # 価格取得間隔（秒）
+WATCH_START_HOUR   = 9     # 監視開始時刻
+WATCH_START_MIN    = 0
+AI_JUDGE_MIN       = 5     # AI判断開始（9:05）
+WATCH_END_MIN      = 30    # 監視終了（9:30）
+AI_RETRY_MIN       = 10    # 様子見後の再判断間隔（分）
+
+# 監視銘柄数の上限（絞り込み）
+MAX_WATCH_A = 10   # 戦略A: scoreで降順
+
+# 発注設定
+DEFAULT_SHARES   = 100      # 高値株のデフォルト株数
+CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
+MAX_ORDER_AMOUNT = 100_000  # 安い株の1発注上限額
+
+
+def calc_shares(price):
+    """価格に応じた発注株数を返す（100株単位）。
+    1,000円未満の安い株は100,000円以内で買えるだけ。"""
+    if price and price < CHEAP_THRESHOLD:
+        lots = int(MAX_ORDER_AMOUNT / price / 100)
+        return max(lots, 1) * 100
+    return DEFAULT_SHARES
+
+
+# ══════════════════════════════════════════════
+# エントリータイミング判断
+# ══════════════════════════════════════════════
+# 【戦略A】バックテスト根拠 2026-03-10〜03-25（47件・BUY判定）
+# ─────────────────────────────────────────────
+# WEAK日（12件）:
+#   寄り付き→終値 平均 +1.49%
+#   → 寄り付き成行が最適。
+#
+# NORMAL日（24件）:
+#   寄り付き→終値 平均 -0.78%
+#   → 9:05以降に上昇確認してからエントリー。
+#     上昇していなければ見送りが正解。
+# ─────────────────────────────────────────────
+
+def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
+    """地合い・判定からエントリータイミング戦略を返す。
+
+    戻り値:
+        {
+          "style":        "OPEN_MARKET" | "WAIT_CONFIRM" | "SKIP",
+          "ai_trigger_min": AI判断を起動する経過分数,
+          "confirm_threshold_pct": 上昇確認に必要な前日比（%）,
+          "description":  表示用テキスト,
+        }
+    """
+    if condition == "PANIC":
+        # PANIC日: 全見送り
+        # 【根拠】PANIC日 BUY avg -0.27%、終日下落多数
+        return {
+            "style":                 "SKIP",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           "PANIC日 → 全見送り",
+        }
+
+    # WEAK日のCAUTION → AI推奨が「様子見」なら条件付きエントリー検討、それ以外は観察のみ
+    # 【根拠】WEAK日CAUTION銘柄は損失傾向（バックテスト）。
+    #         ただしAI「様子見」は期日付き材料等の個別要因を捉えている可能性がある。
+    #         +2%確認後にAI判断を起動。「見送り推奨」や判定なしはデータ蓄積のみ。
+    if condition == "WEAK" and judgment == "CAUTION":
+        if ai_recommendation == "様子見":
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        3,
+                "confirm_threshold_pct": 0.0,
+                "description":           "WEAK日CAUTION + AI様子見 → 9:03以降 即AI判断（事前様子見済み）",
+            }
+        return {
+            "style":                 "OBSERVE",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           "WEAK日CAUTION → 9:30まで観察のみ（買い禁止・データ蓄積用）",
+        }
+
+    if condition == "WEAK":
+        # WEAK日BUY: 寄り付き成行（8:55までに注文）
+        # 【根拠】上昇継続50%・反落0件・終日下落0件（12件）
+        # ※ 要再評価: 2026-04-25頃（WEAK日サンプル30件超になったら）
+        return {
+            "style":                 "OPEN_MARKET",
+            "ai_trigger_min":        3,
+            "confirm_threshold_pct": 0.0,
+            "description":           "WEAK日BUY → 寄り付き成行推奨（上昇継続率50%・反落ゼロ）",
+        }
+
+    if condition in ("NORMAL", "STRONG"):
+        if judgment == "CAUTION":
+            # CAUTION: 通常より高い上昇確認閾値でエントリー
+            threshold = 0.5 if condition == "STRONG" else 1.0
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        5,
+                "confirm_threshold_pct": threshold,
+                "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後に慎重エントリー",
+            }
+        else:
+            # BUY: 通常の上昇確認閾値
+            threshold = 0.3 if condition == "STRONG" else 0.5
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        5,
+                "confirm_threshold_pct": threshold,
+                "description":           f"{condition}日BUY → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
+            }
+
+    # UNKNOWN など
+    return {
+        "style":                 "WAIT_CONFIRM",
+        "ai_trigger_min":        5,
+        "confirm_threshold_pct": 0.5,
+        "description":           "地合い不明 → 9:05以降 上昇確認後エントリー",
+    }
+
+
+def is_v_recovery(history, dip_threshold=-0.3, recovery_min=0.5):
+    """寄り付きダウン→V字回復パターンを検出する。
+    STRONG日BUYで一時的にマイナスになっても回復中の銘柄を拾うために使用。
+
+    条件:
+      - 過去データのうち最安値が dip_threshold% 以下（一度下落した）
+      - 直近の前日比 - 最安値前日比 >= recovery_min%（V字で回復中）
+    """
+    if len(history) < 3:
+        return False
+    changes  = [h["change_pct"] for h in history]
+    min_chg  = min(changes[:-1])   # 最終点を除いた最安値
+    latest   = changes[-1]
+    return min_chg <= dip_threshold and (latest - min_chg) >= recovery_min
+
+
+# ══════════════════════════════════════════════
+# Tachibana API（立花証券）リアルタイム価格取得
+# ══════════════════════════════════════════════
+def load_tachibana_url():
+    """tachibana_login_response.json から株価URLを読み込む。失敗時はNone。"""
+    try:
+        with open(TACHIBANA_LOGIN_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        url = data.get("sUrlPrice", "")
+        return url if url else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def fetch_tachibana_prices(url_price, codes):
+    """Tachibana APIから複数銘柄の現在値・気配値・出来高を一括取得。
+    戻り値: {code: {"price", "ask", "bid", "ask_vol", "bid_vol", "prev_close", "volume"}}
+    APIの上限120件/回をバッチ分割して全件取得する。
+    """
+    if not url_price or not codes:
+        return {}
+    batch_size = 120
+    http = urllib3.PoolManager()
+    quotes = {}
+    p_no_base = int(time.time()) % 100000
+    for i, start in enumerate(range(0, len(codes), batch_size)):
+        batch = codes[start:start + batch_size]
+        code_list = ",".join(str(c) for c in batch)
+        t = datetime.now(JST)
+        p_sd_date = (f"{t.year}.{t.month:02}.{t.day:02}"
+                     f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
+                     f".{t.microsecond // 1000:03}")
+        params = (
+            "{"
+            f'"p_no":"{p_no_base + i}",'
+            f'"p_sd_date":"{p_sd_date}",'
+            '"sCLMID":"CLMMfdsGetMarketPrice",'
+            f'"sTargetIssueCode":"{code_list}",'
+            '"sTargetColumn":"pDPP,pPRP,pQAP,pQBP,pAV,pBV,pDV",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        try:
+            resp = http.request("GET", url_price + "?" + params,
+                                timeout=urllib3.Timeout(connect=3, read=5))
+            text = resp.data.decode("shift-jis", errors="ignore")
+            result = json.loads(text)
+            for item in result.get("aCLMMfdsMarketPrice", []):
+                code = item.get("sIssueCode", "").strip('"')
+                if not code or code == "stock_code":
+                    continue
+                def _f(key):
+                    v = item.get(key, "")
+                    if isinstance(v, str):
+                        v = v.strip('"')
+                    try:
+                        return float(v)
+                    except (ValueError, TypeError):
+                        return None
+                price = _f("pDPP") or _f("pPRP")
+                quotes[code] = {
+                    "price":      price,
+                    "ask":        _f("pQAP"),
+                    "bid":        _f("pQBP"),
+                    "ask_vol":    _f("pAV"),
+                    "bid_vol":    _f("pBV"),
+                    "prev_close": _f("pPRP"),
+                    "volume":     int(_f("pDV") or 0),
+                }
+        except Exception:
+            pass
+    return quotes
+
+
+# ══════════════════════════════════════════════
+# 価格取得（Yahoo Finance v8 API・フォールバック）
+# ══════════════════════════════════════════════
+def fetch_realtime_price(code):
+    """Yahoo Finance v8 APIから直近の株価を取得する。
+    遅延は約15〜30秒。立花証券API接続後はそちらに差し替え予定。
+    戻り値: {"price": 現在値, "prev_close": 前日終値, "change_pct": 前日比%, "volume": 出来高}
+    """
+    url     = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.T"
+    params  = {"interval": "1m", "range": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return None
+
+        data   = resp.json()
+        result = data["chart"]["result"][0]
+        meta   = result["meta"]
+
+        price      = meta.get("regularMarketPrice")
+        prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
+
+        if not price or not prev_close:
+            return None
+
+        change_pct = round((price - prev_close) / prev_close * 100, 2)
+
+        # 直近の出来高（分足の合計）
+        volumes   = result["indicators"]["quote"][0].get("volume", [])
+        vol_total = sum(v for v in volumes if v) if volumes else 0
+
+        return {
+            "price":      price,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "volume":     vol_total,
+        }
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════
+# 候補銘柄の読み込み
+# ══════════════════════════════════════════════
+def _extract_rb_score(reason):
+    """reason文字列から RBスコア（例: '(9点)'）を抽出する。"""
+    m = re.search(r'\((\d+)点\)', str(reason))
+    return int(m.group(1)) if m else 0
+
+
+def load_candidates():
+    """本日のBUY/CAUTION候補を読み込み、MAX_WATCH_A/B件に絞り込む。"""
+    if not os.path.exists(CANDIDATES_LOG_CSV):
+        return [], "UNKNOWN"
+
+    df        = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig")
+    today_df  = df[df["date"] == TODAY]
+    condition = today_df["condition"].iloc[0] if not today_df.empty else "UNKNOWN"
+    targets   = today_df[today_df["judgment"].isin(["BUY", "CAUTION"])].copy()
+    original  = len(targets)
+
+    # ── 戦略A: scoreで降順、上限MAX_WATCH_A件（戦略Bはclosing_watchに移管）
+    df_a = (targets[targets["strategy"] == "A"]
+            .sort_values("score", ascending=False)
+            .head(MAX_WATCH_A))
+
+    targets = df_a.drop_duplicates(subset=["code"])
+
+    if len(targets) < original:
+        print(f"  📌 監視対象を絞り込み: {original}件 → {len(targets)}件（A:{len(df_a)}件）")
+
+    candidates = []
+    for _, row in targets.iterrows():
+        candidates.append({
+            "code":              str(row["code"]),
+            "name":              str(row["name"]),
+            "strategy":          str(row["strategy"]),
+            "score":             float(row["score"]),
+            "ratio":             float(row["ratio"]) if "ratio" in row and pd.notna(row["ratio"]) else 0.0,
+            "today_rise":        float(row["today_rise"]) if "today_rise" in row and pd.notna(row["today_rise"]) else 0.0,
+            "judgment":          str(row["judgment"]),
+            "reason":            str(row["reason"]),
+            "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
+        })
+    return candidates, condition
+
+
+def load_market_info():
+    """morning_log.csvから地合い情報を読み込む"""
+    if not os.path.exists(MORNING_LOG_CSV):
+        return {}
+    try:
+        df    = pd.read_csv(MORNING_LOG_CSV, encoding="utf-8-sig")
+        today = df[df["date"] == TODAY]
+        if not today.empty:
+            return today.iloc[0].to_dict()
+    except Exception:
+        pass
+    return {}
+
+
+# ══════════════════════════════════════════════
+# AI買い価格判断
+# ══════════════════════════════════════════════
+def ask_claude_entry(candidate, price_history, condition, market_info, timing=None):
+    """5分間の価格推移をClaudeに渡し、買い価格・戦略を判断させる。"""
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    # 価格推移をテキスト化
+    def _fmt_row(r):
+        base = (f"  {r['time']}  {r['price']:,.0f}円  ({r['change_pct']:+.2f}%)  "
+                f"出来高:{r['volume']:,}株  勢い:{r['momentum']}")
+        ask, bid = r.get("ask"), r.get("bid")
+        if ask and bid:
+            base += f"  売気配:{ask:,.0f}/買気配:{bid:,.0f}"
+        return base
+    history_text = "\n".join(_fmt_row(r) for r in price_history)
+
+    first = price_history[0]  if price_history else {}
+    last  = price_history[-1] if price_history else {}
+
+    ratio      = candidate.get("ratio", 0)
+    today_rise = candidate.get("today_rise", 0)
+    price_now  = last.get("price", 0) or 0
+
+    # 異常フラグを事前に生成（AIへのヒント用）
+    anomaly_hints = []
+    if price_now > 0 and price_now < 200:
+        anomaly_hints.append(f"⚠️ 株価が{price_now:.0f}円と極端に安い（倒産・上場廃止リスクの可能性）")
+    if ratio >= 30:
+        anomaly_hints.append(f"⚠️ 出来高比率{ratio:.0f}倍（普段ほぼ出来高なし → 1日の異常値でスコアが膨らんだ可能性）")
+    elif ratio >= 15 and candidate.get("score", 0) >= 9.5:
+        anomaly_hints.append(f"⚠️ スコア{candidate['score']}・比率{ratio:.0f}倍（平常時の出来高が極端に少ない薄商い銘柄の可能性）")
+    if today_rise >= 15:
+        anomaly_hints.append(f"⚠️ 前日に{today_rise:.1f}%急騰済み（翌日の高値追いは失敗しやすい）")
+    if today_rise <= -15:
+        anomaly_hints.append(f"⚠️ 前日{today_rise:.1f}%暴落（決算・不祥事・業績修正など業績悪化の可能性。テクニカルの反発より売り継続リスクに注意）")
+    ma_match = re.search(r'MA25大幅下離れ\((-?\d+\.?\d*)%\)', candidate.get("reason", ""))
+    if ma_match and abs(float(ma_match.group(1))) >= 50:
+        anomaly_hints.append(f"⚠️ MA25から{ma_match.group(1)}%乖離（長期下落トレンドの可能性）")
+
+    anomaly_section = ""
+    if anomaly_hints:
+        anomaly_section = "\n## ⚠️ 異常検知（要注意）\n" + "\n".join(anomaly_hints) + "\n"
+
+    prompt = f"""あなたは日本株のデイトレード補助AIです。
+寄り付き後の価格推移を分析し、エントリー判断をしてください。
+
+## 銘柄情報
+- コード: {candidate['code']}  銘柄名: {candidate['name']}
+- 戦略: {candidate['strategy']}  スコア: {candidate['score']}  出来高比率: {ratio:.1f}倍
+- スキャン判定: {candidate['judgment']}  理由: {candidate['reason']}
+- 前日終値: {first.get('prev_close', '不明'):,.0f}円  前日騰落: {today_rise:+.1f}%
+{anomaly_section}
+## 今朝の地合い
+- 地合い: {condition}
+- 日経先物: {market_info.get('nikkei_change', '不明')}%  ドル円: {market_info.get('usdjpy', '不明')}円
+
+## 寄り付き後の価格推移（{len(price_history)}ポイント）
+{history_text}
+
+## 現時点のサマリー
+- 寄り付き: {first.get('price', '不明'):,.0f}円 ({first.get('change_pct', 0):+.2f}%)
+- 現在値:   {last.get('price', '不明'):,.0f}円 ({last.get('change_pct', 0):+.2f}%)
+- 値幅:     {round(last.get('price',0) - first.get('price',0), 0):+,.0f}円
+- 出来高:   {last.get('volume', 0):,}株
+
+## 判断基準（戦略{candidate['strategy']}）
+- 戦略A（順張り）: 上昇モメンタム継続中ならエントリー。目標+3%、損切り-5%
+
+## 本日の推奨タイミング戦略（バックテスト根拠）
+{timing.get('description', '不明') if timing else '不明'}
+{"- WEAK日: 上昇継続率50%・反落ゼロの実績。積極的にエントリーを検討すること" if condition == "WEAK" else ""}
+
+## エントリー判断の指針
+- この銘柄はすでに「上昇確認フィルター」を通過済みです（前日比の閾値を超えています）
+- 「買い実行」: 今すぐエントリーすべき根拠がある場合
+- 「様子見（継続監視）」: あと数分待てばより良いエントリーポイントがある場合のみ
+- 「見送り」: 明確な下落シグナル・流動性不足などエントリー不可の理由がある場合
+- ⚠️異常検知フラグがある銘柄は**必ず「見送り」にすること**（異常が本物かどうかに関わらず）
+
+## お願い
+以下をJSON形式で回答してください：
+{{
+  "判断": "買い実行" or "見送り" or "様子見（継続監視）",
+  "推奨買い価格": 数値（円）or null,
+  "指値売り価格": 数値（円）or null,
+  "損切り価格":   数値（円）or null,
+  "根拠": "判断の理由（2〜3文）",
+  "リスク": "注意すべき点（1文）",
+  "異常フラグ": true or false
+}}
+
+注意: 現在の価格トレンドと出来高の増減、そして⚠️の異常検知内容を重視して判断してください。"""
+
+    for attempt in range(3):
+        try:
+            resp = client.messages.create(
+                model=MODEL,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return resp.content[0].text
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529 and attempt < 2:
+                print(f"  ⚠️ APIが混雑中。10秒後にリトライ（{attempt+1}/3）...")
+                time.sleep(10)
+            else:
+                raise
+
+
+def confirm_and_order(candidate, ai_result, histories, url_request):
+    """
+    AI「買い実行」判断後に発注確認プロンプトを表示し、
+    ユーザーの yes/no に応じて Tachibana API で発注する。
+    """
+    code = candidate["code"]
+    name = candidate["name"]
+    hist = histories.get(code, [])
+    price     = hist[-1]["price"] if hist else None
+    rec_price = ai_result.get("推奨買い価格") or price
+    sell_p    = ai_result.get("指値売り価格")
+    stop_p    = ai_result.get("損切り価格")
+
+    shares    = calc_shares(rec_price or price)
+    estimated = int((rec_price or price or 0) * shares)
+
+    # 買い余力確認
+    buying_power = None
+    if url_request:
+        buying_power = tachibana_order.get_buying_power(url_request)
+
+    print(f"\n\a{'━'*56}")
+    print(f"  🔔🔔🔔  発注確認  [{code}] {name}  🔔🔔🔔")
+    print(f"{'━'*56}")
+    print(f"     現在値   : {price:>8,.0f}円" if price else "     現在値   : 取得中")
+    print(f"     推奨買い : {rec_price:>8,.0f}円" if rec_price else "")
+    print(f"     指値売り : {sell_p:>8,.0f}円" if sell_p else "")
+    print(f"     損切り   : {stop_p:>8,.0f}円" if stop_p else "")
+    print(f"     発注株数 : {shares}株  （変更: 数字を入力）")
+    print(f"     概算金額 : {estimated:>8,.0f}円")
+    if buying_power is not None:
+        print(f"     買余力   : {buying_power:>8,.0f}円")
+        if estimated > buying_power:
+            print(f"  ⚠️  買余力不足の可能性があります")
+    mode = "本番" if tachibana_order.LIVE_TRADING else "モック（実発注なし）"
+    print(f"     モード   : {mode}")
+    print(f"{'━'*56}")
+
+    while True:
+        ans = input(">>> [y=発注 / n=見送り / 数字=株数変更] : ").strip().lower()
+
+        if ans == "n" or ans == "":
+            print(f"  ↩️  {code} 見送りました。")
+            return
+
+        if ans.isdigit():
+            shares    = int(ans)
+            estimated = int(rec_price * shares) if rec_price else 0
+            print(f"     株数を {shares}株（概算 {estimated:,.0f}円）に変更しました。")
+            print(f"  [y=発注 / n=見送り] > ", end="", flush=True)
+            continue
+
+        if ans == "y":
+            if not url_request:
+                print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
+                return
+            print(f"  📤 発注中... {code} {shares}株 成行買い")
+            result = tachibana_order.place_buy_order(url_request, code, shares)
+            if result["success"]:
+                print(f"  ✅ {result['message']}")
+                buy_px = int(rec_price or price or 0)
+                if buy_px > 0:
+                    tachibana_order.save_position(code, name, shares, buy_px,
+                                                  strategy="A", tp_pct=0.03, sl_pct=0.05)
+            else:
+                print(f"  ❌ 発注失敗: {result['message']}")
+                print(f"     APIレスポンス: {result['raw']}")
+            return
+
+
+def parse_ai_entry(text):
+    """AIの回答をパースしてdictで返す"""
+    t = text.strip()
+    if "```" in t:
+        t = t.split("```")[1]
+        if t.startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        return {"判断": "解析失敗", "根拠": text[:200]}
+
+
+# ══════════════════════════════════════════════
+# リアルタイム監視メインループ
+# ══════════════════════════════════════════════
+def watch_loop(candidates, condition, market_info, start_now=False, url_price=None, url_request=None):
+    """9:00〜9:12の間、価格を監視してAI判断を行う"""
+
+    # 銘柄ごとにタイミング戦略を決定
+    timings         = {c["code"]: decide_timing(condition, c["judgment"], c.get("ai_recommendation", ""), c.get("strategy", "A")) for c in candidates}
+    histories       = {c["code"]: [] for c in candidates}
+    ai_results      = {c["code"]: {} for c in candidates}
+    ai_done         = {c["code"]: False for c in candidates}
+    ai_next_trigger = {c["code"]: -1 for c in candidates}  # 様子見後の再判断時刻（分、-1=未設定）
+
+    print(f"\n{'='*60}")
+    print(f"【リアルタイム監視】{len(candidates)}銘柄  地合い:{condition}")
+    for c in candidates:
+        t = timings[c["code"]]
+        print(f"  {c['code']} {c['name']}: {t['description']}")
+    print(f"{'='*60}")
+    print(f"\n  {'時刻':<8}", end="")
+    for c in candidates:
+        print(f"  {c['code']}({c['name'][:6]})", end="")
+    print()
+    print("  " + "─" * (8 + len(candidates) * 18))
+
+    while True:
+        now     = datetime.now(JST)
+        now_min = now.hour * 60 + now.minute
+
+        market_start = WATCH_START_HOUR * 60 + WATCH_START_MIN
+        ai_start     = WATCH_START_HOUR * 60 + AI_JUDGE_MIN
+        watch_end    = WATCH_START_HOUR * 60 + WATCH_END_MIN
+
+        # 終了判定
+        if now_min >= watch_end:
+            print(f"\n  ⏰ 9:{WATCH_END_MIN:02d}になりました。監視を終了します。")
+            break
+
+        # 市場開始前は待機
+        if not start_now and now_min < market_start:
+            wait_sec = (market_start - now_min) * 60 - now.second
+            print(f"  市場開始まで {wait_sec}秒待機中... ({now.strftime('%H:%M:%S')})", end="\r")
+            time.sleep(5)
+            continue
+
+        # 価格取得・表示
+        time_str = now.strftime("%H:%M:%S")
+        print(f"  {time_str}", end="")
+
+        # Tachibana API で全候補を一括取得（失敗時は空dict → Yahoo Financeへ）
+        tachibana_batch = {}
+        if url_price:
+            try:
+                tachibana_batch = fetch_tachibana_prices(
+                    url_price, [c["code"] for c in candidates]
+                )
+            except Exception:
+                tachibana_batch = {}
+
+        for c in candidates:
+            code = c["code"]
+
+            # Tachibana 優先 → Yahoo Finance フォールバック
+            tq = tachibana_batch.get(str(code))
+            if tq and tq.get("price"):
+                prev_close = tq["prev_close"] or tq["price"]
+                change_pct = (
+                    round((tq["price"] - prev_close) / prev_close * 100, 2)
+                    if prev_close else 0
+                )
+                result = {
+                    "price":      tq["price"],
+                    "prev_close": prev_close,
+                    "change_pct": change_pct,
+                    "volume":     tq.get("volume") or 0,
+                    "ask":        tq.get("ask"),
+                    "bid":        tq.get("bid"),
+                }
+            else:
+                yf_result = fetch_realtime_price(code)
+                result = yf_result  # None の場合もある
+
+            if result:
+                price      = result["price"]
+                change_pct = result["change_pct"]
+                volume     = result["volume"]
+
+                # 勢い判定（前回からの変化）
+                prev_history = histories[code]
+                if prev_history:
+                    prev_price = prev_history[-1]["price"]
+                    momentum   = "↑↑" if price > prev_price * 1.002 else \
+                                 "↑"  if price > prev_price else \
+                                 "↓↓" if price < prev_price * 0.998 else \
+                                 "↓"  if price < prev_price else "→"
+                else:
+                    momentum = "→"
+
+                histories[code].append({
+                    "time":       time_str,
+                    "price":      price,
+                    "prev_close": result["prev_close"],
+                    "change_pct": change_pct,
+                    "volume":     volume,
+                    "momentum":   momentum,
+                    "ask":        result.get("ask"),
+                    "bid":        result.get("bid"),
+                })
+
+                chg_icon = "📈" if change_pct >= 0 else "📉"
+                src_mark = "📡" if (tq and tq.get("price")) else "🌐"
+                print(f"  {src_mark}{chg_icon}{price:>7,.0f}円({change_pct:>+.1f}%)", end="")
+            else:
+                print(f"  {'取得失敗':>14}", end="")
+
+        print()  # 改行
+
+        # タイミング戦略に応じてAI判断を実施
+        for c in candidates:
+            code   = c["code"]
+            timing = timings[code]
+
+            if ai_done[code]:
+                continue
+
+            # SKIPは即判断
+            if timing["style"] == "SKIP":
+                ai_results[code] = {"判断": "見送り", "根拠": timing["description"]}
+                ai_done[code]    = True
+                continue
+
+            # OBSERVE: AI判断しない（価格記録のみ）
+            if timing["style"] == "OBSERVE":
+                ai_results[code] = {"判断": "観察中", "根拠": timing["description"]}
+                ai_done[code]    = True  # AI呼び出し不要
+                continue
+
+            # OPEN_MARKET: ai_trigger_min 経過後に上昇確認 → AI判断
+            # WAIT_CONFIRM: ai_trigger_min 経過後に閾値確認 → AI判断
+            trigger_min = timing.get("ai_trigger_min", AI_JUDGE_MIN)
+            threshold   = timing.get("confirm_threshold_pct", 0.0)
+
+            if now_min < WATCH_START_HOUR * 60 + trigger_min:
+                continue
+            if len(histories[code]) < 3:
+                continue
+
+            # 上昇確認チェック（WAIT_CONFIRMの場合）
+            latest_chg = histories[code][-1]["change_pct"] if histories[code] else 0
+            if timing["style"] == "WAIT_CONFIRM" and latest_chg < threshold:
+                # STRONG日BUY: V字回復パターン検出時はAI評価を実施
+                if condition == "STRONG" and c.get("judgment") == "BUY" and is_v_recovery(histories[code]):
+                    print(f"  📈 V字回復検出: {code} {c['name']} "
+                          f"（底値→現在: {min(h['change_pct'] for h in histories[code]):+.1f}%→{latest_chg:+.1f}%）"
+                          f" → AI評価へ")
+                    # fall through to AI evaluation below
+                # 上昇確認できなかった場合、まだ監視継続（終了時間まで待つ）
+                elif now_min < WATCH_START_HOUR * 60 + WATCH_END_MIN - 1:
+                    continue
+                # 終了間際も確認できなければ自動見送り
+                else:
+                    ai_results[code] = {
+                        "判断":   "見送り",
+                        "根拠":   f"9:{WATCH_END_MIN:02d}まで前日比+{threshold}%の上昇確認できず。"
+                                  f"現在{latest_chg:+.1f}%。NORMAL日終日下落リスクのため見送り。",
+                    }
+                    ai_done[code] = True
+                    _print_ai_result(c, ai_results[code])
+                    continue
+
+            # 様子見後の再判断待機中はスキップ
+            if ai_next_trigger[code] > 0 and now_min < ai_next_trigger[code]:
+                continue
+
+            # AI判断実行
+            print(f"\n  🤖 AI判断中: {code} {c['name']}  "
+                  f"（{timing['style']} / 現在{latest_chg:+.1f}%）...")
+            try:
+                raw    = ask_claude_entry(c, histories[code], condition, market_info, timing)
+                result = parse_ai_entry(raw)
+                ai_results[code] = result
+                _print_ai_result(c, result)
+                _save_ai_result(c, result, histories)
+
+                # 異常フラグがある場合はコード側で強制見送り（AIの判断を上書き）
+                if result.get("異常フラグ") and result.get("判断") == "買い実行":
+                    result["判断"] = "見送り"
+                    result["根拠"] = f"[異常フラグ強制見送り] {result.get('根拠', '')}"
+                    ai_results[code] = result
+                    print(f"  🚫 異常フラグにより強制見送り: [{code}] {c['name']}")
+
+                # 「買い実行」→ 発注確認プロンプト
+                if result.get("判断") == "買い実行":
+                    confirm_and_order(c, result, histories, url_request)
+
+                # 「様子見」なら AI_RETRY_MIN 後に再判断、それ以外は終了
+                if result.get("判断") == "様子見（継続監視）":
+                    ai_next_trigger[code] = now_min + AI_RETRY_MIN
+                    print(f"  🔄 {code}: {AI_RETRY_MIN}分後（{now.hour}:{now.minute + AI_RETRY_MIN:02d}頃）に再判断します")
+                else:
+                    ai_done[code] = True
+            except Exception as e:
+                print(f"  ❌ AI判断エラー: {e}")
+                ai_done[code] = True
+
+        time.sleep(POLL_INTERVAL_SEC)
+
+    # 観察データ保存 → 最終サマリー表示
+    _save_observe_log(candidates, timings, histories)
+    _print_final_summary(candidates, ai_results, histories)
+
+
+def _print_ai_result(candidate, result):
+    """AI判断結果を表示"""
+    judgment = result.get("判断", "不明")
+    price    = result.get("推奨買い価格")
+    sell     = result.get("指値売り価格")
+    stop     = result.get("損切り価格")
+    reason   = result.get("根拠", "")
+    risk     = result.get("リスク", "")
+
+    anomaly = result.get("異常フラグ", False)
+    icon = {"買い実行": "🟢", "見送り": "🔴", "様子見（継続監視）": "🟡"}.get(judgment, "⚪")
+    anomaly_mark = "  ⚠️異常検知" if anomaly else ""
+
+    print(f"\n  {'─'*56}")
+    print(f"  {icon} AI判断: {judgment}  [{candidate['code']} {candidate['name']}]{anomaly_mark}")
+    if price:
+        print(f"     推奨買い価格: {price:,.0f}円")
+    if sell:
+        print(f"     指値売り   : {sell:,.0f}円（+{round((sell/price-1)*100,1)}%）" if price else f"     指値売り: {sell:,.0f}円")
+    if stop:
+        print(f"     損切り     : {stop:,.0f}円（{round((stop/price-1)*100,1)}%）" if price else f"     損切り: {stop:,.0f}円")
+    print(f"     根拠: {reason}")
+    if risk:
+        print(f"     リスク: {risk}")
+    if anomaly:
+        print(f"     ⚠️ 異常フラグ: あり（見送り推奨）")
+    print(f"  {'─'*56}\n")
+
+
+OBSERVE_LOG_CSV = "out/observe_log.csv"
+
+
+def _save_ai_result(candidate, result, histories):
+    """market_watch の AI判定結果を candidates_log.csv に書き込む。"""
+    if not os.path.exists(CANDIDATES_LOG_CSV):
+        return
+    try:
+        cl = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig", dtype=str)
+
+        # 列がなければ追加
+        for col in ["ai_recommendation", "ai_price", "ai_sell_price",
+                    "ai_stop_price", "ai_reason", "ai_time", "ai_anomaly"]:
+            if col not in cl.columns:
+                cl[col] = ""
+
+        code = str(candidate["code"])
+        mask = (cl["date"] == TODAY) & (cl["code"].astype(str) == code)
+        if not mask.any():
+            return
+
+        hist  = histories.get(code, [])
+        price = hist[-1]["price"] if hist else None
+        now_str = datetime.now(JST).strftime("%H:%M:%S")
+
+        cl.loc[mask, "ai_recommendation"] = result.get("判断", "")
+        cl.loc[mask, "ai_price"]          = str(result.get("推奨買い価格") or "")
+        cl.loc[mask, "ai_sell_price"]     = str(result.get("指値売り価格") or "")
+        cl.loc[mask, "ai_stop_price"]     = str(result.get("損切り価格") or "")
+        cl.loc[mask, "ai_reason"]         = str(result.get("根拠") or "")[:120]
+        cl.loc[mask, "ai_time"]           = now_str
+        cl.loc[mask, "ai_anomaly"]        = "1" if result.get("異常フラグ") else ""
+
+        cl.to_csv(CANDIDATES_LOG_CSV, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"  ⚠️  AI結果の保存に失敗: {e}")
+
+def _save_observe_log(candidates, timings, histories):
+    """OBSERVEスタイルの銘柄の価格推移をCSVに保存する（後日検証用）"""
+    observe_candidates = [
+        c for c in candidates if timings[c["code"]]["style"] == "OBSERVE"
+    ]
+    if not observe_candidates:
+        return
+
+    rows = []
+    for c in observe_candidates:
+        code = c["code"]
+        for h in histories.get(code, []):
+            rows.append({
+                "date":       TODAY,
+                "code":       code,
+                "name":       c["name"],
+                "condition":  "WEAK",
+                "judgment":   c["judgment"],
+                "score":      c["score"],
+                "time":       h["time"],
+                "price":      h["price"],
+                "change_pct": h["change_pct"],
+                "volume":     h["volume"],
+                "momentum":   h["momentum"],
+            })
+
+    if not rows:
+        return
+
+    df     = pd.DataFrame(rows)
+    exists = os.path.exists(OBSERVE_LOG_CSV)
+    df.to_csv(OBSERVE_LOG_CSV, mode="a", header=not exists,
+              index=False, encoding="utf-8-sig")
+    print(f"\n  💾 観察データ保存: {OBSERVE_LOG_CSV}（{len(observe_candidates)}銘柄 × {len(rows)//max(len(observe_candidates),1)}ポイント）")
+
+
+def _print_final_summary(candidates, ai_results, histories):
+    """全銘柄の最終サマリーを表示"""
+    print(f"\n{'='*60}")
+    print(f"【最終サマリー】")
+    print(f"{'='*60}")
+
+    for c in candidates:
+        code   = c["code"]
+        result = ai_results.get(code)
+        hist   = histories.get(code, [])
+
+        if not result:
+            print(f"\n  {code} {c['name']}: AI判断なし（データ不足）")
+            continue
+
+        judgment = result.get("判断", "不明")
+        price    = result.get("推奨買い価格")
+        sell     = result.get("指値売り価格")
+        stop     = result.get("損切り価格")
+        icon     = {"買い実行": "🟢", "見送り": "🔴", "様子見（継続監視）": "🟡", "観察中": "🔵"}.get(judgment, "⚪")
+
+        first_price = hist[0]["price"] if hist else None
+        last_price  = hist[-1]["price"] if hist else None
+        last_chg    = hist[-1]["change_pct"] if hist else None
+
+        print(f"\n  {icon} {code} {c['name']}")
+        print(f"     判断    : {judgment}")
+        if first_price and last_price:
+            print(f"     値動き  : {first_price:,.0f}円 → {last_price:,.0f}円  ({last_chg:+.2f}%)")
+        if price:
+            sell_str = f"{sell:,.0f}円" if sell else "未設定"
+            stop_str = f"{stop:,.0f}円" if stop else "未設定"
+            print(f"     買い価格: {price:,.0f}円  売り:{sell_str}  損切:{stop_str}")
+
+    print(f"\n  ⚠️  AIの判断は参考情報です。最終判断はご自身で行ってください。")
+    print(f"{'='*60}\n")
+
+
+# ══════════════════════════════════════════════
+# メイン
+# ══════════════════════════════════════════════
+def main(start_now=False):
+    print(f"=== 📡 リアルタイム監視（{TODAY}）===\n")
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("❌ ANTHROPIC_API_KEY が設定されていません")
+        return
+
+    candidates, condition = load_candidates()
+    if not candidates:
+        print("  本日のBUY/CAUTION候補がありません → 監視を終了します")
+        return
+
+    # 念のため重複コードを除去
+    seen_codes: set = set()
+    candidates = [c for c in candidates if not (c["code"] in seen_codes or seen_codes.add(c["code"]))]
+
+    if condition == "PANIC":
+        print("  🚨 地合いPANIC → 監視を終了します")
+        return
+
+    market_info = load_market_info()
+
+    url_price   = load_tachibana_url()
+    url_request = tachibana_order.load_url_request()
+    if url_price:
+        print(f"  📡 Tachibana API: リアルタイム価格取得モード（遅延なし）")
+    else:
+        print(f"  🌐 Yahoo Finance: 遅延価格取得モード（立花APIにログインすると精度向上）")
+    mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
+    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//1000}万円分 / 1,000円以上→{DEFAULT_SHARES}株")
+
+    print(f"  監視対象: {len(candidates)}銘柄  地合い: {condition}")
+    for c in candidates:
+        print(f"    {c['judgment']:<8} {c['code']} {c['name']}（スコア{c['score']:.1f}）")
+
+    now = datetime.now(JST)
+    if not start_now and now.hour < WATCH_START_HOUR:
+        target = now.replace(hour=WATCH_START_HOUR, minute=WATCH_START_MIN,
+                             second=0, microsecond=0)
+        wait   = (target - now).seconds
+        print(f"\n  ⏰ 9:00まで {wait//60}分{wait%60}秒 待機します...")
+
+    watch_loop(candidates, condition, market_info, start_now=start_now,
+               url_price=url_price, url_request=url_request)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--now", action="store_true", help="即時開始（テスト用）")
+    args = parser.parse_args()
+    main(start_now=args.now)

@@ -1,0 +1,13 @@
+﻿date,code,name,change_pct,rb_score,price,ai_judgment,ai_sell_price,ai_stop_price,ai_reason,ai_anomaly
+2026-05-22,1436,グリーンエナジー＆カンパニー,-5.83,7,1875.0,,,,,
+2026-05-22,146A,146A,-5.34,6,2958.0,,,,,
+2026-05-22,1366,1366,-5.75,5,82.0,,,,,
+2026-05-22,1360,1360,-5.31,5,80.3,,,,,
+2026-05-22,1357,1357,-5.3,5,3271.0,,,,,
+2026-05-22,1459,1459,-5.04,5,132.0,,,,,
+2026-05-22,1436,グリーンエナジー＆カンパニー,-5.12,7,1889.0,エラー,,,"Error code: 529 - {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_0",
+2026-05-22,146A,146A,-5.15,6,2964.0,エラー,,,"Error code: 529 - {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_0",
+2026-05-22,1366,1366,-5.75,5,82.0,エラー,,,"Error code: 529 - {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_0",
+2026-05-22,1360,1360,-5.31,5,80.3,,,,,
+2026-05-22,1357,1357,-5.21,5,3274.0,,,,,
+2026-05-22,1459,1459,-5.04,5,132.0,,,,,

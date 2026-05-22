@@ -1,0 +1,9 @@
+=== 複数日保有バックテスト ===
+キャッシュ読込中...
+Traceback (most recent call last):
+  File "C:\Users\Owner\Desktop\website\stock\analyze_multiday.py", line 210, in <module>
+    df = build_multiday_log()
+         ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Owner\Desktop\website\stock\analyze_multiday.py", line 106, in build_multiday_log
+    print(f"\u2705 保存完了: {OUTPUT_CSV}（{len(out)}件）")
+UnicodeEncodeError: 'cp932' codec can't encode character '\u2705' in position 0: illegal multibyte sequence
