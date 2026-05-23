@@ -2,9 +2,9 @@
 closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン + 買い判断
 
 【試算根拠（2026-05-16）】
-STRONG地合い / -4〜-7% / RB>=3 / 引け前買い:
-  WR 69.5%  avg +1.482%  Sharpe +6.01（翌朝寄り買いの2.5倍）
-  ※翌朝ギャップアップ平均+0.88%を仕込み段階で確保
+STRONG地合い / -5〜-6.3% / RB>=4 / 引け前買い:
+  WR 69.2%  avg +1.373%  Sharpe +8.07（GA 30,000人・24ヶ月検証 2026-05-23）
+  TP+4.5% / SL-5.6%
 
 実行方法:
     python closing_watch.py       # 14:43まで待機して自動開始
@@ -45,11 +45,11 @@ TACHIBANA_LOGIN_FILE = "tachibana_login_response.json"
 
 SCAN_START_HOUR    = 14
 SCAN_START_MIN     = 30
-ORDER_DEADLINE_MIN = 15 * 60 + 15  # 15:15 以降は発注しない
+ORDER_DEADLINE_MIN = 15 * 60 + 25  # 15:25 以降は発注しない（引けオークション開始前）
 
-DROP_LO      = -6.0   # 下落下限（GA再検証2026-05-22）
-DROP_HI      = -4.0   # 下落上限（GA再検証2026-05-22）
-RB_MIN       = 4      # RBスコア最小値（GA再検証2026-05-22）
+DROP_LO      = -6.3   # 下落下限（GA再検証2026-05-23 30000人）
+DROP_HI      = -5.0   # 下落上限（GA再検証2026-05-23 30000人）
+RB_MIN       = 4      # RBスコア最小値（GA再検証2026-05-23 30000人）
 MIN_VOLUME   = 50_000
 MAX_AI_JUDGE = 10     # AI判断する最大件数
 
@@ -202,12 +202,36 @@ def get_today_condition():
     return "UNKNOWN"
 
 
-def _classify_condition(ad_ratio):
-    """AD比率のみで地合いを分類（nikkei_changeなし簡易版）"""
-    if   ad_ratio <= PANIC_AD:  return "PANIC"
-    elif ad_ratio <= WEAK_AD:   return "WEAK"
-    elif ad_ratio >= STRONG_AD: return "STRONG"
-    else:                       return "NORMAL"
+def _fetch_nikkei_change(url_price, http):
+    """日経225の当日騰落率(%)を取得。取得失敗時は None を返す。"""
+    NIKKEI_CODE = "998407"
+    quotes = _fetch_price_batch(url_price, [NIKKEI_CODE], http)
+    q = quotes.get(NIKKEI_CODE)
+    if not q or not q.get("price") or not q.get("prev_close") or q["prev_close"] <= 0:
+        return None
+    return (q["price"] - q["prev_close"]) / q["prev_close"] * 100
+
+
+def _classify_condition(ad_ratio, nikkei_change=None):
+    """AD比率 + 日経騰落率で地合いを分類。
+
+    STRONG: AD >= 0.60 かつ 日経 >= +0.5%（大型株も堅調）
+    PANIC:  AD <= 0.20 かつ 日経 <= -2.0%（全面安）
+    nikkei_change=None の場合はAD比率のみで判定。
+    """
+    if ad_ratio <= PANIC_AD:
+        if nikkei_change is None or nikkei_change <= PANIC_NIKKEI:
+            return "PANIC"
+        return "WEAK"  # 小型株は崩れているが日経はPANICほどでない
+
+    if ad_ratio >= STRONG_AD:
+        if nikkei_change is None or nikkei_change >= STRONG_NIKKEI:
+            return "STRONG"
+        return "NORMAL"  # 小型株は堅調だが大型株（日経）が弱い
+
+    if ad_ratio <= WEAK_AD:
+        return "WEAK"
+    return "NORMAL"
 
 
 # ══════════════════════════════════════════════
@@ -216,9 +240,9 @@ def _classify_condition(ad_ratio):
 def scan_dropping_stocks(url_price):
     """
     全銘柄を Tachibana API でスキャンし、
-    ・市場全体の AD比率（地合い計算用）
-    ・-4〜-7% 下落中の銘柄リスト
-    を返す。
+    ・市場全体の AD比率 + 日経騰落率（地合い計算用）
+    ・-5.0〜-6.3% 下落中の銘柄リスト
+    を返す。戻り値: (ad_ratio, nikkei_change, scanned_cond, dropping)
     """
     http    = urllib3.PoolManager()
     codes   = db.get_all_codes()
@@ -227,6 +251,13 @@ def scan_dropping_stocks(url_price):
     n_batch = (total + batch - 1) // batch
 
     print(f"  全{total:,}銘柄をスキャン中（{n_batch}バッチ）...", flush=True)
+
+    # 日経225取得（先に取得しておく）
+    nikkei_change = _fetch_nikkei_change(url_price, http)
+    if nikkei_change is not None:
+        print(f"  日経225: {nikkei_change:+.2f}%", flush=True)
+    else:
+        print(f"  日経225: 取得失敗（AD比率のみで判定）", flush=True)
 
     up_count = down_count = 0
     dropping = []
@@ -262,13 +293,14 @@ def scan_dropping_stocks(url_price):
         if done % (batch * 8) == 0 or done == total:
             print(f"  {done:,}/{total:,}件 完了... 候補{len(dropping)}件", flush=True)
 
-    tot      = up_count + down_count
-    ad_ratio = up_count / tot if tot > 0 else 0.5
-    scanned_cond = _classify_condition(ad_ratio)
+    tot          = up_count + down_count
+    ad_ratio     = up_count / tot if tot > 0 else 0.5
+    scanned_cond = _classify_condition(ad_ratio, nikkei_change)
 
-    print(f"  スキャン完了: 上昇{up_count:,}件 / 下落{down_count:,}件  AD比率{ad_ratio:.2f} → {scanned_cond}")
-    print(f"  -4〜-7%下落候補: {len(dropping)}件")
-    return ad_ratio, scanned_cond, dropping
+    nikkei_str = f"  日経{nikkei_change:+.2f}%" if nikkei_change is not None else ""
+    print(f"  スキャン完了: 上昇{up_count:,}件 / 下落{down_count:,}件  AD比率{ad_ratio:.2f}{nikkei_str} → {scanned_cond}")
+    print(f"  {DROP_HI}〜{DROP_LO}%下落候補: {len(dropping)}件")
+    return ad_ratio, nikkei_change, scanned_cond, dropping
 
 
 def enrich_with_rb(candidates):
@@ -310,7 +342,7 @@ def ask_claude_closing(candidate, condition, market_info):
         anomaly_section = "\n## ⚠️ 異常検知\n" + "\n".join(anomaly_hints) + "\n"
 
     prompt = f"""あなたは日本株のデイトレード補助AIです。
-引け前（14:45〜15:00）の逆張り買いについて判断してください。
+引け前（14:45〜15:30）の逆張り買いについて判断してください。
 
 ## 銘柄情報
 - コード: {code}  銘柄名: {name}
@@ -322,9 +354,9 @@ def ask_claude_closing(candidate, condition, market_info):
 ## 地合い: {condition}（STRONG確認済み）
 
 ## 戦略（引け前買い・逆張り）
-- 今日の引け（15:00）で成行き買い
-- 翌日に引け決済（または TP+3% / SL-6%）
-- 【試算根拠】STRONG×-4〜-7%×RB>=3: WR 69.5%、avg +1.482%
+- 今日の引け（15:30）で成行き買い
+- 翌日に引け決済（または TP+4.5% / SL-5.6%）
+- 【試算根拠】STRONG×-5〜-6.3%×RB>=4: WR 69.2%、avg +1.373% Sharpe=8.07
 
 ## 判断基準
 - 「買い実行」: 反発期待が高い（RB高い・出来高増・売り枯れの兆し）
@@ -392,8 +424,8 @@ def confirm_and_order(candidate, ai_result, url_request):
     print(f"{'━'*56}")
     print(f"     現在値   : {price:>8,.0f}円  （本日{candidate['change_pct']:+.2f}%）")
     print(f"     推奨買い : {rec_price:>8,.0f}円" if rec_price else "")
-    print(f"     翌日売り : {sell_p:>8,.0f}円（TP+3%目安）" if sell_p else "")
-    print(f"     損切り   : {stop_p:>8,.0f}円（SL-5.8%目安）" if stop_p else "")
+    print(f"     翌日売り : {sell_p:>8,.0f}円（TP+4.5%目安）" if sell_p else "")
+    print(f"     損切り   : {stop_p:>8,.0f}円（SL-5.6%目安）" if stop_p else "")
     print(f"     発注株数 : {shares}株  （変更: 数字を入力）")
     print(f"     概算金額 : {estimated:>8,.0f}円")
     if buying_power is not None:
@@ -425,7 +457,7 @@ def confirm_and_order(candidate, ai_result, url_request):
                 buy_px = int(rec_price or price or 0)
                 if buy_px > 0:
                     tachibana_order.save_position(code, name, shares, buy_px,
-                                                  strategy="B", tp_pct=0.03, sl_pct=0.058)
+                                                  strategy="B", tp_pct=0.045, sl_pct=0.056)
             else:
                 print(f"  ❌ 発注失敗: {result['message']}")
             return result.get("success", False)
@@ -471,6 +503,12 @@ def main(start_now=False):
         print("❌ ANTHROPIC_API_KEY が設定されていません")
         return
 
+    # 金曜日チェック（データ検証済み：金曜引け買いは週末リスクで負け越し）
+    if datetime.now(JST).weekday() == 4:  # 0=月 … 4=金
+        print("  ⛔  本日は金曜日のため引け前買いを見送ります。")
+        print("     （理由：翌月曜のギャップアップ後下落が多く、勝率44.7% / 平均-0.21%）")
+        return
+
     # Tachibana API 確認
     url_price   = load_tachibana_url()
     url_request = tachibana_order.load_url_request()
@@ -500,22 +538,27 @@ def main(start_now=False):
 
     # ── 全銘柄スキャン ──
     print(f"\n【ステップ1】全銘柄スキャン開始...")
-    ad_ratio, scanned_cond, raw_candidates = scan_dropping_stocks(url_price)
+    ad_ratio, nikkei_change, scanned_cond, raw_candidates = scan_dropping_stocks(url_price)
 
-    # スキャン結果で地合いを補正（より正確）
-    if condition == "UNKNOWN":
-        condition = scanned_cond
-    print(f"  地合い（スキャン補正後）: {condition}  AD比率: {ad_ratio:.2f}")
+    # スキャン結果で地合いを補正（実際のAD比率+日経を優先）
+    # 朝の予測よりリアルタイムの指標の方が正確なため常に上書き
+    if condition != scanned_cond:
+        print(f"  ⚠️  地合い変化: {condition}（朝予測）→ {scanned_cond}（実測AD+日経）")
+    condition = scanned_cond
+    nikkei_info = f"  日経{nikkei_change:+.2f}%" if nikkei_change is not None else ""
+    print(f"  地合い（スキャン補正後）: {condition}  AD比率: {ad_ratio:.2f}{nikkei_info}")
 
     # STRONG以外は終了
     if condition != "STRONG":
         print(f"\n  ⚠️  本日は{condition}地合いです。")
         print(f"     戦略B引け前買いはSTRONG地合いのみ有効のため終了します。")
-        print(f"     （STRONG: AD比率>={STRONG_AD} 必要 / 現在{ad_ratio:.2f}）")
+        req_str = f"AD>={STRONG_AD} かつ 日経>={STRONG_NIKKEI}%"
+        now_str = f"AD{ad_ratio:.2f}{nikkei_info}"
+        print(f"     （STRONG条件: {req_str} / 現在: {now_str}）")
         return
 
     if not raw_candidates:
-        print(f"\n  該当銘柄なし（-4〜-7%下落 × 出来高{MIN_VOLUME:,}株以上）")
+        print(f"\n  該当銘柄なし（{DROP_HI}〜{DROP_LO}%下落 × 出来高{MIN_VOLUME:,}株以上）")
         return
 
     # ── RBスコア計算 ──
@@ -543,7 +586,7 @@ def main(start_now=False):
             c["name"] = c.get("name", c["code"])
 
     print(f"\n{'='*62}")
-    print(f"【引け前候補】STRONG地合い × -4〜-7% × RB>={RB_MIN}  {len(candidates)}件")
+    print(f"【引け前候補】STRONG地合い × -5〜-6.3% × RB>={RB_MIN}  {len(candidates)}件")
     print(f"{'='*62}")
     print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'出来高':>10}")
     print(f"  {'─'*60}")
@@ -566,7 +609,7 @@ def main(start_now=False):
         code = c["code"]
 
         if now_min >= ORDER_DEADLINE_MIN:
-            print(f"  ⏰ 14:58を過ぎました。残り銘柄の判断を省略します。")
+            print(f"  ⏰ 15:25を過ぎました。残り銘柄の判断を省略します。")
             break
 
         print(f"\n  🤖 AI判断中: [{code}] {c.get('name', '')}  {c['change_pct']:+.2f}%  RB{c['rb_score']}点...")
@@ -620,7 +663,7 @@ def main(start_now=False):
             now_min = datetime.now(JST)
             now_min = now_min.hour * 60 + now_min.minute
             if now_min >= ORDER_DEADLINE_MIN:
-                print(f"  ⏰ 14:58を過ぎました。発注を中止します。")
+                print(f"  ⏰ 15:25を過ぎました。発注を中止します。")
                 break
             confirm_and_order(c, result, url_request)
     else:

@@ -24,7 +24,7 @@ import numpy as np
 import os
 import sys
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -191,15 +191,19 @@ def calc_metrics(rets):
 # ══════════════════════════════════════════════
 # データ収集（全銘柄スキャン）
 # ══════════════════════════════════════════════
-def collect_trades(market_cond, drop_threshold=-3.0):
+def collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=None):
     """
     drop_threshold 以下の下落銘柄を全件収集してトレードリストを返す。
     広めに -3% で収集し、後でフィルタリングする。
+    cutoff_date: この日付以降のデータのみ使用（例: 1年前の日付）
     """
     trades = []
     codes  = db.get_all_codes()
     total  = len(codes)
-    print(f"  スキャン中: {total:,}銘柄...", flush=True)
+    if cutoff_date:
+        print(f"  スキャン中: {total:,}銘柄（{cutoff_date}以降のデータのみ）...", flush=True)
+    else:
+        print(f"  スキャン中: {total:,}銘柄...", flush=True)
 
     for i, code in enumerate(codes):
         if i % 1000 == 0 and i > 0:
@@ -218,6 +222,9 @@ def collect_trades(market_cond, drop_threshold=-3.0):
             for idx in range(25, len(df) - 1):
                 today    = df.iloc[idx]
                 next_row = df.iloc[idx + 1]
+
+                if cutoff_date and today["Date"] < pd.Timestamp(cutoff_date):
+                    continue
 
                 scan_dt  = today["Date"].strftime("%Y-%m-%d")
                 trade_dt = next_row["Date"].strftime("%Y-%m-%d")
@@ -595,14 +602,17 @@ def write_report(stage1_df, stage2_df, stage3_df, run_date):
 # ══════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="戦略B 最適パラメータ探索")
-    parser.add_argument("--stage", type=int, choices=[1,2,3], help="実行するStageを指定")
-    parser.add_argument("--quick", action="store_true", help="高速モード（top5表示のみ）")
+    parser.add_argument("--stage",  type=int, choices=[1,2,3], help="実行するStageを指定")
+    parser.add_argument("--quick",  action="store_true", help="高速モード（top5表示のみ）")
+    parser.add_argument("--months", type=int, default=16, help="使用するデータの期間（月数、デフォルト16）")
     args = parser.parse_args()
 
     db.init_db()
-    run_date  = datetime.now().strftime("%Y-%m-%d")
-    run_all   = args.stage is None
+    run_date    = datetime.now().strftime("%Y-%m-%d")
+    run_all     = args.stage is None
+    cutoff_date = (datetime.now() - timedelta(days=args.months * 30)).strftime("%Y-%m-%d")
     trades_path = os.path.join(OUT_DIR, "opt_b_trades.csv")
+    print(f"  データ期間: 直近{args.months}ヶ月（{cutoff_date}以降）")
 
     print(f"{'='*70}")
     print(f"  戦略B 最適化シミュレーション  {run_date}")
@@ -612,16 +622,18 @@ def main():
     if os.path.exists(trades_path):
         print(f"\n既存トレードデータを読み込み中: {trades_path}")
         df = pd.read_csv(trades_path, encoding="utf-8-sig")
-        print(f"  {len(df):,}件 読み込み完了")
+        before = len(df)
+        df = df[df["scan_date"] >= cutoff_date]
+        print(f"  {before:,}件 → {len(df):,}件（{cutoff_date}以降でフィルタ）")
     else:
         df = None
 
-    if df is None:
+    if df is None or df.empty:
         print("\n地合い計算中...")
         market_cond = build_market_conditions()
         print(f"  {len(market_cond)}日分の地合いデータ")
         print("\nトレードデータ収集中（-3%以下・全銘柄）...")
-        df = collect_trades(market_cond, drop_threshold=-3.0)
+        df = collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=cutoff_date)
         print(f"  収集完了: {len(df):,}件")
         df.to_csv(trades_path, index=False, encoding="utf-8-sig")
         print(f"  保存: {trades_path}")

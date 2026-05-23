@@ -2,7 +2,13 @@
 scan_daily.py - 統合スキャナー（毎日16:30以降に実行）
 【戦略A】順張り: 出来高急増スコア上位銘柄
 【戦略C】暴落逆行高: 地合いPANIC日に上昇した銘柄（材料株分析用）
+
+実行方法:
+    python scan_daily.py              # 本日データで実行
+    python scan_daily.py --date 20260522  # 指定日データで実行（週末に前営業日分を処理する場合など）
 """
+import sys
+import argparse
 import jquantsapi
 from dotenv import load_dotenv
 import os
@@ -13,6 +19,8 @@ import re
 import requests
 import time
 from bs4 import BeautifulSoup
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 load_dotenv()
 cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
@@ -42,8 +50,16 @@ STRONG_AD_THRESHOLD     = 0.60
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs("out", exist_ok=True)
 
-TODAY     = datetime.now().strftime("%Y-%m-%d")
-TODAY_STR = datetime.now().strftime("%Y%m%d")
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--date", default=None, help="処理対象日 YYYYMMDD（省略時=本日）")
+_args, _ = _parser.parse_known_args()
+
+if _args.date:
+    TODAY_STR = _args.date
+    TODAY     = f"{_args.date[:4]}-{_args.date[4:6]}-{_args.date[6:]}"
+else:
+    TODAY     = datetime.now().strftime("%Y-%m-%d")
+    TODAY_STR = datetime.now().strftime("%Y%m%d")
 
 
 # ══════════════════════════════════════════════

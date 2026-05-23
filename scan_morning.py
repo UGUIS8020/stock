@@ -11,6 +11,7 @@ scan_morning.py - 朝スキャナー（毎朝8:30〜8:50頃に実行）
     python scan_morning.py
 """
 
+import sys
 import os
 import json
 import time
@@ -20,6 +21,7 @@ import yfinance as yf
 from datetime import datetime
 from dotenv import load_dotenv
 
+sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
 
 import db as _db
@@ -1445,7 +1447,9 @@ def main():
     print(f"   候補銘柄ログ: {CANDIDATES_LOG_CSV}（{len(candidate_rows)}件記録）")
     print(f"{'='*60}\n")
 
-    # BUY/CAUTION候補がある場合のみ、自動でAI総合レポートを起動
+    import subprocess, sys as _sys
+
+    # ── 戦略A：朝に BUY/CAUTION 候補がある場合のみ AI分析・寄り付き監視 ──
     has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
     if has_buy and condition != "PANIC":
         try:
@@ -1455,7 +1459,6 @@ def main():
             print(f"⚠️  AI分析でエラーが発生しました: {e}")
             print("   → python ai_filter.py を手動で実行してください")
 
-        # ai_filter完了後、9:00〜9:12のリアルタイム監視を起動
         try:
             import market_watch
             market_watch.main()
@@ -1463,23 +1466,23 @@ def main():
             print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
             print("   → python market_watch.py を手動で実行してください")
 
-        # market_watch完了後、ポジション監視をバックグラウンドで起動
-        import subprocess, sys as _sys
+    # ── PANIC以外は常に position_monitor・closing_watch を起動 ──
+    # 朝の地合いに関わらず午後に地合いが変化する可能性があるため常時起動する
+    # closing_watch が14:30に実際のAD比率を計測してSTRONG以外なら自動終了する
+    if condition != "PANIC":
         try:
             subprocess.Popen([_sys.executable, "position_monitor.py"])
-            print("  📊 position_monitor をバックグラウンドで起動しました（15:25まで監視）")
+            print("  📊 position_monitor をバックグラウンドで起動しました（15:28まで監視）")
         except Exception as e:
             print(f"⚠️  position_monitor の起動に失敗しました: {e}")
             print("   → python position_monitor.py を手動で実行してください")
 
-        # market_watch完了後、14:30まで待機して引け前スキャンを起動（PANIC/WEAK日は除外）
-        if condition not in ("PANIC", "WEAK"):
-            try:
-                import closing_watch
-                closing_watch.main()
-            except Exception as e:
-                print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
-                print("   → python closing_watch.py を手動で実行してください")
+        try:
+            import closing_watch
+            closing_watch.main()
+        except Exception as e:
+            print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
+            print("   → python closing_watch.py を手動で実行してください")
 
 
 if __name__ == "__main__":

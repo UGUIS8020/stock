@@ -7,6 +7,7 @@ TP または SL に達したら自動で成行売りを発注する。
 15:25 になるか全ポジションがクローズされたら終了。
 """
 
+import sys
 import csv
 import json
 import os
@@ -14,14 +15,17 @@ import time
 import urllib3
 from datetime import datetime, timezone, timedelta
 
+sys.stdout.reconfigure(encoding="utf-8")
 import tachibana_order
 
-POSITIONS_CSV  = "out/positions.csv"
-POLL_INTERVAL  = 15
-EXIT_HOUR      = 15
-EXIT_MIN       = 25
-JST            = timezone(timedelta(hours=9))
-FIELDNAMES     = tachibana_order._POSITIONS_FIELDS
+POSITIONS_CSV      = "out/positions.csv"
+POLL_INTERVAL      = 15
+EXIT_HOUR          = 15
+EXIT_MIN           = 28
+JST                = timezone(timedelta(hours=9))
+FIELDNAMES         = tachibana_order._POSITIONS_FIELDS
+GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
+GAP_CHECK_END_MIN  = 9 * 60 + 15  # 9:15までギャップチェック
 
 
 def load_positions():
@@ -51,7 +55,9 @@ def save_all_positions(updated_list):
 
 
 def fetch_prices(url_price, codes):
-    """Tachibana API で複数銘柄の現在値を一括取得。"""
+    """Tachibana API で複数銘柄の現在値・始値を一括取得。
+    戻り値: {code: {"price": 現在値, "open": 始値orNone}}
+    """
     if not url_price or not codes:
         return {}
     http    = urllib3.PoolManager()
@@ -70,7 +76,7 @@ def fetch_prices(url_price, codes):
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(chunk)}",'
-            '"sTargetColumn":"pDPP,pPRP",'
+            '"sTargetColumn":"pDPP,pPRP,pOP",'
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -86,9 +92,10 @@ def fetch_prices(url_price, codes):
                         return float(str(v).strip('"'))
                     except (ValueError, TypeError):
                         return None
-                px = _f("pDPP") or _f("pPRP")
+                px   = _f("pDPP") or _f("pPRP")
+                open_px = _f("pOP")
                 if px and code:
-                    prices[code] = px
+                    prices[code] = {"price": px, "open": open_px}
         except Exception as e:
             print(f"  ⚠️ 価格取得エラー: {e}")
     return prices
@@ -118,6 +125,8 @@ def main():
         print("  ⚠️ 業務URLが取得できません。タスクを終了します。")
         return
 
+    gap_checked = set()  # 当日ギャップチェック済みのcode
+
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
@@ -127,16 +136,16 @@ def main():
 
         positions = load_positions()
         if not positions:
-            # 15:15以降はclosing_watchの発注も終わっているので終了
-            if now_min >= 15 * 60 + 15:
+            # 15:25以降はclosing_watchの発注も終わっているので終了
+            if now_min >= 15 * 60 + 25:
                 print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし・発注締め切り済み → 終了")
                 break
             # それ以前はclosing_watchが買う可能性があるため待機継続
             time.sleep(60)
             continue
 
-        codes  = [p["code"] for p in positions]
-        prices = fetch_prices(url_price, codes)
+        codes       = [p["code"] for p in positions]
+        prices_data = fetch_prices(url_price, codes)
 
         changed = False
         for pos in positions:
@@ -145,13 +154,41 @@ def main():
             buy_px  = float(pos["buy_price"])
             tp_px   = float(pos["tp_price"])
             sl_px   = float(pos["sl_price"])
-            current = prices.get(code)
+            strategy = pos.get("strategy", "")
+            data    = prices_data.get(code)
 
-            if current is None:
+            if data is None:
                 print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: 価格取得できず")
                 continue
 
-            chg = (current - buy_px) / buy_px * 100
+            current = data["price"]
+            open_px = data.get("open")
+
+            # ── ギャップ売り判定（9:00〜9:15 / 戦略B / 未チェック） ──
+            if (strategy == "B"
+                    and code not in gap_checked
+                    and now_min < GAP_CHECK_END_MIN
+                    and open_px and open_px > 0):
+                gap_checked.add(code)
+                gap_pct = (open_px - buy_px) / buy_px * 100
+                if gap_pct > GAP_SELL_THRESHOLD:
+                    print(f"  🚀 {code} {name}: 翌朝ギャップ+{gap_pct:.2f}% → 即売り（シミュ検証済み）")
+                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]))
+                    if result["success"]:
+                        pos["status"]     = "closed"
+                        pos["sell_price"] = str(open_px)
+                        pos["sell_time"]  = now.strftime("%H:%M:%S")
+                        pos["pnl_pct"]    = str(round(gap_pct, 2))
+                        changed = True
+                        print(f"  ✅ {result['message']}  損益: {gap_pct:+.2f}% (ギャップ売り)")
+                    else:
+                        print(f"  ❌ ギャップ売り失敗: {result['message']}")
+                    continue
+                else:
+                    print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: "
+                          f"ギャップ{gap_pct:+.2f}% → 閾値以下、通常監視へ")
+
+            chg    = (current - buy_px) / buy_px * 100
             hit_tp = current >= tp_px
             hit_sl = current <= sl_px
 

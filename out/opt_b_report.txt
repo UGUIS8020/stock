@@ -1,20 +1,20 @@
-戦略B 最適化レポート — 2026-05-22
+戦略B 最適化レポート — 2026-05-23
 ======================================================================
 
 【Stage 1 最優秀条件 Top5（Sharpe順）】
-  drop-6.0〜-5.0% / RB>=4 / STRONG / TP+5%/SL-5% | N=43 WR=65.1% avg=+1.470% Sharpe=+8.89
-  drop-6.0〜-5.0% / RB>=5 / STRONG / TP+5%/SL-5% | N=30 WR=66.7% avg=+1.329% Sharpe=+8.87
-  drop-6.0〜-4.0% / RB>=6 / STRONG / 引け決済 | N=56 WR=67.9% avg=+1.343% Sharpe=+8.07
-  drop-6.0〜-5.0% / RB>=5 / STRONG / 引け決済 | N=30 WR=66.7% avg=+1.488% Sharpe=+8.02
-  drop-5.0〜-4.0% / RB>=6 / STRONG / 引け決済 | N=40 WR=65.0% avg=+1.338% Sharpe=+7.63
+  drop-6.0〜-5.0% / RB>=6 / STRONG / TP+5%/SL-5% | N=30 WR=76.7% avg=+1.597% Sharpe=+12.53
+  drop-6.0〜-5.0% / RB>=4 / STRONG / TP+5%/SL-5% | N=79 WR=74.7% avg=+1.594% Sharpe=+10.96
+  drop-6.0〜-5.0% / RB>=5 / STRONG / TP+5%/SL-5% | N=50 WR=74.0% avg=+1.524% Sharpe=+10.73
+  drop-7.0〜-6.0% / RB>=4 / STRONG / 引け決済 | N=50 WR=78.0% avg=+1.863% Sharpe=+10.71
+  drop-7.0〜-6.0% / RB>=4 / STRONG / TP+5%/SL-3% | N=50 WR=76.0% avg=+1.789% Sharpe=+10.43
 
 【Stage 2 In/Out両方プラス条件（推奨パラメータ）】
-  drop-7.0〜-5.0% / RB>=5 / STRONG / 引け決済 | In avg=+1.000% → Out avg=+1.329%
-  drop-7.0〜-6.0% / RB>=2 / STRONG / 引け決済 | In avg=+0.963% → Out avg=+1.316%
-  drop-7.0〜-5.0% / RB>=4 / STRONG / 引け決済 | In avg=+1.556% → Out avg=+1.292%
+  drop-6.0〜-5.0% / RB>=5 / STRONG / 引け決済 | In avg=+2.078% → Out avg=+1.699%
+  drop-7.0〜-6.0% / RB>=4 / STRONG / 引け決済 | In avg=+2.231% → Out avg=+1.689%
+  drop-7.0〜-5.0% / RB>=5 / STRONG / 引け決済 | In avg=+2.086% → Out avg=+1.625%
 
 【Stage 3 有効なセクター連動パターン】
   ※ セクターデータ不足（大型株キャッシュが少ない）
 
-実行日時: 2026-05-22 20:19
+実行日時: 2026-05-23 20:39
 次回実行推奨: 来月初（データ蓄積後）

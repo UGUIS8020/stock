@@ -32,7 +32,7 @@ import numpy as np
 import os
 import sys
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -67,11 +67,15 @@ TOPN_VALUES = [1, 3, 5, 999]
 # ══════════════════════════════════════════════
 # データ準備
 # ══════════════════════════════════════════════
-def load_trades():
+def load_trades(cutoff_date=None):
     if not os.path.exists(TRADES_CSV):
         print(f"❌ {TRADES_CSV} が見つかりません。先に optimize_b.py を実行してください。")
         sys.exit(1)
     df = pd.read_csv(TRADES_CSV, encoding="utf-8-sig")
+    if cutoff_date:
+        before = len(df)
+        df = df[df["scan_date"] >= cutoff_date]
+        print(f"  データ期間フィルタ: {before:,}件 → {len(df):,}件（{cutoff_date}以降）")
     # 日付でソートし、rb_rank（同日内でのRBスコア順位）を付与
     df = df.sort_values(["scan_date", "rb_score"], ascending=[True, False]).reset_index(drop=True)
     df["rb_rank"] = df.groupby("scan_date")["rb_score"].rank(ascending=False, method="first")
@@ -354,8 +358,9 @@ def walkforward_validate(top_inds, npy_in, npy_out):
 # ══════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="遺伝的アルゴリズムによる戦略B最適化")
-    parser.add_argument("--pop", type=int, default=20000, help="人口（デフォルト20000）")
-    parser.add_argument("--gen", type=int, default=100,   help="世代数（デフォルト100）")
+    parser.add_argument("--pop",    type=int, default=20000, help="人口（デフォルト20000）")
+    parser.add_argument("--gen",    type=int, default=100,   help="世代数（デフォルト100）")
+    parser.add_argument("--months", type=int, default=16,    help="使用するデータの期間（月数、デフォルト16）")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -364,8 +369,9 @@ def main():
     print("=" * 70)
 
     # ── データ読み込み ──
-    print("\nデータ読み込み中...")
-    df    = load_trades()
+    cutoff_date = (datetime.now() - timedelta(days=args.months * 30)).strftime("%Y-%m-%d")
+    print(f"\nデータ読み込み中（直近{args.months}ヶ月: {cutoff_date}以降）...")
+    df    = load_trades(cutoff_date=cutoff_date)
     dates = df["trade_date"].values
     all_dates  = sorted(df["trade_date"].unique())
     split_date = all_dates[int(len(all_dates) * WF_SPLIT)]
