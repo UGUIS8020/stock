@@ -17,14 +17,17 @@ evolve_b.py - 遺伝的アルゴリズムによる戦略B最適化
     out/evolve_b_report.txt   - サマリーレポート
 
 【染色体（1人の戦略）】
-    gene[0] drop_lo   : 何%以上の下落は対象外（-10〜-3）
-    gene[1] drop_hi   : 何%以下の下落を対象にするか（-8〜-3）
-    gene[2] rb_min    : RBスコア最低値（2〜8）
-    gene[3] gap_max   : 翌朝ギャップアップ許容上限（-3〜+5%）
-    gene[4] tp        : 利確幅（0=引け決済、1〜8%）
-    gene[5] sl        : 損切り幅（0=引け決済、-1〜-7%）
-    gene[6] cond      : 対象地合い（0=全、1=NORMAL、2=STRONG、3=N+S）
-    gene[7] top_n     : 1日に買う最大件数（1/3/5/全件）
+    gene[0] drop_lo          : 何%以上の下落は対象外（-10〜-3）
+    gene[1] drop_hi          : 何%以下の下落を対象にするか（-8〜-3）
+    gene[2] rb_min           : RBスコア最低値（2〜8）
+    gene[3] gap_max          : 翌朝ギャップアップ許容上限（-3〜+5%）
+    gene[4] tp               : 利確幅（0=引け決済、1〜8%）
+    gene[5] sl               : 損切り幅（0=引け決済、-1〜-7%）
+    gene[6] cond             : 対象地合い（0=全、1=NORMAL、2=STRONG、3=N+S）
+    gene[7] top_n            : 1日に買う最大件数（1/3/5/全件）
+    gene[8] lower_shadow_min : 下ヒゲ比率の最小値（0.0〜0.7）
+    gene[9] vol_decay_req    : 売り枯れ必須フラグ（0=不問、1=必須）
+    gene[10] consec_drop_min : 連続下落日数の最小値（1〜5）
 """
 
 import pandas as pd
@@ -49,9 +52,9 @@ MUTATE_RATE   = 0.15   # 各遺伝子の突然変異確率
 MUTATE_SIGMA  = 0.15   # 突然変異の強さ（正規化座標での標準偏差）
 
 # ── 染色体の定義（各遺伝子の最小・最大） ──
-#    [drop_lo, drop_hi, rb_min, gap_max, tp, sl, cond, top_n]
-GENE_MIN = np.array([-10.0, -8.0, 2.0, -3.0,  0.0, -7.0, 0.0, 0.0])
-GENE_MAX = np.array([ -3.0, -3.0, 8.0,  5.0,  8.0,  0.0, 4.0, 4.0])
+#    [drop_lo, drop_hi, rb_min, gap_max, tp,   sl,   cond, top_n, ls_min, vd_req, cd_min]
+GENE_MIN = np.array([-10.0, -8.0, 2.0, -3.0,  0.0, -7.0, 0.0, 0.0,  0.0,  0.0,  1.0])
+GENE_MAX = np.array([ -3.0, -3.0, 8.0,  5.0,  8.0,  0.0, 4.0, 4.0,  0.7,  1.0,  5.0])
 N_GENES  = len(GENE_MIN)
 
 # SL キャリブレーション（sim_precise.py 由来）
@@ -85,16 +88,27 @@ def load_trades(cutoff_date=None):
 def df_to_numpy(df):
     """高速評価のためにnumpy配列へ変換"""
     cond_map = {"NORMAL": 1, "STRONG": 2, "WEAK": 3}
-    return {
-        "rise":     df["today_rise"].values.astype(np.float32),
-        "rb":       df["rb_score"].values.astype(np.float32),
-        "gap":      df["gap_pct"].values.astype(np.float32),
-        "cond":     df["trade_cond"].map(cond_map).fillna(0).values.astype(np.int8),
-        "rb_rank":  df["rb_rank"].values.astype(np.float32),
-        "ret_oc":   df["ret_oc"].values.astype(np.float32),
-        "ret_max":  df["ret_max"].values.astype(np.float32),
-        "ret_low":  df["ret_low"].values.astype(np.float32),
+    result = {
+        "rise":    df["today_rise"].values.astype(np.float32),
+        "rb":      df["rb_score"].values.astype(np.float32),
+        "gap":     df["gap_pct"].values.astype(np.float32),
+        "cond":    df["trade_cond"].map(cond_map).fillna(0).values.astype(np.int8),
+        "rb_rank": df["rb_rank"].values.astype(np.float32),
+        "ret_oc":  df["ret_oc"].values.astype(np.float32),
+        "ret_max": df["ret_max"].values.astype(np.float32),
+        "ret_low": df["ret_low"].values.astype(np.float32),
     }
+    # パターン特徴量（列がない旧データはフィルターが常に通過する中立値で埋める）
+    result["lower_shadow"] = (df["lower_shadow_ratio"].values.astype(np.float32)
+                              if "lower_shadow_ratio" in df.columns
+                              else np.zeros(len(df), dtype=np.float32))
+    result["vol_decay"]    = (df["vol_decay_3d"].values.astype(np.int8)
+                              if "vol_decay_3d" in df.columns
+                              else np.ones(len(df), dtype=np.int8))
+    result["consec_drop"]  = (df["consec_drop"].values.astype(np.int8)
+                              if "consec_drop" in df.columns
+                              else np.ones(len(df), dtype=np.int8))
+    return result
 
 
 def split_numpy(npy, dates, split_date):
@@ -112,24 +126,28 @@ def decode(ind):
     """float染色体 → 実際のパラメータ辞書"""
     drop_lo = float(ind[0])
     drop_hi = float(ind[1])
-    # drop_hi（上限・less negative）は drop_lo（下限・more negative）より大きくなければならない
-    # 例: drop_hi=-4 > drop_lo=-8 が有効。逆なら drop_hi を drop_lo+0.5 に補正。
     if drop_hi <= drop_lo:
         drop_hi = drop_lo + 0.5
     rb_min   = max(2, int(round(ind[2])))
     gap_max  = float(ind[3])
     tp_raw   = float(ind[4])
     sl_raw   = float(ind[5])
-    use_close = (tp_raw < 0.5) or (sl_raw > -0.5)  # tp≈0 or sl≈0 → 引け決済
+    use_close = (tp_raw < 0.5) or (sl_raw > -0.5)
     tp = None if use_close else round(tp_raw, 1)
     sl = None if use_close else round(sl_raw, 1)
-    cond   = int(ind[6]) % 4
-    top_n  = TOPN_VALUES[int(ind[7]) % 4]
+    cond     = int(ind[6]) % 4
+    top_n    = TOPN_VALUES[int(ind[7]) % 4]
+    lower_shadow_min = round(float(ind[8]), 2)
+    vol_decay_req    = int(round(float(ind[9])))   # 0=不問 / 1=売り枯れ必須
+    consec_drop_min  = max(1, int(round(float(ind[10]))))
     return {
         "drop_lo": drop_lo, "drop_hi": drop_hi,
         "rb_min":  rb_min,  "gap_max": gap_max,
         "tp": tp, "sl": sl, "use_close": use_close,
         "cond": cond, "top_n": top_n,
+        "lower_shadow_min": lower_shadow_min,
+        "vol_decay_req":    vol_decay_req,
+        "consec_drop_min":  consec_drop_min,
     }
 
 
@@ -163,12 +181,16 @@ def evaluate_one(ind, npy):
 
     # フィルタ
     mask = (
-        (npy["rise"] <= p["drop_hi"]) &
-        (npy["rise"] >  p["drop_lo"]) &
-        (npy["rb"]   >= p["rb_min"])  &
-        (npy["gap"]  <= p["gap_max"]) &
-        (npy["rb_rank"] <= p["top_n"])
+        (npy["rise"]         <= p["drop_hi"])          &
+        (npy["rise"]         >  p["drop_lo"])          &
+        (npy["rb"]           >= p["rb_min"])            &
+        (npy["gap"]          <= p["gap_max"])           &
+        (npy["rb_rank"]      <= p["top_n"])             &
+        (npy["lower_shadow"] >= p["lower_shadow_min"]) &
+        (npy["consec_drop"]  >= p["consec_drop_min"])
     )
+    if p["vol_decay_req"] == 1:
+        mask &= npy["vol_decay"] == 1
     if p["cond"] == 1:
         mask &= npy["cond"] == 1
     elif p["cond"] == 2:
@@ -306,13 +328,17 @@ def walkforward_validate(top_inds, npy_in, npy_out):
 
         # out-of-sample の詳細指標
         mask = (
-            (npy_out["rise"] <= p["drop_hi"]) &
-            (npy_out["rise"] >  p["drop_lo"]) &
-            (npy_out["rb"]   >= p["rb_min"])  &
-            (npy_out["gap"]  <= p["gap_max"]) &
-            (npy_out["rb_rank"] <= p["top_n"])
+            (npy_out["rise"]         <= p["drop_hi"])          &
+            (npy_out["rise"]         >  p["drop_lo"])          &
+            (npy_out["rb"]           >= p["rb_min"])            &
+            (npy_out["gap"]          <= p["gap_max"])           &
+            (npy_out["rb_rank"]      <= p["top_n"])             &
+            (npy_out["lower_shadow"] >= p["lower_shadow_min"]) &
+            (npy_out["consec_drop"]  >= p["consec_drop_min"])
         )
-        if p["cond"] == 1:  mask &= npy_out["cond"] == 1
+        if p["vol_decay_req"] == 1:
+            mask &= npy_out["vol_decay"] == 1
+        if p["cond"] == 1:   mask &= npy_out["cond"] == 1
         elif p["cond"] == 2: mask &= npy_out["cond"] == 2
         elif p["cond"] == 3: mask &= npy_out["cond"] <= 2
         idx = np.where(mask)[0]
@@ -330,21 +356,30 @@ def walkforward_validate(top_inds, npy_in, npy_out):
         cond_str = COND_LABELS[p["cond"]]
         topn_str = str(p["top_n"]) if p["top_n"] < 999 else "全件"
 
+        ls_str = f"ls≥{p['lower_shadow_min']:.2f}" if p["lower_shadow_min"] > 0.05 else ""
+        vd_str = "売枯必須" if p["vol_decay_req"] == 1 else ""
+        cd_str = f"cd≥{p['consec_drop_min']}" if p["consec_drop_min"] > 1 else ""
+        pattern_str = " ".join(s for s in [ls_str, vd_str, cd_str] if s) or "-"
+
         results.append({
-            "drop_lo":   round(p["drop_lo"], 1),
-            "drop_hi":   round(p["drop_hi"], 1),
-            "rb_min":    p["rb_min"],
-            "gap_max":   round(p["gap_max"], 1),
-            "exit":      exit_str,
-            "condition": cond_str,
-            "top_n":     topn_str,
-            "in_sharpe": round(fit_in,  3),
-            "out_sharpe":round(fit_out, 3),
-            "out_n":     len(idx),
-            "out_wr":    round(wr, 1),
-            "out_avg":   round(avg, 3),
-            "out_cum":   round(cum, 1),
-            "stable":    stable,
+            "drop_lo":          round(p["drop_lo"], 1),
+            "drop_hi":          round(p["drop_hi"], 1),
+            "rb_min":           p["rb_min"],
+            "gap_max":          round(p["gap_max"], 1),
+            "exit":             exit_str,
+            "condition":        cond_str,
+            "top_n":            topn_str,
+            "lower_shadow_min": p["lower_shadow_min"],
+            "vol_decay_req":    p["vol_decay_req"],
+            "consec_drop_min":  p["consec_drop_min"],
+            "pattern":          pattern_str,
+            "in_sharpe":        round(fit_in,  3),
+            "out_sharpe":       round(fit_out, 3),
+            "out_n":            len(idx),
+            "out_wr":           round(wr, 1),
+            "out_avg":          round(avg, 3),
+            "out_cum":          round(cum, 1),
+            "stable":           stable,
         })
 
     if not results:
@@ -404,8 +439,8 @@ def main():
     print("【結果】In/Out両方プラスの戦略（★）上位20件")
     print(f"{'='*70}")
     print(f"  {'drop帯':>10} {'RB':>3} {'gap上限':>6} {'地合い':>14} {'出口':>18} "
-          f"{'件数':>5} {'勝率':>6} {'Out avg':>8} {'Out Sharpe':>10} {'安定':>4}")
-    print("  " + "─" * 90)
+          f"{'パターン':>14} {'件数':>5} {'勝率':>6} {'Out avg':>8} {'Out Sharpe':>10} {'安定':>4}")
+    print("  " + "─" * 106)
 
     shown = 0
     for _, r in wf_df.iterrows():
@@ -414,8 +449,9 @@ def main():
         band    = f"{r['drop_lo']}〜{r['drop_hi']}%"
         gap_str = f"{r['gap_max']:+.1f}%"
         mark    = r["stable"]
+        pattern = r.get("pattern", "-")
         print(f"  {band:>10} {r['rb_min']:>3} {gap_str:>6} {r['condition']:>14} "
-              f"{r['exit']:>18} {r['out_n']:>5} {r['out_wr']:>5.1f}% "
+              f"{r['exit']:>18} {pattern:>14} {r['out_n']:>5} {r['out_wr']:>5.1f}% "
               f"{r['out_avg']:>+7.3f}% {r['out_sharpe']:>+9.3f}  {mark}")
         shown += 1
 

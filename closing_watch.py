@@ -1,10 +1,11 @@
 """
 closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン + 買い判断
 
-【試算根拠（2026-05-16）】
-STRONG地合い / -5〜-6.3% / RB>=4 / 引け前買い:
-  WR 69.2%  avg +1.373%  Sharpe +8.07（GA 30,000人・24ヶ月検証 2026-05-23）
-  TP+4.5% / SL-5.6%
+【試算根拠（2026-05-24）】
+STRONG地合い / -4〜-6.7% / RB>=4 / 2日連続下落(cd≥2) / 引け前買い:
+  WR 74.5%  avg +0.644%  Sharpe +6.08（GA 30,000人・フィルタ済データ検証 2026-05-24）
+  TP+2.0% / SL-6.9%
+  ※フィルタ: 株価200円以上・売買代金5,000万円以上・±10%超除外
 
 実行方法:
     python closing_watch.py       # 14:43まで待機して自動開始
@@ -23,7 +24,6 @@ import argparse
 import urllib3
 import pandas as pd
 import numpy as np
-import anthropic
 import tachibana_order
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -35,7 +35,6 @@ import db
 
 JST   = timezone(timedelta(hours=9))
 TODAY = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
-MODEL = "claude-haiku-4-5-20251001"
 
 CANDIDATES_LOG_CSV   = "out/candidates_log.csv"
 MORNING_LOG_CSV      = "out/morning_log.csv"
@@ -47,11 +46,12 @@ SCAN_START_HOUR    = 14
 SCAN_START_MIN     = 30
 ORDER_DEADLINE_MIN = 15 * 60 + 25  # 15:25 以降は発注しない（引けオークション開始前）
 
-DROP_LO      = -6.3   # 下落下限（GA再検証2026-05-23 30000人）
-DROP_HI      = -5.0   # 下落上限（GA再検証2026-05-23 30000人）
-RB_MIN       = 4      # RBスコア最小値（GA再検証2026-05-23 30000人）
-MIN_VOLUME   = 50_000
-MAX_AI_JUDGE = 10     # AI判断する最大件数
+DROP_LO      = -6.7   # 下落下限（GA再検証2026-05-24 30000人・フィルタ済）
+DROP_HI      = -4.0   # 下落上限（GA再検証2026-05-24 30000人・フィルタ済）
+RB_MIN       = 4      # RBスコア最小値（GA再検証2026-05-24 30000人・フィルタ済）
+CD_MIN       = 2      # 連続下落日数最小値（cd≥2: 前日も下落していること）
+MIN_VOLUME          = 50_000
+MAX_POSITIONS_PER_DAY = 3      # 1日の最大自動発注件数（安全装置）
 
 DEFAULT_SHARES   = 100
 CHEAP_THRESHOLD  = 1_000
@@ -304,186 +304,98 @@ def scan_dropping_stocks(url_price):
 
 
 def enrich_with_rb(candidates):
-    """候補銘柄のRBスコアをSQLiteの履歴から計算して追加"""
-    print(f"  RBスコア計算中（{len(candidates)}件）...", flush=True)
+    """候補銘柄のRBスコア・連続下落日数をSQLiteの履歴から計算して追加"""
+    print(f"  RBスコア＋連続下落チェック中（{len(candidates)}件）...", flush=True)
+    skip_cd = 0
     for c in candidates:
         try:
             hist = db.get_stock_history(c["code"])
-            if len(hist) >= 26:
-                c["rb_score"] = calc_rebound_score(hist)
-        except Exception:
-            c["rb_score"] = 0
-    return [c for c in candidates if c["rb_score"] >= RB_MIN]
-
-
-# ══════════════════════════════════════════════
-# AI判断
-# ══════════════════════════════════════════════
-def ask_claude_closing(candidate, condition, market_info):
-    """引け前買い用AI判断プロンプト"""
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-    price     = candidate["price"]
-    prev      = candidate["prev_close"]
-    change    = candidate["change_pct"]
-    rb        = candidate["rb_score"]
-    code      = candidate["code"]
-    name      = candidate.get("name", code)
-    vol       = candidate["volume"]
-
-    # 異常フラグ事前判定
-    anomaly_hints = []
-    if price < 200:
-        anomaly_hints.append(f"⚠️ 株価{price:.0f}円と極端に安い（倒産・上場廃止リスク）")
-    if change <= -15:
-        anomaly_hints.append(f"⚠️ 本日{change:.1f}%暴落（決算・不祥事の可能性）")
-    anomaly_section = ""
-    if anomaly_hints:
-        anomaly_section = "\n## ⚠️ 異常検知\n" + "\n".join(anomaly_hints) + "\n"
-
-    prompt = f"""あなたは日本株のデイトレード補助AIです。
-引け前（14:45〜15:30）の逆張り買いについて判断してください。
-
-## 銘柄情報
-- コード: {code}  銘柄名: {name}
-- 前日終値: {prev:,.0f}円
-- 現在値:   {price:,.0f}円（本日{change:+.2f}%）
-- 本日出来高: {vol:,}株
-- RBスコア: {rb}点（反発シグナル強度）
-{anomaly_section}
-## 地合い: {condition}（STRONG確認済み）
-
-## 戦略（引け前買い・逆張り）
-- 今日の引け（15:30）で成行き買い
-- 翌日に引け決済（または TP+4.5% / SL-5.6%）
-- 【試算根拠】STRONG×-5〜-6.3%×RB>=4: WR 69.2%、avg +1.373% Sharpe=8.07
-
-## 判断基準
-- 「買い実行」: 反発期待が高い（RB高い・出来高増・売り枯れの兆し）
-- 「見送り」: 続落リスクが高い（異常フラグ・業績悪化示唆）
-- ⚠️異常検知がある場合は必ず「見送り」
-
-## 回答形式（JSON）
-{{
-  "判断": "買い実行" or "見送り",
-  "推奨買い価格": 数値（現在値付近）or null,
-  "指値売り価格": 数値（翌日TP目安）or null,
-  "損切り価格":   数値（翌日SL目安）or null,
-  "根拠": "2〜3文",
-  "異常フラグ": true or false
-}}"""
-
-    for attempt in range(5):
-        try:
-            resp = client.messages.create(
-                model=MODEL,
-                max_tokens=384,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return resp.content[0].text
-        except anthropic.APIStatusError as e:
-            if e.status_code == 529 and attempt < 4:
-                print(f"  ⚠️ API混雑。10秒後にリトライ（{attempt+1}/5）...")
-                time.sleep(10)
+            c["rb_score"]    = calc_rebound_score(hist) if len(hist) >= 26 else 0
+            # 連続下落チェック（直近DB日=前日、その前=2日前）
+            if len(hist) >= 2:
+                y_close  = float(hist["Close"].iloc[-1])   # 前日終値
+                d2_close = float(hist["Close"].iloc[-2])   # 2日前終値
+                c["consec_drop_ok"] = y_close < d2_close   # 前日も下落していれば cd≥2 成立
             else:
-                raise
+                c["consec_drop_ok"] = False
+        except Exception:
+            c["rb_score"]       = 0
+            c["consec_drop_ok"] = False
 
+    before = len(candidates)
+    result = [c for c in candidates
+              if c["rb_score"] >= RB_MIN and c.get("consec_drop_ok", False)]
+    skip_cd = before - len([c for c in candidates if c["rb_score"] >= RB_MIN])
+    skip_cd2 = len([c for c in candidates if c["rb_score"] >= RB_MIN]) - len(result)
+    if skip_cd2 > 0:
+        print(f"  cd≥{CD_MIN}フィルタ: {skip_cd2}件除外（前日も下落していない）", flush=True)
+    return result
 
-def parse_ai(text):
-    t = text.strip()
-    if "```" in t:
-        t = t.split("```")[1]
-        if t.startswith("json"):
-            t = t[4:]
-        t = t.strip()
-    try:
-        return json.loads(t)
-    except Exception:
-        return {"判断": "解析失敗", "根拠": text[:200]}
 
 
 # ══════════════════════════════════════════════
-# 発注確認
+# 自動発注
 # ══════════════════════════════════════════════
-def confirm_and_order(candidate, ai_result, url_request):
+def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
+    """完全自動発注（確認なし）。成功したら True を返す。"""
     code      = candidate["code"]
     name      = candidate.get("name", code)
     price     = candidate["price"]
-    rec_price = ai_result.get("推奨買い価格") or price
-    sell_p    = ai_result.get("指値売り価格")
-    stop_p    = ai_result.get("損切り価格")
-    shares    = calc_shares(rec_price or price)
-    estimated = int((rec_price or price or 0) * shares)
+    shares    = calc_shares(price)
+    estimated = int(price * shares)
+    tp_price  = round(price * 1.020)
+    sl_price  = round(price * 0.931)
 
-    buying_power = None
+    # 重複発注防止
+    if str(code) in ordered_today:
+        print(f"  ⏭️  [{code}] 本日すでに発注済み - スキップ")
+        return False
+
+    # 買付余力チェック
     if url_request:
         buying_power = tachibana_order.get_buying_power(url_request)
-
-    print(f"\n\a{'━'*56}")
-    print(f"  🔔🔔🔔  引け前発注確認  [{code}] {name}  🔔🔔🔔")
-    print(f"{'━'*56}")
-    print(f"     現在値   : {price:>8,.0f}円  （本日{candidate['change_pct']:+.2f}%）")
-    print(f"     推奨買い : {rec_price:>8,.0f}円" if rec_price else "")
-    print(f"     翌日売り : {sell_p:>8,.0f}円（TP+4.5%目安）" if sell_p else "")
-    print(f"     損切り   : {stop_p:>8,.0f}円（SL-5.6%目安）" if stop_p else "")
-    print(f"     発注株数 : {shares}株  （変更: 数字を入力）")
-    print(f"     概算金額 : {estimated:>8,.0f}円")
-    if buying_power is not None:
-        print(f"     買余力   : {buying_power:>8,.0f}円")
-        if estimated > buying_power:
-            print(f"  ⚠️  買余力不足の可能性があります")
-    mode = "本番" if tachibana_order.LIVE_TRADING else "モック（実発注なし）"
-    print(f"     モード   : {mode}")
-    print(f"{'━'*56}")
-
-    while True:
-        ans = input(">>> [y=発注 / n=見送り / 数字=株数変更] : ").strip().lower()
-        if ans in ("n", ""):
-            print(f"  ↩️  {code} 見送りました。")
+        if buying_power is not None and estimated > buying_power:
+            print(f"  ❌ [{code}] 買付余力不足（必要{estimated:,}円 / 余力{buying_power:,}円）- スキップ")
             return False
-        if ans.isdigit():
-            shares    = int(ans)
-            estimated = int(rec_price * shares) if rec_price else 0
-            print(f"  株数を{shares}株（概算{estimated:,.0f}円）に変更。[y=発注/n=見送り] > ", end="", flush=True)
-            continue
-        if ans == "y":
-            if not url_request:
-                print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
-                return False
-            print(f"  📤 発注中... {code} {shares}株 成行買い（引け）")
-            result = tachibana_order.place_buy_order(url_request, code, shares)
-            if result["success"]:
-                print(f"  ✅ {result['message']}")
-                buy_px = int(rec_price or price or 0)
-                if buy_px > 0:
-                    tachibana_order.save_position(code, name, shares, buy_px,
-                                                  strategy="B", tp_pct=0.045, sl_pct=0.056)
-            else:
-                print(f"  ❌ 発注失敗: {result['message']}")
-            return result.get("success", False)
+
+    mode = "本番" if tachibana_order.LIVE_TRADING else "モック"
+    print(f"\n  📤 自動発注 [{mode}]: [{code}] {name}  "
+          f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
+    print(f"     TP目安: {tp_price:,}円 (+2.0%)  SL目安: {sl_price:,}円 (-6.9%)")
+
+    result = tachibana_order.place_buy_order(url_request, code, shares)
+    if result["success"]:
+        print(f"  ✅ {result['message']}")
+        tachibana_order.save_position(
+            code, name, shares, price,
+            strategy="B", tp_pct=0.020, sl_pct=0.069,
+            entry_change_pct=candidate.get("change_pct"),
+            rb_score=candidate.get("rb_score"),
+            condition=condition,
+        )
+        ordered_today.add(str(code))
+        return True
+    else:
+        print(f"  ❌ 発注失敗: {result['message']}")
+        return False
 
 
 # ══════════════════════════════════════════════
 # 結果保存
 # ══════════════════════════════════════════════
-def save_closing_log(candidates, ai_results):
-    """AI判断結果を closing_log.csv に保存"""
+def save_closing_log(candidates):
+    """候補銘柄をclosing_log.csvに保存"""
     rows = []
     for c in candidates:
-        code   = c["code"]
-        result = ai_results.get(code, {})
         rows.append({
-            "date":           TODAY,
-            "code":           code,
-            "name":           c.get("name", ""),
-            "change_pct":     c["change_pct"],
-            "rb_score":       c["rb_score"],
-            "price":          c["price"],
-            "ai_judgment":    result.get("判断", ""),
-            "ai_sell_price":  result.get("指値売り価格", ""),
-            "ai_stop_price":  result.get("損切り価格", ""),
-            "ai_reason":      str(result.get("根拠", ""))[:120],
-            "ai_anomaly":     "1" if result.get("異常フラグ") else "",
+            "date":       TODAY,
+            "code":       c["code"],
+            "name":       c.get("name", ""),
+            "change_pct": c["change_pct"],
+            "rb_score":   c["rb_score"],
+            "price":      c["price"],
+            "tp_price":   round(c["price"] * 1.020),
+            "sl_price":   round(c["price"] * 0.931),
         })
     df     = pd.DataFrame(rows)
     exists = os.path.exists(CLOSING_LOG_CSV)
@@ -495,13 +407,10 @@ def save_closing_log(candidates, ai_results):
 # ══════════════════════════════════════════════
 # メイン
 # ══════════════════════════════════════════════
-def main(start_now=False):
+def main(start_now=False, manual=False):
     db.init_db()
-    print(f"=== 📉 引け前スキャン（{TODAY}）===\n")
-
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        print("❌ ANTHROPIC_API_KEY が設定されていません")
-        return
+    mode_label = "【手動確認モード】" if manual else "【全自動モード】"
+    print(f"=== 📉 引け前スキャン（{TODAY}）{mode_label}===\n")
 
     # 金曜日チェック（データ検証済み：金曜引け買いは週末リスクで負け越し）
     if datetime.now(JST).weekday() == 4:  # 0=月 … 4=金
@@ -585,92 +494,78 @@ def main(start_now=False):
         for c in candidates:
             c["name"] = c.get("name", c["code"])
 
+    # ── 異常フラグ除外（コードで処理）──
+    before = len(candidates)
+    candidates = [c for c in candidates if c["change_pct"] > -15 and c["price"] >= 200]
+    removed = before - len(candidates)
+    if removed > 0:
+        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価200円未満）")
+
+    if not candidates:
+        print(f"  異常フラグ除外後、該当銘柄なし")
+        return
+
     print(f"\n{'='*62}")
-    print(f"【引け前候補】STRONG地合い × -5〜-6.3% × RB>={RB_MIN}  {len(candidates)}件")
+    print(f"【引け前候補】STRONG地合い × {DROP_HI}〜{DROP_LO}% × RB>={RB_MIN} × cd≥{CD_MIN}  {len(candidates)}件")
     print(f"{'='*62}")
-    print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'出来高':>10}")
-    print(f"  {'─'*60}")
-    for c in candidates[:MAX_AI_JUDGE]:
+    print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'TP目安':>8} {'SL目安':>8} {'出来高':>10}")
+    print(f"  {'─'*72}")
+    for c in candidates:
+        tp = round(c["price"] * 1.020)
+        sl = round(c["price"] * 0.931)
         print(f"  {c['code']:<7} {c.get('name',''):<14} {c['change_pct']:>+6.2f}% "
-              f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {c['volume']:>10,}株")
-    if len(candidates) > MAX_AI_JUDGE:
-        print(f"  ... 他{len(candidates)-MAX_AI_JUDGE}件（上位{MAX_AI_JUDGE}件をAI判断）")
+              f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
 
-    # ── AI判断 ──
-    print(f"\n【ステップ3】AI判断（上位{min(len(candidates), MAX_AI_JUDGE)}件）...")
-    market_info = {}
-    ai_results  = {}
-    buy_list    = []
-
-    now_min = datetime.now(JST)
-    now_min = now_min.hour * 60 + now_min.minute
-
-    for c in candidates[:MAX_AI_JUDGE]:
-        code = c["code"]
-
-        if now_min >= ORDER_DEADLINE_MIN:
-            print(f"  ⏰ 15:25を過ぎました。残り銘柄の判断を省略します。")
-            break
-
-        print(f"\n  🤖 AI判断中: [{code}] {c.get('name', '')}  {c['change_pct']:+.2f}%  RB{c['rb_score']}点...")
+    # ── 本日すでに発注済みの銘柄を取得（再実行時の重複防止）──
+    ordered_today = set()
+    if os.path.exists(tachibana_order.POSITIONS_CSV):
         try:
-            raw    = ask_claude_closing(c, condition, market_info)
-            result = parse_ai(raw)
-            ai_results[code] = result
+            df_pos = pd.read_csv(tachibana_order.POSITIONS_CSV, encoding="utf-8")
+            today_orders = df_pos[df_pos["date"] == TODAY]
+            ordered_today = set(today_orders["code"].astype(str))
+        except Exception:
+            pass
 
-            judgment = result.get("判断", "不明")
-            anomaly  = result.get("異常フラグ", False)
-
-            # 異常フラグ強制見送り
-            if anomaly and judgment == "買い実行":
-                result["判断"] = "見送り"
-                result["根拠"] = f"[異常フラグ強制見送り] {result.get('根拠', '')}"
-                judgment = "見送り"
-                print(f"  🚫 異常フラグにより強制見送り")
-
-            icon = {"買い実行": "🟢", "見送り": "🔴"}.get(judgment, "⚪")
-            price_info = ""
-            rec_p = result.get("推奨買い価格")
-            sel_p = result.get("指値売り価格")
-            stp_p = result.get("損切り価格")
-            if rec_p:
-                price_info = f"  買:{rec_p:,.0f}円"
-            if sel_p:
-                price_info += f" → 売:{sel_p:,.0f}円"
-            if stp_p:
-                price_info += f" / 損:{stp_p:,.0f}円"
-            print(f"  {icon} {judgment}{price_info}")
-            print(f"     {result.get('根拠', '')}")
-
-            if judgment == "買い実行":
-                buy_list.append(c)
-
-        except Exception as e:
-            print(f"  ❌ AI判断エラー: {e}")
-            ai_results[code] = {"判断": "エラー", "根拠": str(e)}
-
+    # ── 発注（自動 or 手動確認）──
+    label = "手動確認" if manual else f"自動発注（上限{MAX_POSITIONS_PER_DAY}件）"
+    print(f"\n【ステップ3】{label}...")
+    order_count = 0
+    for c in candidates:
+        if not manual and order_count >= MAX_POSITIONS_PER_DAY:
+            print(f"  ⚠️  本日の上限{MAX_POSITIONS_PER_DAY}件に達しました。残り銘柄はスキップします。")
+            break
         now_min = datetime.now(JST)
         now_min = now_min.hour * 60 + now_min.minute
+        if now_min >= ORDER_DEADLINE_MIN:
+            print(f"  ⏰ 15:25を過ぎました。発注を中止します。")
+            break
 
-    # ── 発注確認 ──
-    if buy_list:
-        print(f"\n{'='*62}")
-        print(f"【発注候補】AI「買い実行」: {len(buy_list)}件")
-        print(f"{'='*62}")
-        for c in buy_list:
-            code   = c["code"]
-            result = ai_results.get(code, {})
-            now_min = datetime.now(JST)
-            now_min = now_min.hour * 60 + now_min.minute
-            if now_min >= ORDER_DEADLINE_MIN:
-                print(f"  ⏰ 15:25を過ぎました。発注を中止します。")
+        if manual:
+            # 手動確認モード: y/n で1件ずつ確認
+            code  = c["code"]
+            name  = c.get("name", code)
+            price = c["price"]
+            tp    = round(price * 1.020)
+            sl    = round(price * 0.931)
+            print(f"\n  [{code}] {name}  {price:,.0f}円  {c['change_pct']:+.2f}%  "
+                  f"RB{c['rb_score']}点  TP:{tp:,}円  SL:{sl:,}円")
+            ans = input("  >>> 発注しますか？ [y=発注 / n=見送り / q=終了] : ").strip().lower()
+            if ans == "q":
+                print("  手動モード終了。")
                 break
-            confirm_and_order(c, result, url_request)
-    else:
-        print(f"\n  AI「買い実行」なし。本日の引け前スキャン終了。")
+            elif ans == "y":
+                if auto_order(c, url_request, ordered_today, condition):
+                    order_count += 1
+            else:
+                print(f"  ↩️  {code} 見送り。")
+        else:
+            if auto_order(c, url_request, ordered_today, condition):
+                order_count += 1
+
+    print(f"\n  本日の発注件数: {order_count}件")
 
     # ── ログ保存 ──
-    save_closing_log(candidates[:MAX_AI_JUDGE], ai_results)
+    save_closing_log(candidates)
 
     print(f"\n{'='*62}")
     print(f"  引け前スキャン完了  {datetime.now(JST).strftime('%H:%M:%S')}")
@@ -679,6 +574,7 @@ def main(start_now=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="引け前下落銘柄スキャン + 買い判断")
-    parser.add_argument("--now", action="store_true", help="即時開始（テスト用）")
+    parser.add_argument("--now",    action="store_true", help="即時開始（テスト用）")
+    parser.add_argument("--manual", action="store_true", help="手動確認モード（1件ずつ y/n で確認）")
     args = parser.parse_args()
-    main(start_now=args.now)
+    main(start_now=args.now, manual=args.manual)

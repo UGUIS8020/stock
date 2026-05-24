@@ -25,7 +25,8 @@ EXIT_MIN           = 28
 JST                = timezone(timedelta(hours=9))
 FIELDNAMES         = tachibana_order._POSITIONS_FIELDS
 GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
-GAP_CHECK_END_MIN  = 9 * 60 + 15  # 9:15までギャップチェック
+GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
+FORCE_CLOSE_MIN    = 15 * 60 + 25  # 15:25 前日ポジションを引け成行で強制決済
 
 
 def load_positions():
@@ -125,11 +126,42 @@ def main():
         print("  ⚠️ 業務URLが取得できません。タスクを終了します。")
         return
 
-    gap_checked = set()  # 当日ギャップチェック済みのcode
+    TODAY       = datetime.now(JST).strftime("%Y-%m-%d")
+    gap_checked  = set()   # 当日ギャップチェック済みのcode
+    force_closed = False   # 15:25 引け決済実施フラグ
 
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
+
+        # ── 15:25: 前日以前のポジションを引け成行で強制決済 ──
+        if not force_closed and now_min >= FORCE_CLOSE_MIN:
+            force_closed = True
+            prev_positions = [p for p in load_positions() if p["date"] < TODAY]
+            if prev_positions:
+                print(f"\n  ⏰ 15:25 引け決済開始（前日ポジション {len(prev_positions)}件）")
+                updated = []
+                for pos in prev_positions:
+                    code  = pos["code"]
+                    name  = pos["name"]
+                    shares = int(pos["shares"])
+                    print(f"  📤 引け成行売り: [{code}] {name} {shares}株")
+                    result = tachibana_order.place_sell_order(url_request, code, shares)
+                    if result["success"]:
+                        data    = fetch_prices(url_price, [code])
+                        current = (data.get(code) or {}).get("price") or float(pos["buy_price"])
+                        chg     = (current - float(pos["buy_price"])) / float(pos["buy_price"]) * 100
+                        pos["status"]      = "closed"
+                        pos["sell_price"]  = str(current)
+                        pos["sell_time"]   = now.strftime("%H:%M:%S")
+                        pos["pnl_pct"]     = str(round(chg, 2))
+                        pos["exit_reason"] = "force_close"
+                        print(f"  ✅ {result['message']}  損益: {chg:+.2f}%（引け決済）")
+                    else:
+                        print(f"  ❌ 引け決済失敗: {result['message']}")
+                    updated.append(pos)
+                save_all_positions(updated)
+
         if now_min >= EXIT_HOUR * 60 + EXIT_MIN:
             print(f"\n  ⏰ {EXIT_HOUR}:{EXIT_MIN:02} 到達 → 監視終了")
             break
@@ -179,6 +211,7 @@ def main():
                         pos["sell_price"] = str(open_px)
                         pos["sell_time"]  = now.strftime("%H:%M:%S")
                         pos["pnl_pct"]    = str(round(gap_pct, 2))
+                        pos["exit_reason"] = "gap_sell"
                         changed = True
                         print(f"  ✅ {result['message']}  損益: {gap_pct:+.2f}% (ギャップ売り)")
                     else:
@@ -198,10 +231,11 @@ def main():
                       f"{reason} 到達 ({current}円 {chg:+.2f}%) → 売り発注")
                 result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]))
                 if result["success"]:
-                    pos["status"]     = "closed"
-                    pos["sell_price"] = str(current)
-                    pos["sell_time"]  = now.strftime("%H:%M:%S")
-                    pos["pnl_pct"]    = str(round(chg, 2))
+                    pos["status"]      = "closed"
+                    pos["sell_price"]  = str(current)
+                    pos["sell_time"]   = now.strftime("%H:%M:%S")
+                    pos["pnl_pct"]     = str(round(chg, 2))
+                    pos["exit_reason"] = "TP" if hit_tp else "SL"
                     changed = True
                     emoji = "✅" if hit_tp else "🛑"
                     print(f"  {emoji} {result['message']}  損益: {chg:+.2f}%")

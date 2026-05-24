@@ -35,6 +35,10 @@ import db
 # ══════════════════════════════════════════════
 OUT_DIR       = "out"
 MIN_VOLUME    = 50_000
+MIN_PRICE     = 200          # 株価200円未満除外（倒産・上場廃止リスク）
+MIN_TURNOVER  = 50_000_000   # 売買代金5,000万円未満除外（流動性不足、scan_daily.pyと統一）
+RET_WIN_HI    =  10.0        # 翌日リターン上限（+10%超=M&A・TOBなど特殊イベント）
+RET_WIN_LO    = -10.0        # 翌日リターン下限（-10%未満=不祥事・倒産前兆など特殊イベント）
 MIN_SAMPLE    = 30          # パラメータ評価に必要な最小サンプル数
 WF_SPLIT      = 0.60        # ウォークフォワード: 前60%をin-sample
 
@@ -196,8 +200,15 @@ def collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=None):
     drop_threshold 以下の下落銘柄を全件収集してトレードリストを返す。
     広めに -3% で収集し、後でフィルタリングする。
     cutoff_date: この日付以降のデータのみ使用（例: 1年前の日付）
+
+    適用フィルタ:
+      - 出来高 < MIN_VOLUME (50,000株) → 流動性なし
+      - 株価 < MIN_PRICE (200円) → 倒産・上場廃止リスク
+      - 売買代金 < MIN_TURNOVER (5,000万円) → 実際に買えない
     """
     trades = []
+    skip_price    = 0   # 株価フィルタで除外
+    skip_turnover = 0   # 売買代金フィルタで除外
     codes  = db.get_all_codes()
     total  = len(codes)
     if cutoff_date:
@@ -236,6 +247,17 @@ def collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=None):
                 if float(today["Volume"]) < MIN_VOLUME:
                     continue
 
+                # 株価フィルタ（200円未満除外）
+                today_close = float(today["Close"])
+                if today_close < MIN_PRICE:
+                    skip_price += 1
+                    continue
+
+                # 売買代金フィルタ（5,000万円未満除外）
+                if today_close * float(today["Volume"]) < MIN_TURNOVER:
+                    skip_turnover += 1
+                    continue
+
                 prev_c = float(df.iloc[idx - 1]["Close"])
                 if prev_c <= 0:
                     continue
@@ -256,22 +278,55 @@ def collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=None):
                 cl  = float(next_row["Close"])
                 gap = (op - float(today["Close"])) / float(today["Close"]) * 100
 
+                # ── パターン特徴量 ──
+                t_o = float(today["Open"])
+                t_h = float(today["High"])
+                t_l = float(today["Low"])
+                t_c = float(today["Close"])
+                day_range = t_h - t_l
+                lower_shadow = min(t_o, t_c) - t_l
+                lower_shadow_ratio = round(lower_shadow / day_range, 3) if day_range > 0 else 0.0
+
+                # 直近3日の出来高が連続減少（売り枯れ）
+                if idx >= 2:
+                    v0 = float(df.iloc[idx - 2]["Volume"])
+                    v1 = float(df.iloc[idx - 1]["Volume"])
+                    v2 = float(today["Volume"])
+                    vol_decay_3d = int(v0 > v1 > v2 and v2 > 0)
+                else:
+                    vol_decay_3d = 0
+
+                # 連続下落日数（終値ベース、当日含む）
+                consec_drop = 1  # 当日は today_rise < drop_threshold で確認済み
+                for back in range(idx - 1, max(0, idx - 9), -1):
+                    if back == 0:
+                        break
+                    if float(df.iloc[back]["Close"]) < float(df.iloc[back - 1]["Close"]):
+                        consec_drop += 1
+                    else:
+                        break
+
                 trades.append({
-                    "code":       code,
-                    "scan_date":  scan_dt,
-                    "trade_date": trade_dt,
-                    "scan_cond":  scan_c,
-                    "trade_cond": trade_c,
-                    "today_rise": round(today_rise, 2),
-                    "rb_score":   rb_score,
-                    "gap_pct":    round(gap, 2),
-                    "ret_oc":     round((cl - op) / op * 100, 2),
-                    "ret_max":    round((hi - op) / op * 100, 2),
-                    "ret_low":    round((lo - op) / op * 100, 2),
+                    "code":                code,
+                    "scan_date":           scan_dt,
+                    "trade_date":          trade_dt,
+                    "scan_cond":           scan_c,
+                    "trade_cond":          trade_c,
+                    "today_rise":          round(today_rise, 2),
+                    "rb_score":            rb_score,
+                    "gap_pct":             round(gap, 2),
+                    "ret_oc":              round((cl - op) / op * 100, 2),
+                    "ret_max":             round((hi - op) / op * 100, 2),
+                    "ret_low":             round((lo - op) / op * 100, 2),
+                    "lower_shadow_ratio":  lower_shadow_ratio,
+                    "vol_decay_3d":        vol_decay_3d,
+                    "consec_drop":         consec_drop,
                 })
         except Exception:
             pass
 
+    print(f"  [フィルタ] 株価<{MIN_PRICE}円除外: {skip_price:,}件 / "
+          f"売買代金<{MIN_TURNOVER//10000:,}万円除外: {skip_turnover:,}件", flush=True)
     return pd.DataFrame(trades)
 
 
@@ -628,15 +683,43 @@ def main():
     else:
         df = None
 
+    filter_log = []   # フィルタ適用記録（後でCSV保存）
+
     if df is None or df.empty:
         print("\n地合い計算中...")
         market_cond = build_market_conditions()
         print(f"  {len(market_cond)}日分の地合いデータ")
         print("\nトレードデータ収集中（-3%以下・全銘柄）...")
         df = collect_trades(market_cond, drop_threshold=-3.0, cutoff_date=cutoff_date)
-        print(f"  収集完了: {len(df):,}件")
+        n_raw = len(df)
+        print(f"  収集完了（生データ）: {n_raw:,}件")
+
+        # ── ウィンザライゼーション: 翌日リターン ±10% 超を除外 ──
+        mask_win  = (df["ret_oc"] >= RET_WIN_LO) & (df["ret_oc"] <= RET_WIN_HI)
+        n_removed = (~mask_win).sum()
+        df        = df[mask_win].reset_index(drop=True)
+        print(f"  [ウィンザライゼーション] ±{RET_WIN_HI:.0f}%超除外: {n_removed:,}件 → {len(df):,}件")
+        filter_log.append({
+            "run_date":      run_date,
+            "filter":        f"ウィンザライゼーション(±{RET_WIN_HI:.0f}%超)",
+            "before":        n_raw,
+            "removed":       n_removed,
+            "after":         len(df),
+            "note":          "M&A・TOB・不祥事など再現不能な特殊イベントを除外",
+        })
+
         df.to_csv(trades_path, index=False, encoding="utf-8-sig")
         print(f"  保存: {trades_path}")
+
+    # ── フィルタログ保存 ──
+    if filter_log:
+        log_path = os.path.join(OUT_DIR, "opt_b_filter_log.csv")
+        new_log  = pd.DataFrame(filter_log)
+        if os.path.exists(log_path):
+            old_log = pd.read_csv(log_path, encoding="utf-8-sig")
+            new_log = pd.concat([old_log, new_log], ignore_index=True)
+        new_log.to_csv(log_path, index=False, encoding="utf-8-sig")
+        print(f"  フィルタログ保存: {log_path}")
 
     print(f"\nデータ概要: {len(df):,}件 / {df['trade_date'].nunique()}日")
     print(f"  期間: {df['scan_date'].min()} 〜 {df['scan_date'].max()}")
