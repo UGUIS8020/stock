@@ -1,5 +1,6 @@
 __pycache__
 venv
+.venv
 .env
 
 # 大容量DBファイル（GitHub 100MB制限超え）
