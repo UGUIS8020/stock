@@ -17,4 +17,4 @@ tachibana_login_response.json
 .env.backup.*
 cache.log-*
 nohup.out
-venv_backup_*/
+venv_backup_*/.venv
