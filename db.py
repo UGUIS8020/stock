@@ -12,6 +12,7 @@ db.py - SQLite データベースヘルパー
 import os
 import sqlite3
 import pandas as pd
+from datetime import datetime
 
 DB_PATH = "out/stock.db"
 
@@ -78,6 +79,76 @@ def init_db():
             rebound_score    REAL, rebound_reason  TEXT,
             tdnet_sentiment  TEXT, tdnet_title     REAL,
             PRIMARY KEY (buy_date, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS positions (
+            date             TEXT NOT NULL,
+            code             TEXT NOT NULL,
+            name             TEXT,
+            shares           INTEGER,
+            buy_price        REAL,
+            tp_price         REAL,
+            sl_price         REAL,
+            strategy         TEXT,
+            buy_time         TEXT,
+            status           TEXT DEFAULT 'open',
+            sell_price       REAL,
+            sell_time        TEXT,
+            pnl_pct          REAL,
+            exit_reason      TEXT DEFAULT '',
+            entry_change_pct REAL,
+            rb_score         REAL,
+            condition        TEXT,
+            PRIMARY KEY (date, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS closing_log (
+            date       TEXT NOT NULL,
+            code       TEXT NOT NULL,
+            name       TEXT,
+            change_pct REAL,
+            rb_score   REAL,
+            price      REAL,
+            tp_price   REAL,
+            sl_price   REAL,
+            PRIMARY KEY (date, code)
+        );
+
+        CREATE TABLE IF NOT EXISTS market_log (
+            date                    TEXT PRIMARY KEY,
+            condition               TEXT,
+            ad_ratio                REAL,
+            nikkei_change           REAL,
+            up_count                INTEGER,
+            down_count              INTEGER,
+            strategy_a_success_rate REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS morning_log (
+            date               TEXT PRIMARY KEY,
+            condition_forecast TEXT,
+            condition_score    REAL,
+            us_avg_change      REAL,
+            dow_change         REAL,
+            nasdaq_change      REAL,
+            sp500_change       REAL,
+            nikkei_change      REAL,
+            usdjpy             REAL,
+            strategy_a_thr     REAL,
+            stop_loss_pct      REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS candidates_log (
+            date      TEXT NOT NULL,
+            strategy  TEXT NOT NULL,
+            code      TEXT NOT NULL,
+            condition TEXT,
+            name      TEXT,
+            score     REAL,
+            ratio     REAL,
+            judgment  TEXT,
+            reason    TEXT,
+            PRIMARY KEY (date, strategy, code)
         );
     """)
     conn.commit()
@@ -318,3 +389,221 @@ def save_watchlist(df):
               method="multi", chunksize=500)
     conn.commit()
     conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# positions（ポジション管理）
+# ══════════════════════════════════════════════════════
+
+def save_position_db(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
+                     entry_change_pct=None, rb_score=None, condition=None):
+    """買い約定後にポジションを positions テーブルへ記録する。"""
+    tp_price = round(buy_price * (1 + tp_pct))
+    sl_price = round(buy_price * (1 - sl_pct))
+    today    = datetime.now().strftime("%Y-%m-%d")
+    buy_time = datetime.now().strftime("%H:%M:%S")
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR IGNORE INTO positions
+            (date, code, name, shares, buy_price, tp_price, sl_price,
+             strategy, buy_time, status, exit_reason,
+             entry_change_pct, rb_score, condition)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '', ?, ?, ?)
+    """, [
+        today, str(code), str(name), int(shares),
+        float(buy_price), float(tp_price), float(sl_price),
+        str(strategy), buy_time,
+        None if entry_change_pct is None else round(float(entry_change_pct), 2),
+        None if rb_score         is None else rb_score,
+        None if condition        is None else str(condition),
+    ])
+    conn.commit()
+    conn.close()
+    print(f"  [DB] ポジション記録: {code} {name} {shares}株 "
+          f"買値{buy_price}円 TP:{tp_price}円(+{tp_pct*100:.0f}%) "
+          f"SL:{sl_price}円(-{sl_pct*100:.1f}%)")
+
+
+def load_open_positions():
+    """status='open' のポジションを dict リストで返す（position_monitor 互換）。"""
+    conn = get_conn()
+    df = pd.read_sql(
+        "SELECT * FROM positions WHERE status='open' ORDER BY date, code",
+        conn
+    )
+    conn.close()
+    if df.empty:
+        return []
+    df = df.where(pd.notna(df), other="")
+    return df.to_dict(orient="records")
+
+
+def update_position(date, code, **fields):
+    """指定ポジションのフィールドを更新する（売り約定後の更新用）。"""
+    if not fields:
+        return
+    set_clause = ", ".join(f"{k}=?" for k in fields)
+    values = list(fields.values()) + [str(date), str(code)]
+    conn = get_conn()
+    conn.execute(
+        f"UPDATE positions SET {set_clause} WHERE date=? AND code=?",
+        values
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_today_ordered_codes(date):
+    """当日すでに記録済みの銘柄コードセットを返す（重複発注防止用）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT code FROM positions WHERE date=?", [str(date)]
+    ).fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+
+# ══════════════════════════════════════════════════════
+# closing_log（引け前候補ログ）
+# ══════════════════════════════════════════════════════
+
+def save_closing_log_db(rows):
+    """
+    closing_log テーブルに候補銘柄リストを保存する。
+    rows: list of dict (date, code, name, change_pct, rb_score, price, tp_price, sl_price)
+    """
+    if not rows:
+        return
+    conn = get_conn()
+    conn.executemany("""
+        INSERT OR REPLACE INTO closing_log
+            (date, code, name, change_pct, rb_score, price, tp_price, sl_price)
+        VALUES (:date, :code, :name, :change_pct, :rb_score, :price, :tp_price, :sl_price)
+    """, rows)
+    conn.commit()
+    conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# market_log（日次地合い実績）
+# ══════════════════════════════════════════════════════
+
+def save_market_log_db(row):
+    """
+    market_log テーブルに1日分の地合いデータを保存（INSERT OR REPLACE）。
+    row: dict (date, condition, ad_ratio, nikkei_change, up_count, down_count,
+               strategy_a_success_rate)
+    """
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO market_log
+            (date, condition, ad_ratio, nikkei_change,
+             up_count, down_count, strategy_a_success_rate)
+        VALUES (:date, :condition, :ad_ratio, :nikkei_change,
+                :up_count, :down_count, :strategy_a_success_rate)
+    """, row)
+    conn.commit()
+    conn.close()
+
+
+def get_market_log(date=None):
+    """market_log を DataFrame で返す。date 指定時はその日のみ。"""
+    conn = get_conn()
+    if date:
+        df = pd.read_sql(
+            "SELECT * FROM market_log WHERE date=?", conn, params=[str(date)]
+        )
+    else:
+        df = pd.read_sql("SELECT * FROM market_log ORDER BY date", conn)
+    conn.close()
+    return df
+
+
+def get_prev_day_condition_db(today):
+    """market_log から today より前の最新の condition を返す。なければ None。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT condition FROM market_log WHERE date < ? ORDER BY date DESC LIMIT 1",
+        [str(today)]
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_today_condition_db(today):
+    """当日の地合いを market_log → morning_log の順で探して返す。なければ 'UNKNOWN'。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT condition FROM market_log WHERE date=?", [str(today)]
+    ).fetchone()
+    if row:
+        conn.close()
+        return row[0]
+    row = conn.execute(
+        "SELECT condition_forecast FROM morning_log WHERE date=?", [str(today)]
+    ).fetchone()
+    conn.close()
+    return row[0] if row else "UNKNOWN"
+
+
+# ══════════════════════════════════════════════════════
+# morning_log（朝スキャン結果）
+# ══════════════════════════════════════════════════════
+
+def save_morning_log_db(row):
+    """
+    morning_log テーブルに朝スキャン結果を保存（INSERT OR REPLACE）。
+    row: dict (date, condition_forecast, condition_score, us_avg_change, dow_change,
+               nasdaq_change, sp500_change, nikkei_change, usdjpy,
+               strategy_a_thr, stop_loss_pct)
+    """
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO morning_log
+            (date, condition_forecast, condition_score, us_avg_change,
+             dow_change, nasdaq_change, sp500_change, nikkei_change,
+             usdjpy, strategy_a_thr, stop_loss_pct)
+        VALUES (:date, :condition_forecast, :condition_score, :us_avg_change,
+                :dow_change, :nasdaq_change, :sp500_change, :nikkei_change,
+                :usdjpy, :strategy_a_thr, :stop_loss_pct)
+    """, row)
+    conn.commit()
+    conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# candidates_log（朝スキャン候補ログ）
+# ══════════════════════════════════════════════════════
+
+def save_candidates_log_db(rows):
+    """
+    candidates_log テーブルに候補銘柄を保存（当日分を置換）。
+    rows: list of dict (date, strategy, code, condition, name, score, ratio, judgment, reason)
+    """
+    if not rows:
+        return
+    if rows:
+        today = rows[0].get("date", "")
+        conn = get_conn()
+        if today:
+            conn.execute("DELETE FROM candidates_log WHERE date=?", [str(today)])
+        conn.executemany("""
+            INSERT OR REPLACE INTO candidates_log
+                (date, strategy, code, condition, name, score, ratio, judgment, reason)
+            VALUES (:date, :strategy, :code, :condition, :name, :score, :ratio, :judgment, :reason)
+        """, rows)
+        conn.commit()
+        conn.close()
+
+
+def get_candidates_log(date=None):
+    """candidates_log を DataFrame で返す。date 指定時はその日のみ。"""
+    conn = get_conn()
+    if date:
+        df = pd.read_sql(
+            "SELECT * FROM candidates_log WHERE date=?", conn, params=[str(date)]
+        )
+    else:
+        df = pd.read_sql("SELECT * FROM candidates_log ORDER BY date", conn)
+    conn.close()
+    return df

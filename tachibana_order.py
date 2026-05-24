@@ -12,6 +12,7 @@ import time
 import urllib3
 from datetime import datetime
 from dotenv import load_dotenv
+import db
 
 load_dotenv()
 
@@ -169,42 +170,17 @@ def place_buy_order(url_request, code, shares, price=None):
         }
 
 
-POSITIONS_CSV = "out/positions.csv"
-
-_POSITIONS_FIELDS = [
-    "date", "code", "name", "shares", "buy_price", "tp_price", "sl_price",
-    "strategy", "buy_time", "status", "sell_price", "sell_time", "pnl_pct",
-    "exit_reason", "entry_change_pct", "rb_score", "condition",
-]
-
-
 def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
                   entry_change_pct=None, rb_score=None, condition=None):
-    """買い成功後にポジションを out/positions.csv へ追記する。"""
-    import csv as _csv
-    tp_price = round(buy_price * (1 + tp_pct))
-    sl_price = round(buy_price * (1 - sl_pct))
-    today    = datetime.now().strftime("%Y-%m-%d")
-    buy_time = datetime.now().strftime("%H:%M:%S")
-    row = {
-        "date": today, "code": code, "name": name, "shares": shares,
-        "buy_price": buy_price, "tp_price": tp_price, "sl_price": sl_price,
-        "strategy": strategy, "buy_time": buy_time, "status": "open",
-        "sell_price": "", "sell_time": "", "pnl_pct": "",
-        "exit_reason":      "",
-        "entry_change_pct": "" if entry_change_pct is None else round(entry_change_pct, 2),
-        "rb_score":         "" if rb_score         is None else rb_score,
-        "condition":        "" if condition         is None else condition,
-    }
-    file_exists = os.path.exists(POSITIONS_CSV)
-    with open(POSITIONS_CSV, "a", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=_POSITIONS_FIELDS)
-        if not file_exists:
-            w.writeheader()
-        w.writerow(row)
-    print(f"  💾 ポジション記録: {code} {name} {shares}株 "
-          f"買値{buy_price}円 TP:{tp_price}円(+{tp_pct*100:.0f}%) "
-          f"SL:{sl_price}円(-{sl_pct*100:.1f}%)")
+    """買い成功後にポジションを DB へ記録する。"""
+    db.init_db()
+    db.save_position_db(
+        code, name, shares, buy_price, strategy,
+        tp_pct=tp_pct, sl_pct=sl_pct,
+        entry_change_pct=entry_change_pct,
+        rb_score=rb_score,
+        condition=condition,
+    )
 
 
 def place_sell_order(url_request, code, shares, price=None):

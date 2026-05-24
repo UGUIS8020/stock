@@ -8,7 +8,6 @@ TP または SL に達したら自動で成行売りを発注する。
 """
 
 import sys
-import csv
 import json
 import os
 import time
@@ -17,42 +16,35 @@ from datetime import datetime, timezone, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 import tachibana_order
+import db
 
-POSITIONS_CSV      = "out/positions.csv"
 POLL_INTERVAL      = 15
 EXIT_HOUR          = 15
 EXIT_MIN           = 28
 JST                = timezone(timedelta(hours=9))
-FIELDNAMES         = tachibana_order._POSITIONS_FIELDS
 GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
 GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
 FORCE_CLOSE_MIN    = 15 * 60 + 25  # 15:25 前日ポジションを引け成行で強制決済
 
 
 def load_positions():
-    if not os.path.exists(POSITIONS_CSV):
-        return []
-    with open(POSITIONS_CSV, newline="", encoding="utf-8") as f:
-        return [row for row in csv.DictReader(f) if row.get("status") == "open"]
+    db.init_db()
+    return db.load_open_positions()
 
 
 def save_all_positions(updated_list):
-    """updated_list にあるポジションを positions.csv 内の該当行へ上書き保存する。"""
-    if not os.path.exists(POSITIONS_CSV):
-        return
-    with open(POSITIONS_CSV, newline="", encoding="utf-8") as f:
-        all_rows = list(csv.DictReader(f))
-
-    lookup = {(p["date"], p["code"]): p for p in updated_list}
-    result = []
-    for row in all_rows:
-        key = (row["date"], row["code"])
-        result.append(lookup.get(key, row))
-
-    with open(POSITIONS_CSV, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        w.writeheader()
-        w.writerows(result)
+    """updated_list にあるポジションを DB へ上書き保存する。"""
+    for p in updated_list:
+        sell_price = p.get("sell_price")
+        pnl_pct    = p.get("pnl_pct")
+        db.update_position(
+            p["date"], p["code"],
+            status     = p.get("status", "open"),
+            sell_price = float(sell_price) if sell_price not in ("", None) else None,
+            sell_time  = p.get("sell_time") or None,
+            pnl_pct    = float(pnl_pct)    if pnl_pct    not in ("", None) else None,
+            exit_reason= p.get("exit_reason", ""),
+        )
 
 
 def fetch_prices(url_price, codes):

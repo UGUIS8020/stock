@@ -179,21 +179,11 @@ def fetch_sgx():
 
 
 def get_prev_day_condition():
-    """market_log.csvから前日（最新）の実績地合いを取得する。
+    """DBから前日（最新）の実績地合いを取得する。
     WEAK翌日はリバウンドが起きやすいパターンに対応するため使用。
     （3/12→3/13、3/17→3/18、3/26→3/27 いずれもWEAK翌日がNORMALに回復）
     """
-    try:
-        if os.path.exists(MARKET_LOG_CSV):
-            df = pd.read_csv(MARKET_LOG_CSV, encoding="utf-8-sig")
-            if not df.empty:
-                # 本日以外の最新行（= 前日）を取得
-                df_prev = df[df["date"] < TODAY].sort_values("date")
-                if not df_prev.empty:
-                    return str(df_prev.iloc[-1]["condition"])
-    except Exception:
-        pass
-    return None
+    return _db.get_prev_day_condition_db(TODAY)
 
 
 def fetch_prev_day_breadth():
@@ -1375,12 +1365,7 @@ def main():
 
     # ── 5. 候補銘柄ログ保存 ──
     if candidate_rows:
-        new_candidates = pd.DataFrame(candidate_rows)
-        if os.path.exists(CANDIDATES_LOG_CSV):
-            ex_c = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig")
-            ex_c = ex_c[ex_c["date"] != TODAY]
-            new_candidates = pd.concat([ex_c, new_candidates], ignore_index=True)
-        new_candidates.to_csv(CANDIDATES_LOG_CSV, index=False, encoding="utf-8-sig")
+        _db.save_candidates_log_db(candidate_rows)
 
      # ── 6. 本日のアクションプラン ──
     print(f"\n{'='*60}")
@@ -1436,15 +1421,10 @@ def main():
         "strategy_a_thr":     strategy_a_thr,
         "stop_loss_pct":      stop_loss_pct,
     }
-    new_log = pd.DataFrame([log_row])
-    if os.path.exists(MORNING_LOG_CSV):
-        ex = pd.read_csv(MORNING_LOG_CSV, encoding="utf-8-sig")
-        ex = ex[ex["date"] != TODAY]
-        new_log = pd.concat([ex, new_log], ignore_index=True)
-    new_log.to_csv(MORNING_LOG_CSV, index=False, encoding="utf-8-sig")
+    _db.save_morning_log_db(log_row)
 
-    print(f"\n✅ 朝スキャン完了（ログ: {MORNING_LOG_CSV}）")
-    print(f"   候補銘柄ログ: {CANDIDATES_LOG_CSV}（{len(candidate_rows)}件記録）")
+    print(f"\n✅ 朝スキャン完了（DB記録）")
+    print(f"   候補銘柄ログ: {len(candidate_rows)}件記録")
     print(f"{'='*60}\n")
 
     import subprocess, sys as _sys

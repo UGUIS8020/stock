@@ -177,29 +177,8 @@ def _fetch_price_batch(url_price, codes, http):
 # 地合い判定
 # ══════════════════════════════════════════════
 def get_today_condition():
-    """今日の地合いを取得。market_log.csv → candidates_log.csv → 計算の順で試みる。"""
-    # market_log.csv（scan_daily.py が更新）
-    for csv_path in [MARKET_LOG_CSV, MORNING_LOG_CSV]:
-        if os.path.exists(csv_path):
-            try:
-                df = pd.read_csv(csv_path, encoding="utf-8-sig")
-                row = df[df["date"] == TODAY]
-                if not row.empty:
-                    return str(row.iloc[0]["condition"])
-            except Exception:
-                pass
-
-    # candidates_log.csv（scan_morning.py が更新）
-    if os.path.exists(CANDIDATES_LOG_CSV):
-        try:
-            df  = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig")
-            row = df[df["date"] == TODAY]
-            if not row.empty:
-                return str(row.iloc[0]["condition"])
-        except Exception:
-            pass
-
-    return "UNKNOWN"
+    """今日の地合いを取得。DB（market_log → morning_log）の順で試みる。"""
+    return db.get_today_condition_db(TODAY)
 
 
 def _fetch_nikkei_change(url_price, http):
@@ -384,24 +363,19 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
 # 結果保存
 # ══════════════════════════════════════════════
 def save_closing_log(candidates):
-    """候補銘柄をclosing_log.csvに保存"""
-    rows = []
-    for c in candidates:
-        rows.append({
-            "date":       TODAY,
-            "code":       c["code"],
-            "name":       c.get("name", ""),
-            "change_pct": c["change_pct"],
-            "rb_score":   c["rb_score"],
-            "price":      c["price"],
-            "tp_price":   round(c["price"] * 1.020),
-            "sl_price":   round(c["price"] * 0.931),
-        })
-    df     = pd.DataFrame(rows)
-    exists = os.path.exists(CLOSING_LOG_CSV)
-    df.to_csv(CLOSING_LOG_CSV, mode="a", header=not exists,
-              index=False, encoding="utf-8-sig")
-    print(f"\n  💾 ログ保存: {CLOSING_LOG_CSV}（{len(rows)}件）")
+    """候補銘柄を closing_log テーブルに保存"""
+    rows = [{
+        "date":       TODAY,
+        "code":       c["code"],
+        "name":       c.get("name", ""),
+        "change_pct": c["change_pct"],
+        "rb_score":   c["rb_score"],
+        "price":      c["price"],
+        "tp_price":   round(c["price"] * 1.020),
+        "sl_price":   round(c["price"] * 0.931),
+    } for c in candidates]
+    db.save_closing_log_db(rows)
+    print(f"\n  💾 ログ保存: closing_log（{len(rows)}件）")
 
 
 # ══════════════════════════════════════════════
@@ -517,14 +491,7 @@ def main(start_now=False, manual=False):
               f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
 
     # ── 本日すでに発注済みの銘柄を取得（再実行時の重複防止）──
-    ordered_today = set()
-    if os.path.exists(tachibana_order.POSITIONS_CSV):
-        try:
-            df_pos = pd.read_csv(tachibana_order.POSITIONS_CSV, encoding="utf-8")
-            today_orders = df_pos[df_pos["date"] == TODAY]
-            ordered_today = set(today_orders["code"].astype(str))
-        except Exception:
-            pass
+    ordered_today = db.get_today_ordered_codes(TODAY)
 
     # ── 発注（自動 or 手動確認）──
     label = "手動確認" if manual else f"自動発注（上限{MAX_POSITIONS_PER_DAY}件）"

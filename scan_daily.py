@@ -153,20 +153,15 @@ def print_market_condition(mc):
 
 def save_market_log(mc, strategy_a_success_rate=None):
     log_row = {
-        "date": TODAY,
-        "condition": mc["condition"],
-        "ad_ratio": mc["ad_ratio"],
-        "nikkei_change": mc["nikkei_change"],
-        "up_count": mc["up_count"],
-        "down_count": mc["down_count"],
+        "date":                    TODAY,
+        "condition":               mc["condition"],
+        "ad_ratio":                mc["ad_ratio"],
+        "nikkei_change":           mc["nikkei_change"],
+        "up_count":                mc["up_count"],
+        "down_count":              mc["down_count"],
         "strategy_a_success_rate": strategy_a_success_rate,
     }
-    new_df = pd.DataFrame([log_row])
-    if os.path.exists(MARKET_LOG_CSV):
-        ex = pd.read_csv(MARKET_LOG_CSV, encoding="utf-8-sig")
-        ex = ex[ex["date"] != TODAY]
-        new_df = pd.concat([ex, new_df], ignore_index=True)
-    new_df.to_csv(MARKET_LOG_CSV, index=False, encoding="utf-8-sig")
+    _db.save_market_log_db(log_row)
 
 
 # ══════════════════════════════════════════════
@@ -593,9 +588,7 @@ def verify_scan_a(top20_codes, name_dict, df_today):
 
 
 def show_market_log_summary():
-    if not os.path.exists(MARKET_LOG_CSV):
-        return
-    df = pd.read_csv(MARKET_LOG_CSV, encoding="utf-8-sig")
+    df = _db.get_market_log()
     df = df[df["strategy_a_success_rate"].notna()]
     if len(df) < 3:
         return
@@ -867,7 +860,26 @@ def main():
     scan_a_codes = [r["code"] for r in save_a]
     save_intraday(scan_a_codes)
 
-    print(f"\n✅ 完了")    
+    print(f"\n✅ 完了")
+
+    # ── S3にDBを自動アップロード ──
+    import subprocess as _sp
+    s3_bucket = "shibuya8020"
+    s3_key    = "stock-db/stock.db"
+    db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+    try:
+        r = _sp.run(
+            ["aws", "s3", "cp", db_path, f"s3://{s3_bucket}/{s3_key}"],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            print(f"☁️  S3アップロード完了（s3://{s3_bucket}/{s3_key}）")
+        else:
+            print(f"⚠️  S3アップロード失敗（aws configure 済みか確認してください）")
+    except FileNotFoundError:
+        print(f"⚠️  AWS CLIが見つかりません（pip install awscli）")
+    except Exception as e:
+        print(f"⚠️  S3アップロードエラー: {e}")
 
 
 if __name__ == "__main__":
