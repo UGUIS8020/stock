@@ -867,9 +867,12 @@ def main():
     s3_bucket = "shibuya8020"
     s3_key    = "stock-db/stock.db"
     db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+    aws_cmd = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "aws")
+    if not os.path.exists(aws_cmd):
+        aws_cmd = "aws"
     try:
         r = _sp.run(
-            ["aws", "s3", "cp", db_path, f"s3://{s3_bucket}/{s3_key}"],
+            [aws_cmd, "s3", "cp", db_path, f"s3://{s3_bucket}/{s3_key}"],
             capture_output=True, text=True, timeout=60
         )
         if r.returncode == 0:
