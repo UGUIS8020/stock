@@ -19,6 +19,7 @@ import re
 import requests
 import time
 from bs4 import BeautifulSoup
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -28,12 +29,13 @@ cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
 import db as _db
 _db.init_db()
 
-CACHE_DIR        = "out/cache"
-SCAN_CSV         = "out/scan_results.csv"
-MARKET_LOG_CSV   = "out/market_log.csv"
-STRATEGY_C_CSV   = "out/strategy_c_log.csv"
-BACKTEST_LOG_CSV    = "out/backtest_log.csv"
-CANDIDATES_LOG_CSV  = "out/candidates_log.csv"
+_BASE_DIR = Path(__file__).parent
+CACHE_DIR        = str(_BASE_DIR / "out" / "cache")
+SCAN_CSV         = str(_BASE_DIR / "out" / "scan_results.csv")
+MARKET_LOG_CSV   = str(_BASE_DIR / "out" / "market_log.csv")
+STRATEGY_C_CSV   = str(_BASE_DIR / "out" / "strategy_c_log.csv")
+BACKTEST_LOG_CSV    = str(_BASE_DIR / "out" / "backtest_log.csv")
+CANDIDATES_LOG_CSV  = str(_BASE_DIR / "out" / "candidates_log.csv")
 TOP_N            = 20
 SCORE_MIN_A      = 3.0
 MIN_VOLUME       = 50_000
@@ -48,7 +50,7 @@ STRONG_NIKKEI_THRESHOLD = 0.5
 STRONG_AD_THRESHOLD     = 0.60
 
 os.makedirs(CACHE_DIR, exist_ok=True)
-os.makedirs("out", exist_ok=True)
+os.makedirs(str(_BASE_DIR / "out"), exist_ok=True)
 
 _parser = argparse.ArgumentParser(add_help=False)
 _parser.add_argument("--date", default=None, help="処理対象日 YYYYMMDD（省略時=本日）")
@@ -609,7 +611,7 @@ def show_market_log_summary():
 # 分足データ収集（scan_daily.py末尾に追加）
 # ══════════════════════════════════════════════════════
 
-INTRADAY_DIR = "out/intraday"
+INTRADAY_DIR = str(_BASE_DIR / "out" / "intraday")
 
 # 戦略D固定銘柄
 STRATEGY_D_CODES = [
@@ -863,24 +865,14 @@ def main():
     print(f"\n✅ 完了")
 
     # ── S3にDBを自動アップロード ──
-    import subprocess as _sp
+    import boto3 as _boto3
     s3_bucket = "shibuya8020"
     s3_key    = "stock-db/stock.db"
     db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
-    aws_cmd = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "aws")
-    if not os.path.exists(aws_cmd):
-        aws_cmd = "aws"
     try:
-        r = _sp.run(
-            [aws_cmd, "s3", "cp", db_path, f"s3://{s3_bucket}/{s3_key}"],
-            capture_output=True, text=True, timeout=60
-        )
-        if r.returncode == 0:
-            print(f"☁️  S3アップロード完了（s3://{s3_bucket}/{s3_key}）")
-        else:
-            print(f"⚠️  S3アップロード失敗（aws configure 済みか確認してください）")
-    except FileNotFoundError:
-        print(f"⚠️  AWS CLIが見つかりません（pip install awscli）")
+        _s3 = _boto3.client("s3")
+        _s3.upload_file(db_path, s3_bucket, s3_key)
+        print(f"☁️  S3アップロード完了（s3://{s3_bucket}/{s3_key}）")
     except Exception as e:
         print(f"⚠️  S3アップロードエラー: {e}")
 

@@ -96,7 +96,9 @@ def fetch_prices(url_price, codes):
 
 def load_url_price():
     try:
-        with open("tachibana_login_response.json", encoding="utf-8") as f:
+        from pathlib import Path
+        login_file = Path(__file__).parent / "tachibana_login_response.json"
+        with open(login_file, encoding="utf-8") as f:
             return json.load(f).get("sUrlPrice") or None
     except Exception:
         return None

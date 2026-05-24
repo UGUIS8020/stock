@@ -13,8 +13,10 @@ import os
 import sqlite3
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
-DB_PATH = "out/stock.db"
+_BASE_DIR = Path(__file__).parent
+DB_PATH = str(_BASE_DIR / "out" / "stock.db")
 
 
 # ══════════════════════════════════════════════════════
@@ -22,7 +24,7 @@ DB_PATH = "out/stock.db"
 # ══════════════════════════════════════════════════════
 
 def get_conn():
-    os.makedirs("out", exist_ok=True)
+    os.makedirs(str(_BASE_DIR / "out"), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")   # 読み書き同時アクセスを安全に
     conn.execute("PRAGMA synchronous=NORMAL") # 速度と安全のバランス
@@ -150,6 +152,25 @@ def init_db():
             reason    TEXT,
             PRIMARY KEY (date, strategy, code)
         );
+
+        CREATE TABLE IF NOT EXISTS daytime_signals (
+            date               TEXT NOT NULL,
+            time               TEXT NOT NULL,
+            code               TEXT NOT NULL,
+            name               TEXT,
+            price              REAL,
+            change_pct         REAL,
+            prev_high          REAL,
+            conditions_met     INTEGER,
+            breakout           INTEGER,
+            volume_surge       INTEGER,
+            momentum           INTEGER,
+            volume_pace_ratio  REAL,
+            tp_price           REAL,
+            sl_price           REAL,
+            PRIMARY KEY (date, code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ds_date ON daytime_signals(date);
     """)
     conn.commit()
     conn.close()
@@ -605,5 +626,45 @@ def get_candidates_log(date=None):
         )
     else:
         df = pd.read_sql("SELECT * FROM candidates_log ORDER BY date", conn)
+    conn.close()
+    return df
+
+
+# ══════════════════════════════════════════════════════
+# daytime_signals（日中シグナル）
+# ══════════════════════════════════════════════════════
+
+def save_daytime_signal(row):
+    """daytime_signals テーブルにシグナルを保存（同日同銘柄は上書き）。
+    row: dict (date, time, code, name, price, change_pct, prev_high,
+               conditions_met, breakout, volume_surge, momentum,
+               volume_pace_ratio, tp_price, sl_price)
+    """
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO daytime_signals
+            (date, time, code, name, price, change_pct, prev_high,
+             conditions_met, breakout, volume_surge, momentum,
+             volume_pace_ratio, tp_price, sl_price)
+        VALUES (:date, :time, :code, :name, :price, :change_pct, :prev_high,
+                :conditions_met, :breakout, :volume_surge, :momentum,
+                :volume_pace_ratio, :tp_price, :sl_price)
+    """, row)
+    conn.commit()
+    conn.close()
+
+
+def get_daytime_signals(date=None):
+    """daytime_signals を DataFrame で返す。date 指定時はその日のみ。"""
+    conn = get_conn()
+    if date:
+        df = pd.read_sql(
+            "SELECT * FROM daytime_signals WHERE date=? ORDER BY time",
+            conn, params=[str(date)]
+        )
+    else:
+        df = pd.read_sql(
+            "SELECT * FROM daytime_signals ORDER BY date, time", conn
+        )
     conn.close()
     return df

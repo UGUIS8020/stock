@@ -20,6 +20,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 from dotenv import load_dotenv
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
@@ -27,11 +28,12 @@ load_dotenv()
 import db as _db
 _db.init_db()
 
-SCAN_CSV             = "out/scan_results.csv"
-WATCHLIST_CSV        = "out/watchlist.csv"
-MORNING_LOG_CSV      = "out/morning_log.csv"
-CANDIDATES_LOG_CSV   = "out/candidates_log.csv"
-TACHIBANA_LOGIN_FILE = "tachibana_login_response.json"
+_BASE_DIR = Path(__file__).parent
+SCAN_CSV             = str(_BASE_DIR / "out" / "scan_results.csv")
+WATCHLIST_CSV        = str(_BASE_DIR / "out" / "watchlist.csv")
+MORNING_LOG_CSV      = str(_BASE_DIR / "out" / "morning_log.csv")
+CANDIDATES_LOG_CSV   = str(_BASE_DIR / "out" / "candidates_log.csv")
+TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 TACHIBANA_API_BASE   = "https://kabuka.e-shiten.jp/e_api_v4r8/"
 TACHIBANA_USER_ID    = os.getenv("TACHIBANA_LOGIN_ID")
 TACHIBANA_PASSWORD   = os.getenv("TACHIBANA_LOGIN_PASS")
@@ -1429,16 +1431,9 @@ def main():
 
     import subprocess, sys as _sys
 
-    # ── 戦略A：朝に BUY/CAUTION 候補がある場合のみ AI分析・寄り付き監視 ──
+    # ── 戦略A：朝に BUY/CAUTION 候補がある場合のみ寄り付き監視・発注 ──
     has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
     if has_buy and condition != "PANIC":
-        try:
-            import ai_filter
-            ai_filter.main()
-        except Exception as e:
-            print(f"⚠️  AI分析でエラーが発生しました: {e}")
-            print("   → python ai_filter.py を手動で実行してください")
-
         try:
             import market_watch
             market_watch.main()
@@ -1451,11 +1446,17 @@ def main():
     # closing_watch が14:30に実際のAD比率を計測してSTRONG以外なら自動終了する
     if condition != "PANIC":
         try:
-            subprocess.Popen([_sys.executable, "position_monitor.py"])
+            subprocess.Popen([_sys.executable, str(_BASE_DIR / "position_monitor.py")])
             print("  📊 position_monitor をバックグラウンドで起動しました（15:28まで監視）")
         except Exception as e:
             print(f"⚠️  position_monitor の起動に失敗しました: {e}")
             print("   → python position_monitor.py を手動で実行してください")
+
+        try:
+            subprocess.Popen([_sys.executable, str(_BASE_DIR / "daytime.py")])
+            print("  📈 daytime をバックグラウンドで起動しました（9:30〜14:00 シグナル記録）")
+        except Exception as e:
+            print(f"⚠️  daytime の起動に失敗しました: {e}")
 
         try:
             import closing_watch

@@ -27,20 +27,22 @@ import numpy as np
 import tachibana_order
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
 import db
 
-JST   = timezone(timedelta(hours=9))
-TODAY = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+JST      = timezone(timedelta(hours=9))
+TODAY    = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+_BASE_DIR = Path(__file__).parent
 
-CANDIDATES_LOG_CSV   = "out/candidates_log.csv"
-MORNING_LOG_CSV      = "out/morning_log.csv"
-MARKET_LOG_CSV       = "out/market_log.csv"
-CLOSING_LOG_CSV      = "out/closing_log.csv"
-TACHIBANA_LOGIN_FILE = "tachibana_login_response.json"
+CANDIDATES_LOG_CSV   = str(_BASE_DIR / "out" / "candidates_log.csv")
+MORNING_LOG_CSV      = str(_BASE_DIR / "out" / "morning_log.csv")
+MARKET_LOG_CSV       = str(_BASE_DIR / "out" / "market_log.csv")
+CLOSING_LOG_CSV      = str(_BASE_DIR / "out" / "closing_log.csv")
+TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 
 SCAN_START_HOUR    = 14
 SCAN_START_MIN     = 30

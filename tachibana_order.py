@@ -12,11 +12,12 @@ import time
 import urllib3
 from datetime import datetime
 from dotenv import load_dotenv
+from pathlib import Path
 import db
 
 load_dotenv()
 
-LOGIN_FILE      = "tachibana_login_response.json"
+LOGIN_FILE      = str(Path(__file__).parent / "tachibana_login_response.json")
 SECOND_PASSWORD = os.getenv("TACHIBANA_SECOND_PASSWORD", "")
 
 # ── 安全装置 ────────────────────────────────────────────
