@@ -26,6 +26,7 @@ OUT_DIR    = "out"
 
 MIN_VOLUME   = 50_000
 MIN_TURNOVER = 50_000_000
+MIN_PRICE    = 200
 
 PANIC_NIKKEI  = -2.0
 PANIC_AD      = 0.20
@@ -88,8 +89,46 @@ def build_market_conditions():
 
 
 # ══════════════════════════════════════════════
-# 2. スコア計算
+# 2. スコア・特徴量計算
 # ══════════════════════════════════════════════
+def calc_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return None
+    d  = np.diff(closes)
+    ag = np.where(d > 0, d, 0.0)[-period:].mean()
+    al = np.where(d < 0, -d, 0.0)[-period:].mean()
+    return round(100 - 100 / (1 + ag / al), 1) if al > 0 else 100.0
+
+
+def calc_rebound_score(hist):
+    """B系特徴量: RSI・出来高・MA乖離からリバウンドスコアを計算"""
+    if len(hist) < 26:
+        return 0
+    score   = 0
+    closes  = pd.to_numeric(hist["Close"], errors="coerce").fillna(0).values
+    vol_ser = pd.to_numeric(hist["Volume"], errors="coerce").fillna(0)
+    rsi = calc_rsi(closes, 14)
+    if rsi is not None:
+        if rsi < 20:   score += 4
+        elif rsi < 30: score += 3
+        elif rsi < 40: score += 2
+        elif rsi < 50: score += 1
+    if len(hist) >= 21:
+        avg20 = vol_ser.iloc[-21:-1].mean()
+        vol   = float(vol_ser.iloc[-1])
+        if avg20 > 0:
+            r = vol / avg20
+            if r >= 3.0:   score += 3
+            elif r >= 2.0: score += 2
+            elif r >= 1.5: score += 1
+    ma25 = pd.to_numeric(hist["Close"], errors="coerce").iloc[-25:].mean()
+    dev  = (float(hist["Close"].iloc[-1]) / ma25 - 1) * 100 if ma25 > 0 else 0
+    if dev < -15:   score += 3
+    elif dev < -10: score += 2
+    elif dev < -5:  score += 1
+    return score
+
+
 def calc_score_a(hist):
     if len(hist) < 22:
         return None
@@ -143,15 +182,45 @@ def simulate_one(code, market_cond):
             if pd.isna(next_row["Close"]) or next_row["Close"] <= 0:
                 continue
 
-            vol_today = float(today["Volume"]) if not pd.isna(today["Volume"]) else 0
-            va_today  = float(today["Va"]) if ("Va" in today and not pd.isna(today["Va"])) else vol_today * float(today["Close"])
+            vol_today  = float(today["Volume"]) if not pd.isna(today["Volume"]) else 0
+            close_today = float(today["Close"])
+            va_today   = float(today["Va"]) if ("Va" in today and not pd.isna(today["Va"])) else vol_today * close_today
 
             if vol_today < MIN_VOLUME or va_today < MIN_TURNOVER:
                 continue
-
-            sa = calc_score_a(hist)
-            if sa is None or sa["score"] < 3.0:
+            if close_today < MIN_PRICE:
                 continue
+
+            # ── A系特徴量 ──
+            sa    = calc_score_a(hist)
+            score = sa["score"] if sa else 0.0
+            ratio = sa["ratio"] if sa else 0.0
+
+            # ── B系特徴量 ──
+            rb_score = calc_rebound_score(hist)
+
+            t_o = float(today["Open"]) if not pd.isna(today["Open"]) else close_today
+            t_h = float(today["High"]) if not pd.isna(today["High"]) else close_today
+            t_l = float(today["Low"])  if not pd.isna(today["Low"])  else close_today
+            day_range = t_h - t_l
+            lower_shadow = min(t_o, close_today) - t_l
+            lower_shadow_ratio = round(lower_shadow / day_range, 3) if day_range > 0 else 0.0
+
+            vol_decay_3d = 0
+            if i >= 2:
+                v0 = float(df.iloc[i - 2]["Volume"])
+                v1 = float(df.iloc[i - 1]["Volume"])
+                v2 = vol_today
+                vol_decay_3d = int(v0 > v1 > v2 and v2 > 0)
+
+            consec_drop = 0
+            for back in range(i, max(0, i - 9), -1):
+                if back == 0:
+                    break
+                if float(df.iloc[back]["Close"]) < float(df.iloc[back - 1]["Close"]):
+                    consec_drop += 1
+                else:
+                    break
 
             open_p  = float(next_row["Open"])
             high_p  = float(next_row["High"]) if not pd.isna(next_row["High"]) else np.nan
@@ -161,31 +230,34 @@ def simulate_one(code, market_cond):
             ret_oc  = (close_p - open_p) / open_p * 100
             ret_max = (high_p  - open_p) / open_p * 100 if not pd.isna(high_p) else np.nan
             ret_low = (low_p   - open_p) / open_p * 100 if not pd.isna(low_p)  else np.nan
-            gap_pct = (open_p  - float(today["Close"])) / float(today["Close"]) * 100 if float(today["Close"]) > 0 else np.nan
+            gap_pct = (open_p  - close_today) / close_today * 100 if close_today > 0 else np.nan
 
             today_rise = np.nan
             if i > 0:
                 prev_close = float(df.iloc[i - 1]["Close"])
                 if not pd.isna(prev_close) and prev_close > 0:
-                    today_rise = (float(today["Close"]) - prev_close) / prev_close * 100
+                    today_rise = (close_today - prev_close) / prev_close * 100
 
             trades.append({
-                "code":        code,
-                "scan_date":   scan_dt,
-                "trade_date":  trade_dt,
-                "scan_cond":   scan_cond,
-                "trade_cond":  trade_cond,
-                "score":       sa["score"],
-                "ratio":       sa["ratio"],
-                "open_price":  open_p,
-                "close_price": close_p,
-                "high_price":  high_p,
-                "low_price":   low_p,
-                "ret_oc":      round(ret_oc, 2),
-                "ret_max":     round(ret_max, 2) if not pd.isna(ret_max) else np.nan,
-                "ret_low":     round(ret_low, 2) if not pd.isna(ret_low) else np.nan,
-                "gap_pct":     round(gap_pct, 2) if not pd.isna(gap_pct) else np.nan,
-                "today_rise":  round(today_rise, 2) if not pd.isna(today_rise) else np.nan,
+                "code":               code,
+                "scan_date":          scan_dt,
+                "trade_date":         trade_dt,
+                "scan_cond":          scan_cond,
+                "trade_cond":         trade_cond,
+                # A系
+                "score":              score,
+                "ratio":              ratio,
+                # B系
+                "today_rise":         round(today_rise, 2) if not pd.isna(today_rise) else np.nan,
+                "rb_score":           rb_score,
+                "lower_shadow_ratio": lower_shadow_ratio,
+                "vol_decay_3d":       vol_decay_3d,
+                "consec_drop":        consec_drop,
+                # 共通
+                "gap_pct":            round(gap_pct, 2) if not pd.isna(gap_pct) else np.nan,
+                "ret_oc":             round(ret_oc, 2),
+                "ret_max":            round(ret_max, 2) if not pd.isna(ret_max) else np.nan,
+                "ret_low":            round(ret_low, 2) if not pd.isna(ret_low) else np.nan,
             })
     except Exception:
         pass

@@ -3,9 +3,24 @@ venv
 .venv
 .env
 
-# 大容量DBファイル（GitHub 100MB制限超え）
+# 大容量・生成ファイル（GitHubにコミット不要）
 out/stock.db
 *.db
+
+# シミュレーション生成CSV（大容量・再生成可能）
+# simulate_precise.py を実行すれば再生成できる
+out/sim_precise_trades.csv
+out/sim_precise_*.csv
+out/opt_*.csv
+out/sweep_results.csv
+
+# ログ・エラーファイル（自動生成）
+out/*_log.txt
+out/*_err.txt
+out/sim_precise_log.txt
+out/sim_precise_err.txt
+out/evolve_log.txt
+out/evolve_err.txt
 
 # 立花証券セッション情報（ログインするたびに再生成される）
 tachibana_login_response.json

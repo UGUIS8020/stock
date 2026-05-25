@@ -250,6 +250,20 @@ def main():
 
     print(f"  📊 position_monitor 終了: {datetime.now(JST).strftime('%H:%M:%S')}")
 
+    # 16:30まで待機してyfinanceで当日シグナルを検証
+    now = datetime.now(JST)
+    verify_time = now.replace(hour=16, minute=30, second=0, microsecond=0)
+    wait_sec = (verify_time - now).total_seconds()
+    if wait_sec > 0:
+        print(f"\n  ⏳ 16:30に当日シグナル検証を開始します（{int(wait_sec//60)}分{int(wait_sec%60)}秒後）")
+        time.sleep(wait_sec)
+    print(f"\n  📋 当日シグナル検証開始...")
+    try:
+        import verify_signals
+        verify_signals.verify(live=True)
+    except Exception as e:
+        print(f"  ⚠️  検証エラー: {e}")
+
 
 if __name__ == "__main__":
     main()
