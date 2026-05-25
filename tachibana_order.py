@@ -26,12 +26,28 @@ LIVE_TRADING = True
 # 1発注あたりの上限金額（安全装置）
 MAX_ORDER_AMOUNT = 500_000   # 50万円
 
-_p_no = int(time.time()) % 100000
+_P_NO_FILE = Path(__file__).parent / "out" / "last_p_no.txt"
+
+
+def _init_p_no():
+    time_based = int(time.time())
+    try:
+        saved = int(_P_NO_FILE.read_text().strip())
+        return max(saved + 1, time_based)
+    except Exception:
+        return time_based
+
+
+_p_no = _init_p_no()
 
 
 def _next_p_no():
     global _p_no
     _p_no += 1
+    try:
+        _P_NO_FILE.write_text(str(_p_no))
+    except Exception:
+        pass
     return str(_p_no)
 
 
@@ -146,9 +162,20 @@ def place_buy_order(url_request, code, shares, price=None):
     )
     try:
         result = _api_get(url_request + "?" + params)
-        p_errno = result.get("p_errno", "0")
+        p_errno = result.get("p_errno")   # None if key absent
+        print(f"  [DEBUG] buy response keys: {list(result.keys())[:8]}  p_errno={p_errno}")
+        if p_errno is None:
+            return {
+                "success":  False,
+                "order_no": None,
+                "message":  f"APIレスポンス異常（p_ernoキーなし）: {str(result)[:200]}",
+                "raw":      result,
+            }
         if p_errno == "0":
-            order_no = result.get("sOrderNo", result.get("CLMKabuNewOrder", {}).get("sOrderNo", ""))
+            order_no = (result.get("sOrderNo")
+                        or (result.get("CLMKabuNewOrder") or {}).get("sOrderNo", ""))
+            if not order_no:
+                print(f"  [DEBUG] full response: {result}")
             return {
                 "success":  True,
                 "order_no": order_no,

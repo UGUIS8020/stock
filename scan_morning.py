@@ -1454,7 +1454,7 @@ def main():
 
         try:
             subprocess.Popen([_sys.executable, str(_BASE_DIR / "daytime.py")])
-            print("  📈 daytime をバックグラウンドで起動しました（9:30〜14:00 シグナル記録）")
+            print("  📈 daytime をバックグラウンドで起動しました（9:00〜14:00 自動売買）")
         except Exception as e:
             print(f"⚠️  daytime の起動に失敗しました: {e}")
 

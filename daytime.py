@@ -2,11 +2,10 @@
 """
 daytime.py - 日中シグナル検知（9:30〜14:00）
 
-scan_daily.py の候補リストを使い、日中の出来高急増・価格ブレイクアウトを検知する。
-現時点ではシグナル検知とログのみ。発注は未実装（position_monitor.py との連携は今後）。
+scan_daily.py の候補リストを使い、日中の出来高急増・価格ブレイクアウトを検知して自動発注する。
 
 使い方:
-    python daytime.py        # 9:30まで待機して自動開始
+    python daytime.py        # 9:00まで待機して自動開始
     python daytime.py --now  # 即時開始（テスト用）
 
 シグナル条件（以下のうち2つ以上で発報）:
@@ -20,6 +19,7 @@ import json
 import time
 import argparse
 import urllib3
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -28,6 +28,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv()
 import db
+import tachibana_order
 
 JST      = timezone(timedelta(hours=9))
 TODAY    = datetime.now(JST).strftime("%Y-%m-%d")
@@ -35,14 +36,19 @@ _BASE_DIR = Path(__file__).parent
 
 # ── 時間設定 ──────────────────────────────────────
 WATCH_START_HOUR = 9
-WATCH_START_MIN  = 30
+WATCH_START_MIN  = 0
 WATCH_END_HOUR   = 14
-WATCH_END_MIN    = 0
+WATCH_END_MIN    = 30
 POLL_INTERVAL    = 15   # 秒
 
 # ── TP / SL ───────────────────────────────────────
 TP_PCT = 0.03   # +3%
 SL_PCT = 0.03   # -3%
+
+# ── 発注設定 ──────────────────────────────────────
+DAYTIME_TRADING      = True      # False にすると監視のみ（発注なし）
+ORDER_AMOUNT         = 300_000   # 1発注あたりの目安金額（30万円）
+MAX_DAYTIME_POSITIONS = 3        # 日中最大ポジション数
 
 # ── シグナル条件（チューニングポイント）────────────
 BREAKOUT_BUFFER_PCT    = 0.0   # 前日高値 × (1 + これ) を超えたらブレイクアウト
@@ -140,7 +146,7 @@ def fetch_prices(url_price, codes):
                   f".{t.microsecond // 1000:03}")
         params = (
             "{"
-            f'"p_no":"{int(time.time()) % 100000 + i}",'
+            f'"p_no":"{tachibana_order._next_p_no()}",'
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(str(c) for c in chunk)}",'
@@ -276,10 +282,11 @@ def save_signal(code, name, sig):
 # メインループ
 # ══════════════════════════════════════════════════
 
-def watch_loop(candidates, url_price, start_now=False):
+def watch_loop(candidates, url_price, url_request, start_now=False):
     codes     = [str(c["code"]) for c in candidates]
     names     = {str(c["code"]): c.get("name", c["code"]) for c in candidates}
     signaled  = set()   # 本日発報済みコード
+    ordered_today = set(db.get_today_ordered_codes(TODAY))  # 本日発注済みコード
     signal_count = 0
 
     print(f"\n  監視開始: {WATCH_START_HOUR}:{WATCH_START_MIN:02d} 〜 "
@@ -332,6 +339,28 @@ def watch_loop(candidates, url_price, start_now=False):
                 signal_count += 1
                 save_signal(code, name, sig)
 
+                # ── 買い発注 ────────────────────────────────
+                if not DAYTIME_TRADING:
+                    print(f"     [監視モード] 発注スキップ（DAYTIME_TRADING=False）")
+                    continue
+                if url_request and code not in ordered_today:
+                    open_pos = db.load_open_positions()
+                    if len(open_pos) >= MAX_DAYTIME_POSITIONS:
+                        print(f"     ⚠️  最大ポジション数({MAX_DAYTIME_POSITIONS})到達 → 発注スキップ")
+                    else:
+                        shares = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
+                        result = tachibana_order.place_buy_order(url_request, code, shares)
+                        if result["success"]:
+                            tachibana_order.save_position(
+                                code, name, shares, sig["price"], "D",
+                                tp_pct=TP_PCT, sl_pct=SL_PCT,
+                                entry_change_pct=sig["change_pct"],
+                            )
+                            ordered_today.add(code)
+                            print(f"     ✅ 買い発注完了: {shares}株  {result['message']}")
+                        else:
+                            print(f"     ❌ 発注失敗: {result['message']}")
+
         # シグナル表示
         for code, name, sig in new_signals:
             flags = []
@@ -372,15 +401,17 @@ def main(start_now=False):
         return
 
     # Tachibana API
-    url_price = load_tachibana_url()
+    url_price   = load_tachibana_url()
+    url_request = tachibana_order.load_url_request()
+    mode_str    = "本番" if tachibana_order.LIVE_TRADING else "モック"
     if url_price:
-        print(f"  📡 Tachibana API: リアルタイム価格取得モード")
+        print(f"  📡 Tachibana API: リアルタイム価格取得モード  [{mode_str}]")
     else:
         print(f"  ⚠️  Tachibana API 未ログイン → 価格取得できません。")
         print(f"      scan_morning.py を先に実行してログインしてください。")
         return
 
-    signal_count = watch_loop(candidates, url_price, start_now)
+    signal_count = watch_loop(candidates, url_price, url_request, start_now)
 
     print(f"\n{'='*60}")
     print(f"  日中シグナル検知 完了")

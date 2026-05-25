@@ -167,6 +167,7 @@ def main():
                 print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし・発注締め切り済み → 終了")
                 break
             # それ以前はclosing_watchが買う可能性があるため待機継続
+            print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし → 60秒待機（closing_watch発注待ち）")
             time.sleep(60)
             continue
 

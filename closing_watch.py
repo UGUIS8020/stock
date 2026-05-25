@@ -45,8 +45,8 @@ CLOSING_LOG_CSV      = str(_BASE_DIR / "out" / "closing_log.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 
 SCAN_START_HOUR    = 14
-SCAN_START_MIN     = 30
-ORDER_DEADLINE_MIN = 15 * 60 + 25  # 15:25 以降は発注しない（引けオークション開始前）
+SCAN_START_MIN     = 55
+ORDER_DEADLINE_MIN = 15 * 60 + 15  # 15:15 以降は発注しない（引けオークション開始前）
 
 DROP_LO      = -6.7   # 下落下限（GA再検証2026-05-24 30000人・フィルタ済）
 DROP_HI      = -4.0   # 下落上限（GA再検証2026-05-24 30000人・フィルタ済）
@@ -402,7 +402,7 @@ def main(start_now=False, manual=False):
         return
     print(f"  📡 Tachibana API: リアルタイム価格取得モード")
     mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
-    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//1000}万円分 / 1,000円以上→{DEFAULT_SHARES}株\n")
+    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / 1,000円以上→{DEFAULT_SHARES}株\n")
 
     # 開始待機
     now = datetime.now(JST)
