@@ -1144,6 +1144,16 @@ def main():
 
     candidate_rows = []
 
+    # ── 0. S3からDBを最新版にダウンロード ──
+    try:
+        import download_db
+        download_db.main()
+        _db.init_db()  # ダウンロード後にテーブル存在確認
+    except SystemExit:
+        print("  ⚠️  S3ダウンロード失敗 - ローカルDBで続行します")
+    except Exception as e:
+        print(f"  ⚠️  S3ダウンロードエラー: {e} - ローカルDBで続行します")
+
     # ── Tachibana API セッション確保（期限切れなら電話認証フローを案内）──
     print("  Tachibana API セッション確認中...")
     tachibana_url = ensure_tachibana_session()
