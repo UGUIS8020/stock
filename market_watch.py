@@ -439,7 +439,7 @@ def confirm_and_order(candidate, price, url_request):
                 buy_px = int(rec_price or price or 0)
                 if buy_px > 0:
                     tachibana_order.save_position(code, name, shares, buy_px,
-                                                  strategy="A", tp_pct=0.03, sl_pct=0.05)
+                                                  strategy="A", tp_pct=0.05, sl_pct=0.05)
             else:
                 print(f"  ❌ 発注失敗: {result['message']}")
                 print(f"     APIレスポンス: {result['raw']}")

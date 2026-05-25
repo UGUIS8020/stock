@@ -4,7 +4,7 @@ closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン +
 【試算根拠（2026-05-24）】
 STRONG地合い / -4〜-6.7% / RB>=4 / 2日連続下落(cd≥2) / 引け前買い:
   WR 74.5%  avg +0.644%  Sharpe +6.08（GA 30,000人・フィルタ済データ検証 2026-05-24）
-  TP+2.0% / SL-6.9%
+  TP+5.0% / SL-5.0%
   ※フィルタ: 株価200円以上・売買代金5,000万円以上・±10%超除外
 
 実行方法:
@@ -324,8 +324,8 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     price     = candidate["price"]
     shares    = calc_shares(price)
     estimated = int(price * shares)
-    tp_price  = round(price * 1.020)
-    sl_price  = round(price * 0.931)
+    tp_price  = round(price * 1.050)
+    sl_price  = round(price * 0.950)
 
     # 重複発注防止
     if str(code) in ordered_today:
@@ -342,14 +342,14 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     mode = "本番" if tachibana_order.LIVE_TRADING else "モック"
     print(f"\n  📤 自動発注 [{mode}]: [{code}] {name}  "
           f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
-    print(f"     TP目安: {tp_price:,}円 (+2.0%)  SL目安: {sl_price:,}円 (-6.9%)")
+    print(f"     TP目安: {tp_price:,}円 (+5.0%)  SL目安: {sl_price:,}円 (-5.0%)")
 
     result = tachibana_order.place_buy_order(url_request, code, shares)
     if result["success"]:
         print(f"  ✅ {result['message']}")
         tachibana_order.save_position(
             code, name, shares, price,
-            strategy="B", tp_pct=0.020, sl_pct=0.069,
+            strategy="B", tp_pct=0.050, sl_pct=0.050,
             entry_change_pct=candidate.get("change_pct"),
             rb_score=candidate.get("rb_score"),
             condition=condition,
@@ -373,8 +373,8 @@ def save_closing_log(candidates):
         "change_pct": c["change_pct"],
         "rb_score":   c["rb_score"],
         "price":      c["price"],
-        "tp_price":   round(c["price"] * 1.020),
-        "sl_price":   round(c["price"] * 0.931),
+        "tp_price":   round(c["price"] * 1.050),
+        "sl_price":   round(c["price"] * 0.950),
     } for c in candidates]
     db.save_closing_log_db(rows)
     print(f"\n  💾 ログ保存: closing_log（{len(rows)}件）")
