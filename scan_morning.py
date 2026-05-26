@@ -636,15 +636,15 @@ def judge_entry_b(row, condition):
         return "PASS", f"地合いWEAK + 逆張り非推奨 - WEAK日avg-1.26%（740件）"
 
     # NORMAL日 × RBスコア3以上 → BUY
-    # 【根拠】evolve_b.py GA(20000人×100世代, 2026-05-26): TP+5.4%/SL-0.5%が最優秀
-    #         N=148件 / OOS WR=29.1% / avg=+0.378% / Sharpe=+3.502
+    # 【根拠】evolve.py GA(20000人×100世代, 2026-05-26): TP+1.9%/SL-5.6%が最優秀
+    #         N=15件 / OOS WR=66.7% / avg=+0.276% / Sharpe=+2.087
     if condition == "NORMAL" and rb_score >= 3:
-        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR29%・avg+0.378%（TP+5.4%/SL-0.5%推奨） / {rb_reason}"
+        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
 
     # STRONG日 × RB4以上 → BUY
-    # 【根拠】evolve_b.py GA(20000人×100世代, 2026-05-26): NORMAL+STRONG条件でOOS通過率94%
+    # 【根拠】evolve.py GA(20000人×100世代, 2026-05-26): NORMAL+STRONG条件でOOS通過率94%
     if condition == "STRONG" and rb_score >= 4:
-        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR29%・avg+0.378%（TP+5.4%/SL-0.5%推奨） / {rb_reason}"
+        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
 
     # STRONG日 × RB3 → CAUTION（スコアやや低め）
     if condition == "STRONG" and rb_score == 3:
@@ -1344,7 +1344,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"【前日closing_watch 仕込み済みポジション確認】")
     print(f"  ※ 逆張り買いは前日引け前（closing_watch）で実施済み")
-    print(f"  ※ 本日の決済目安: TP+5.4% / SL-0.5%（GA最適化結果 2026-05-26）")
+    print(f"  ※ 本日の決済目安: TP+1.9% / SL-5.6%（GA最適化結果 2026-05-26）")
     print(f"{'='*60}")
 
     df_b = _db.get_watchlist()
@@ -1365,8 +1365,8 @@ def main():
 
             for _, row in candidates_b.iterrows():
                 buy_p    = float(row["buy_price"])
-                tp_price = round(buy_p * 1.054)
-                sl_price = round(buy_p * 0.995)
+                tp_price = round(buy_p * 1.019)
+                sl_price = round(buy_p * 0.944)
                 drop_str = f"{float(row['today_rise']):>+.1f}%"
                 rb_score = int(row.get("rebound_score", 0))
                 q = _tquote(tachibana_prices, row["code"])

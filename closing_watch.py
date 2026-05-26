@@ -3,9 +3,9 @@ closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン +
 
 【パラメータ根拠】
   GA最適化（20,000人×100世代, 2026-05-26）OOS検証済み:
-    drop -5.0〜-3.1% / RB>=4 / NORMAL+STRONG / cd>=3
-    N=148件 / WR=29.1% / avg=+0.378% / OOS Sharpe=+3.502
-  TP+5.4% / SL-0.5%  ← 2026-05-26更新（旧: TP+3.2% / SL-6.2%）
+    drop -6.8〜-1.0% / RB>=3 / 全地合い
+    N=15件 / WR=66.7% / avg=+0.276% / OOS Sharpe=+2.087
+  TP+1.9% / SL-5.6%  ← 2026-05-26更新（旧: TP+5.4% / SL-0.5%）
   ※フィルタ: 株価200円以上・売買代金5,000万円以上・±10%超除外
   ※地合い: NORMAL+STRONG（旧: STRONGのみ）
 
@@ -327,8 +327,8 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     price     = candidate["price"]
     shares    = calc_shares(price)
     estimated = int(price * shares)
-    tp_price  = round(price * 1.054)
-    sl_price  = round(price * 0.995)
+    tp_price  = round(price * 1.019)
+    sl_price  = round(price * 0.944)
 
     # 重複発注防止
     if str(code) in ordered_today:
@@ -345,14 +345,14 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     mode = "本番" if tachibana_order.LIVE_TRADING else "モック"
     print(f"\n  📤 自動発注 [{mode}]: [{code}] {name}  "
           f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
-    print(f"     TP目安: {tp_price:,}円 (+5.4%)  SL目安: {sl_price:,}円 (-0.5%)")
+    print(f"     TP目安: {tp_price:,}円 (+1.9%)  SL目安: {sl_price:,}円 (-5.6%)")
 
     result = tachibana_order.place_buy_order(url_request, code, shares)
     if result["success"]:
         print(f"  ✅ {result['message']}")
         tachibana_order.save_position(
             code, name, shares, price,
-            strategy="B", tp_pct=0.054, sl_pct=0.005,
+            strategy="B", tp_pct=0.019, sl_pct=0.056,
             entry_change_pct=candidate.get("change_pct"),
             rb_score=candidate.get("rb_score"),
             condition=condition,
