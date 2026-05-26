@@ -23,11 +23,11 @@ evolve_b.py - 遺伝的アルゴリズムによる戦略B最適化
     gene[3] gap_max          : 翌朝ギャップアップ許容上限（-3〜+5%）
     gene[4] tp               : 利確幅（0=引け決済、1〜8%）
     gene[5] sl               : 損切り幅（0=引け決済、-1〜-7%）
-    gene[6] cond             : 対象地合い（0=全、1=NORMAL、2=STRONG、3=N+S）
-    gene[7] top_n            : 1日に買う最大件数（1/3/5/全件）
-    gene[8] lower_shadow_min : 下ヒゲ比率の最小値（0.0〜0.7）
-    gene[9] vol_decay_req    : 売り枯れ必須フラグ（0=不問、1=必須）
-    gene[10] consec_drop_min : 連続下落日数の最小値（1〜5）
+    gene[6] top_n            : 1日に買う最大件数（1/3/5/全件）
+    gene[7] lower_shadow_min : 下ヒゲ比率の最小値（0.0〜0.7）
+    gene[8] vol_decay_req    : 売り枯れ必須フラグ（0=不問、1=必須）
+    gene[9] consec_drop_min  : 連続下落日数の最小値（1〜5）
+    ※ 地合い(condition)はNORMAL+STRONG固定（グリッドサーチ検証済み）
 """
 
 import pandas as pd
@@ -42,7 +42,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 OUT_DIR     = "out"
 TRADES_CSV  = "out/opt_b_trades.csv"
 WF_SPLIT    = 0.60   # 前60%=学習期間 / 後40%=検証期間
-MIN_SAMPLE  = 5      # 適応度計算に必要な最小トレード数（In-sampleが少ないため緩め）
+MIN_SAMPLE  = 30     # 適応度計算に必要な最小トレード数（少ないサンプルは信頼性低）
 
 # ── GA パラメータ ──
 ELITE_RATE    = 0.02   # 上位2%はそのまま次世代へ
@@ -52,9 +52,10 @@ MUTATE_RATE   = 0.15   # 各遺伝子の突然変異確率
 MUTATE_SIGMA  = 0.15   # 突然変異の強さ（正規化座標での標準偏差）
 
 # ── 染色体の定義（各遺伝子の最小・最大） ──
-#    [drop_lo, drop_hi, rb_min, gap_max, tp,   sl,   cond, top_n, ls_min, vd_req, cd_min]
-GENE_MIN = np.array([-10.0, -8.0, 2.0, -3.0,  0.0, -7.0, 0.0, 0.0,  0.0,  0.0,  1.0])
-GENE_MAX = np.array([ -3.0, -3.0, 8.0,  5.0,  8.0,  0.0, 4.0, 4.0,  0.7,  1.0,  5.0])
+# condition は NORMAL+STRONG 固定（グリッドサーチで最優秀と確認済み）
+#    [drop_lo, drop_hi, rb_min, gap_max, tp,   sl,   top_n, ls_min, vd_req, cd_min]
+GENE_MIN = np.array([-10.0, -8.0, 2.0, -3.0,  0.0, -7.0, 0.0,  0.0,  0.0,  1.0])
+GENE_MAX = np.array([ -3.0, -3.0, 8.0,  5.0,  8.0,  0.0, 4.0,  0.7,  1.0,  5.0])
 N_GENES  = len(GENE_MIN)
 
 # SL キャリブレーション（sim_precise.py 由来）
@@ -135,11 +136,11 @@ def decode(ind):
     use_close = (tp_raw < 0.5) or (sl_raw > -0.5)
     tp = None if use_close else round(tp_raw, 1)
     sl = None if use_close else round(sl_raw, 1)
-    cond     = int(ind[6]) % 4
-    top_n    = TOPN_VALUES[int(ind[7]) % 4]
-    lower_shadow_min = round(float(ind[8]), 2)
-    vol_decay_req    = int(round(float(ind[9])))   # 0=不問 / 1=売り枯れ必須
-    consec_drop_min  = max(1, int(round(float(ind[10]))))
+    cond     = 3  # NORMAL+STRONG 固定（グリッドサーチ検証済み・過学習防止）
+    top_n    = TOPN_VALUES[int(ind[6]) % 4]
+    lower_shadow_min = round(float(ind[7]), 2)
+    vol_decay_req    = int(round(float(ind[8])))   # 0=不問 / 1=売り枯れ必須
+    consec_drop_min  = max(1, int(round(float(ind[9]))))
     return {
         "drop_lo": drop_lo, "drop_hi": drop_hi,
         "rb_min":  rb_min,  "gap_max": gap_max,
@@ -212,9 +213,9 @@ def evaluate_one(ind, npy):
     if std < 0.001:   # std が極端に小さい（TP均一ヒット等）は除外
         return -999.0
     sharpe = avg / std * np.sqrt(252)
-    sharpe = min(sharpe, 15.0)   # 非現実的な高Sharpeをキャップ
-    # サンプル数ペナルティ: 少ないサンプルは信頼性低
-    penalty = min(1.0, len(idx) / 50.0)
+    sharpe = min(sharpe, 5.0)    # キャップを下げて多様性を保つ（旧15.0→5.0）
+    # サンプル数ペナルティ: 100件未満は信頼性に応じて減点
+    penalty = min(1.0, len(idx) / 100.0)
     return float(sharpe * penalty)
 
 
@@ -511,6 +512,26 @@ def main():
     print(f"  {hist_path} （世代別推移）")
     print(f"  {rep_path}   （レポート）")
     print(f"\n{report_txt}")
+
+    # ── S3アップロード ──
+    _upload_to_s3(best_path, hist_path, rep_path)
+
+
+def _upload_to_s3(*file_paths):
+    """最適化結果をS3にアップロードして他端末と共有"""
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+        bucket = "shibuya8020"
+        for path in file_paths:
+            if not os.path.exists(path):
+                continue
+            key = f"stock-optimize/{os.path.basename(path)}"
+            s3.upload_file(path, bucket, key)
+            print(f"  ☁️  S3アップロード: s3://{bucket}/{key}")
+        print("  ✅ S3アップロード完了")
+    except Exception as e:
+        print(f"  ⚠️  S3アップロード失敗（ローカル保存は完了）: {e}")
 
 
 if __name__ == "__main__":

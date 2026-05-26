@@ -32,7 +32,7 @@ def get_conn():
 
 
 def init_db():
-    """テーブルが存在しない場合のみ作成する（冪等）。"""
+    """テーブルが存在しない場合のみ作成する（冪等）。既存テーブルの列追加も行う。"""
     conn = get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS daily_prices (
@@ -141,15 +141,21 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS candidates_log (
-            date      TEXT NOT NULL,
-            strategy  TEXT NOT NULL,
-            code      TEXT NOT NULL,
-            condition TEXT,
-            name      TEXT,
-            score     REAL,
-            ratio     REAL,
-            judgment  TEXT,
-            reason    TEXT,
+            date         TEXT NOT NULL,
+            strategy     TEXT NOT NULL,
+            code         TEXT NOT NULL,
+            condition    TEXT,
+            name         TEXT,
+            score        REAL,
+            ratio        REAL,
+            judgment     TEXT,
+            reason       TEXT,
+            open_price   REAL,
+            close_price  REAL,
+            high_price   REAL,
+            low_price    REAL,
+            result_pct   REAL,
+            result_grade TEXT,
             PRIMARY KEY (date, strategy, code)
         );
 
@@ -174,6 +180,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    migrate_candidates_log_columns()
 
 
 # ══════════════════════════════════════════════════════
@@ -628,6 +635,34 @@ def get_candidates_log(date=None):
         df = pd.read_sql("SELECT * FROM candidates_log ORDER BY date", conn)
     conn.close()
     return df
+
+
+def update_candidates_result(date, strategy, code, open_price, close_price,
+                              high_price, low_price, result_pct, result_grade):
+    """candidates_log の検証結果列を更新する（scan_daily.py から呼び出し）。"""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE candidates_log
+        SET open_price=?, close_price=?, high_price=?, low_price=?,
+            result_pct=?, result_grade=?
+        WHERE date=? AND strategy=? AND code=?
+    """, [open_price, close_price, high_price, low_price,
+          result_pct, result_grade, str(date), str(strategy), str(code)])
+    conn.commit()
+    conn.close()
+
+
+def migrate_candidates_log_columns():
+    """既存DBに result 列が未追加の場合のみ ALTER TABLE で追加する（冪等）。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(candidates_log)").fetchall()}
+    for col, typedef in [("open_price", "REAL"), ("close_price", "REAL"),
+                          ("high_price", "REAL"), ("low_price", "REAL"),
+                          ("result_pct", "REAL"), ("result_grade", "TEXT")]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE candidates_log ADD COLUMN {col} {typedef}")
+    conn.commit()
+    conn.close()
 
 
 # ══════════════════════════════════════════════════════

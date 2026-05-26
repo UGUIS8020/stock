@@ -377,24 +377,13 @@ def fetch_tdnet(date_str, target_codes):
 
 
 def verify_candidates_log(df_today, name_dict):
-    """scan_morning.py の BUY/CAUTION 判定を当日終値で検証し candidates_log.csv に書き戻す"""
-    if not os.path.exists(CANDIDATES_LOG_CSV):
+    """scan_morning.py の BUY/CAUTION 判定を当日終値で検証し candidates_log DB に書き戻す"""
+    cl = _db.get_candidates_log(date=TODAY)
+    if cl.empty:
         return
-    cl = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig", dtype=str)
 
-    # 結果列がなければ追加
-    for col in ["open_price", "close_price", "high_price", "low_price",
-                "result_pct", "result_grade"]:
-        if col not in cl.columns:
-            cl[col] = ""
-
-    # 本日分・未検証・BUY or CAUTION のみ対象
-    mask = (
-        (cl["date"] == TODAY) &
-        (cl["judgment"].isin(["BUY", "CAUTION"])) &
-        (cl["result_pct"] == "")
-    )
-    targets = cl[mask]
+    # 未検証（result_pct が NaN）の BUY/CAUTION のみ対象
+    targets = cl[cl["judgment"].isin(["BUY", "CAUTION"]) & cl["result_pct"].isna()]
     if targets.empty:
         return
 
@@ -403,8 +392,9 @@ def verify_candidates_log(df_today, name_dict):
     sl_pct = -7.0
     updated = 0
     win = loss = tp_hit = sl_hit = 0
+    today_results = []  # 当日分の結果を集計用に保持
 
-    for idx, row in targets.iterrows():
+    for _, row in targets.iterrows():
         code4 = str(row["code"])
         t = df_today[df_today["code4"] == code4]
         if t.empty or float(t.iloc[0]["Open"]) <= 0:
@@ -419,27 +409,22 @@ def verify_candidates_log(df_today, name_dict):
         ret_high  = round((high_p  - open_p) / open_p * 100, 2)
         ret_low   = round((low_p   - open_p) / open_p * 100, 2)
 
-        # TP/SL 到達判定
         if ret_high >= tp_pct and ret_low > sl_pct:
-            grade = f"TP+{tp_pct:.0f}%"
-            tp_hit += 1; win += 1
+            grade = f"TP+{tp_pct:.0f}%"; tp_hit += 1; win += 1
         elif ret_low <= sl_pct and ret_high < tp_pct:
-            grade = f"SL{sl_pct:.0f}%"
-            sl_hit += 1; loss += 1
+            grade = f"SL{sl_pct:.0f}%"; sl_hit += 1; loss += 1
         elif ret_close >= 0:
             grade = "引け+"; win += 1
         else:
             grade = "引け-"; loss += 1
 
-        cl.at[idx, "open_price"]   = open_p
-        cl.at[idx, "close_price"]  = close_p
-        cl.at[idx, "high_price"]   = high_p
-        cl.at[idx, "low_price"]    = low_p
-        cl.at[idx, "result_pct"]   = ret_close
-        cl.at[idx, "result_grade"] = grade
+        _db.update_candidates_result(
+            row["date"], row["strategy"], code4,
+            open_p, close_p, high_p, low_p, ret_close, grade)
 
+        today_results.append({"judgment": row["judgment"], "result_pct": ret_close})
+        jdg  = str(row.get("judgment", ""))
         strat = str(row.get("strategy", ""))
-        jdg   = str(row.get("judgment", ""))
         name  = name_dict.get(code4, str(row.get("name", "")))
         icon  = "✅" if grade.startswith("TP") else ("❌" if grade.startswith("SL") else ("⚠️" if ret_close >= 0 else "❌"))
         print(f"  {icon} [{code4}]{name}  {jdg}({strat})  "
@@ -447,38 +432,19 @@ def verify_candidates_log(df_today, name_dict):
         updated += 1
 
     if updated > 0:
-        cl.to_csv(CANDIDATES_LOG_CSV, index=False, encoding="utf-8-sig")
         total = win + loss
-        wr = win / total * 100 if total > 0 else 0
-        avg = cl[(cl["date"] == TODAY) & (cl["result_pct"] != "")]["result_pct"].astype(float).mean()
+        wr    = win / total * 100 if total > 0 else 0
+        avg   = sum(r["result_pct"] for r in today_results) / len(today_results)
         print(f"  ── 本日集計: {total}件  勝率{wr:.0f}%  TP到達:{tp_hit}件  SL到達:{sl_hit}件  平均{avg:+.2f}%")
 
-        # 累積集計
-        verified = cl[cl["result_pct"] != ""].copy()
-        verified["result_pct"] = verified["result_pct"].astype(float)
+        # 累積集計（DB全件から再取得）
+        all_cl = _db.get_candidates_log()
+        verified = all_cl[all_cl["result_pct"].notna()].copy()
         buy_v = verified[verified["judgment"] == "BUY"]
         if len(buy_v) > 0:
-            bwr = (buy_v["result_pct"] >= 0).mean() * 100
+            bwr  = (buy_v["result_pct"] >= 0).mean() * 100
             bavg = buy_v["result_pct"].mean()
             print(f"  ── BUY累積: {len(buy_v)}件  勝率{bwr:.0f}%  平均{bavg:+.2f}%")
-
-        # market_watch AI判定 累積集計
-        if "ai_recommendation" in verified.columns:
-            ai_v = verified[verified["ai_recommendation"].notna() &
-                            (verified["ai_recommendation"].astype(str) != "") &
-                            (verified["ai_recommendation"].astype(str) != "nan")]
-            if len(ai_v) > 0:
-                print(f"\n  【market_watch AI判定 累積実績】（{len(ai_v)}件）")
-                for label in ["買い実行", "様子見（継続監視）", "見送り"]:
-                    sub = ai_v[ai_v["ai_recommendation"] == label]
-                    if len(sub) == 0:
-                        continue
-                    avg_r = sub["result_pct"].mean()
-                    pos   = (sub["result_pct"] >= 0).sum()
-                    tp3   = (sub["result_pct"] >= 3).sum()
-                    sl7   = (sub["result_pct"] <= -7).sum()
-                    print(f"    {label}: {len(sub)}件  平均{avg_r:+.2f}%  "
-                          f"プラス{pos}件({pos/len(sub)*100:.0f}%)  TP+3%:{tp3}件  SL-7%:{sl7}件")
 
 
 def verify_scan_a(top20_codes, name_dict, df_today):
@@ -496,19 +462,18 @@ def verify_scan_a(top20_codes, name_dict, df_today):
     scan_date = df["scan_date"].max()
 
     morning_judgments = {}
-    if os.path.exists("out/candidates_log.csv"):
-        cl = pd.read_csv("out/candidates_log.csv", encoding="utf-8-sig")
-
+    try:
         # scan_dateの翌営業日を計算（土日をスキップ）
         next_date_ts = pd.Timestamp(scan_date) + pd.Timedelta(days=1)
-        if next_date_ts.weekday() == 5:    # 土曜 → 月曜
+        if next_date_ts.weekday() == 5:
             next_date_ts += pd.Timedelta(days=2)
-        elif next_date_ts.weekday() == 6:  # 日曜 → 月曜
+        elif next_date_ts.weekday() == 6:
             next_date_ts += pd.Timedelta(days=1)
         next_date = next_date_ts.strftime("%Y-%m-%d")
-
-        cl_prev = cl[cl["date"] == next_date]
+        cl_prev = _db.get_candidates_log(date=next_date)
         morning_judgments = dict(zip(cl_prev["code"].astype(str), cl_prev["judgment"]))
+    except Exception:
+        pass
 
     for _, row in unverified.iterrows():
         code4    = str(row["code"])

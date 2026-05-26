@@ -762,6 +762,34 @@ def main():
     elif stage3_df is not None:
         print(f"\nStage3結果: {os.path.join(OUT_DIR, 'opt_b_stage3.csv')}")
 
+    # ── S3アップロード（他端末と共有）──
+    _upload_optimize_to_s3()
+
+
+def _upload_optimize_to_s3():
+    """最適化ファイルをS3にアップロードして他端末と共有"""
+    upload_files = [
+        os.path.join(OUT_DIR, "opt_b_trades.csv"),
+        os.path.join(OUT_DIR, "opt_b_stage1.csv"),
+        os.path.join(OUT_DIR, "opt_b_stage2.csv"),
+        os.path.join(OUT_DIR, "opt_b_report.txt"),
+    ]
+    try:
+        import boto3
+        s3 = boto3.client("s3")
+        bucket = "shibuya8020"
+        uploaded = 0
+        for path in upload_files:
+            if not os.path.exists(path):
+                continue
+            key = f"stock-optimize/{os.path.basename(path)}"
+            s3.upload_file(path, bucket, key)
+            uploaded += 1
+        if uploaded:
+            print(f"  ☁️  S3アップロード完了: {uploaded}ファイル → s3://{bucket}/stock-optimize/")
+    except Exception as e:
+        print(f"  ⚠️  S3アップロード失敗（ローカル保存は完了）: {e}")
+
 
 if __name__ == "__main__":
     main()

@@ -542,81 +542,67 @@ def is_surge_flag(row):
 
 
 # ══════════════════════════════════════════════════════
+# 【戦略A 買い判定】地合い別に完全分離したロジック
+# バックテスト根拠: backtest_log.csv SL=-1%/TP=+3%適用後
+#   STRONG  BUY avg-0.43% Sharpe-0.84 / CAUTION avg+2.05% Sharpe+1.25 → 全CAUTION
+#   NORMAL  BUY avg+0.81% / CAUTION avg+0.81% → 有効ゾーンBUY、それ以外CAUTION
+#   WEAK    BUY avg+0.73% / CAUTION avg+0.95% → score>=thr でCАUTION
+# ══════════════════════════════════════════════════════
 def judge_entry_a(row, condition, strategy_a_thr):
     score      = float(row["score"])
     ratio      = float(row.get("ratio", 0))
     today_rise = float(row.get("today_rise", 0))
 
+    # ── PANIC日 ──────────────────────────────────────────
     if condition == "PANIC":
         return "PASS", "地合いPANIC - 全見送り"
 
-    # [検証] スコア9.0〜: TP+3%到達率は高いがNORMAL/WEAK日は勝率37%・平均-0.24%と損失
-    # （simulate_precise.py: NORMAL日 score9+ 489件 WR37.2% avg-0.237%）
-    # STRONG日のみBUY、その他はCAUTIONに統一。
-    if score >= 9.0:
-        if condition == "STRONG":
-            return "BUY", "高スコア + 地合いSTRONG - 強い流れに乗る"
-        if ratio >= 12.0:
-            return "CAUTION", "高スコア過熱 + 地合い非STRONG - 逆行リスクあり（出尽くし）"
-        return "CAUTION", "高スコア + 地合い非STRONG - NORMAL/WEAK日は平均-0.24%のため見送り"
-
-    # ── STRONG日専用判定 ─────────────────────────────────
-    # [sweep.py 2025-04〜2026-03 + backtest再検証 2026-03-10〜05-19]
-    # 元条件: score5〜7 / ratio<3倍 → 実データ0件（ratio最小3.6倍）
-    # 再検証: ratio<5倍(17件) avg+0.54% WR59% / score7〜8が主体
-    #         ratio<4倍(5件) avg+1.02% WR80% が最優秀だがサンプル少
-    # 更新条件: score5〜8 / ratio<5倍 / today_rise<2%
-    #           今_rise>=2% → 前日すでに動いた（出尽くし）
+    # ── STRONG日 ─────────────────────────────────────────
+    # データ: STRONG×BUY avg-0.43%(Sharpe-0.84) / CAUTION avg+2.05%(Sharpe+1.25)
+    # → scoreに関わらず全銘柄CAUTIONにしてdecide_timing()で0.3%上昇確認後エントリー
     if condition == "STRONG":
         if score < 5.0:
-            return "PASS", f"STRONG日 + スコア低すぎ({score:.1f}) - score5未満は不安定"
-        if score >= 8.0:
-            return "PASS", f"STRONG日 + 高スコア({score:.1f}) - score8以上は出尽くし"
+            return "PASS", f"STRONG日 + スコア低すぎ({score:.1f})"
         if ratio >= 5.0:
             return "PASS", f"STRONG日 + 出来高過多({ratio:.1f}倍) - ratio5倍超は過熱"
         if today_rise >= 2.0:
             return "PASS", f"STRONG日 + 前日急騰({today_rise:+.1f}%) - 出尽くし"
-        return "BUY", (f"STRONG日 + score{score:.1f} + ratio{ratio:.1f}倍 + "
-                       f"前日{today_rise:+.1f}% - 再検証済み条件(avg+0.54%/WR59%)")
+        return "CAUTION", (f"STRONG日 score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}% "
+                           f"- 全CAUTION（CAUTION avg+2.05% / BUY avg-0.43%）")
 
-    # ── NORMAL日専用判定 ──────────────────────────────────
-    # [simulate_normal.py 16,623件 2025-04〜2026-03]
-    # キーファクター: 前日-2〜0% が全条件で一貫してプラス
-    # 最良ゾーン: score5〜7 × ratio3〜10x × 前日-2〜0% → avg+0.285% / WR54% / Sharpe2.60
-    # 旧ルール（ratio>=3→PASS / score>=7→PASS）は有効銘柄を除外していたため廃止
-    # 推奨出口: TP+3%/SL-5%（Sharpe最大）
+    # ── NORMAL日 ─────────────────────────────────────────
+    # キーファクター: 前日-2〜0%が一貫してプラス / ratio10倍超・前日急騰は見送り
+    # 推奨出口: TP+3%/SL-1%（最適化済み）
     if condition == "NORMAL":
-        # ratio10倍超・前日急騰は引き続き見送り
         if ratio >= 10.0:
             return "PASS", f"NORMAL日 + ratio過多({ratio:.1f}倍) - 10倍超は過熱"
         if today_rise > 2.0:
             return "PASS", f"NORMAL日 + 前日急騰({today_rise:+.1f}%) - 出尽くし見送り"
-
-        # ── 最良ゾーン: score5〜7 × ratio3〜10x × 前日-2〜0% ──
-        # avg+0.285% / WR54% / Sharpe2.60 / N=156（TP+3%/SL-5%推奨）
+        if score >= 9.0:
+            if ratio >= 12.0:
+                return "CAUTION", (f"NORMAL日 高スコア過熱({score:.1f}) + ratio{ratio:.1f}倍 "
+                                   f"- 逆行リスクあり")
+            return "CAUTION", (f"NORMAL日 高スコア({score:.1f}) - score9+は"
+                               f"NORMAL日WR37%・avg-0.24%のため慎重")
+        # 最良ゾーン: score5〜7 × ratio3〜10x × 前日-2〜0% → avg+0.285% / WR54%
         if 5.0 <= score < 7.0 and 3.0 <= ratio < 10.0 and -2.0 <= today_rise <= 0.0:
-            return "BUY", (f"NORMAL日 最良ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}% "
-                           f"- avg+0.285%・WR54%（TP+3%/SL-5%推奨）")
-
-        # ── 有効ゾーン: score7〜9 × ratio3〜6x × 前日-2〜0% ──
-        # avg+0.170% / WR54% / Sharpe1.42 / N=246（旧コードではPASS）
+            return "BUY", (f"NORMAL日 最良ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                           f" - avg+0.285%・WR54%")
+        # 有効ゾーン: score7〜9 × ratio3〜6x × 前日-2〜0% → avg+0.170% / WR54%
         if 7.0 <= score < 9.0 and 3.0 <= ratio < 6.0 and -2.0 <= today_rise <= 0.0:
-            return "CAUTION", (f"NORMAL日 有効ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}% "
-                               f"- avg+0.170%・WR54%（TP+3%/SL-5%推奨）")
-
-        # ── 前日-2〜0% × その他条件 ──
-        # avg+0.132% / WR50% / Sharpe1.02（既存ロジック・引き続きCAUTION）
+            return "CAUTION", (f"NORMAL日 有効ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                               f" - avg+0.170%・WR54%")
+        # 前日-2〜0% × その他 → avg+0.132% / WR50%
         if -2.0 <= today_rise <= 0.0:
-            return "CAUTION", (f"NORMAL日 + 前日微下落({today_rise:+.1f}%) score{score:.1f}×ratio{ratio:.1f}倍 "
-                               f"- avg+0.132%・少額様子見")
-
+            return "CAUTION", (f"NORMAL日 + 前日微下落({today_rise:+.1f}%) score{score:.1f}×ratio{ratio:.1f}倍"
+                               f" - avg+0.132%・少額様子見")
         return "PASS", f"NORMAL日 + 前日{today_rise:+.1f}%（有効条件外）"
 
     # ── WEAK日 ───────────────────────────────────────────
+    # WEAK×CAUTION avg+0.95% / BUY avg+0.73% → score>=thr でCAUTION
     if score < strategy_a_thr:
-        return "PASS", f"地合い{condition} + スコア不十分(閾値{strategy_a_thr})"
-
-    return "CAUTION", "地合い軟調 - スコア高いが慎重に"
+        return "PASS", f"WEAK日 + スコア不十分({score:.1f} < 閾値{strategy_a_thr})"
+    return "CAUTION", f"WEAK日 score{score:.1f} - スコア条件クリア・慎重にエントリー"
 
 
 def judge_entry_b(row, condition):
@@ -649,17 +635,16 @@ def judge_entry_b(row, condition):
     if condition == "WEAK":
         return "PASS", f"地合いWEAK + 逆張り非推奨 - WEAK日avg-1.26%（740件）"
 
-    # NORMAL日 × RBスコア3以上 → BUY（TP+3%/SL-7%推奨・ギャップアップ+2%超は当日除外）
-    # 【根拠】evolve_b.py GA(20000人×100世代): STRONG/NORMAL×TP+2〜4%/SL-5〜7%が最優秀
-    #         引け決済より平均+0.2〜0.3%高いリターン（Sharpe+3〜4）
+    # NORMAL日 × RBスコア3以上 → BUY
+    # 【根拠】evolve_b.py GA(20000人×100世代, 2026-05-26): TP+3.2%/SL-6.2%が最優秀
+    #         N=371件 / OOS WR=53.1% / avg=+0.130% / Sharpe=+1.054
     if condition == "NORMAL" and rb_score >= 3:
-        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - avg+0.4%・勝率63%（TP+3%/SL-7%推奨） / {rb_reason}"
+        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR53%・avg+0.13%（TP+3.2%/SL-6.2%推奨） / {rb_reason}"
 
-    # STRONG日 × RB4以上 → BUY（ギャップアップ+2%超は当日除外）
-    # 【根拠】evolve_b.py GA(100000人×100世代): STRONG×RB4+×TP+3%/SL-7%が最優秀
-    #         Out avg+0.5%・勝率60%・Sharpe+3.9（185/200戦略がWF検証通過）
+    # STRONG日 × RB4以上 → BUY
+    # 【根拠】evolve_b.py GA(20000人×100世代, 2026-05-26): NORMAL+STRONG条件でOOS通過率76.5%
     if condition == "STRONG" and rb_score >= 4:
-        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - Out avg+0.5%・勝率60%（TP+3%/SL-7%推奨） / {rb_reason}"
+        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR53%・avg+0.13%（TP+3.2%/SL-6.2%推奨） / {rb_reason}"
 
     # STRONG日 × RB3 → CAUTION（スコアやや低め）
     if condition == "STRONG" and rb_score == 3:
@@ -967,29 +952,43 @@ def ensure_tachibana_session():
         print("     → Tachibana API なしで続行します")
         return None
 
-    # ファイルが30分以内なら再認証をスキップ（再起動時のp_no誤判定を防ぐ）
     import time as _time
+    today_str = datetime.now().strftime("%Y%m%d")
+
+    # ログインJSONから今日の日付で発行されたセッションか確認
+    session_is_today = False
     try:
-        mtime = os.path.getmtime(TACHIBANA_LOGIN_FILE)
-        if _time.time() - mtime < 1800:
-            existing_url = load_tachibana_url()
-            if existing_url:
-                print("  ✅ Tachibana API セッション有効（30分以内のログイン）")
-                return existing_url
-    except FileNotFoundError:
+        with open(TACHIBANA_LOGIN_FILE, encoding="utf-8") as f:
+            _d = json.load(f)
+        last_login = _d.get("sLastLoginDate", "")  # "20260526090701"
+        session_is_today = last_login.startswith(today_str)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
 
-    # 既存セッションを検証
-    existing_url = load_tachibana_url()
-    if existing_url and _check_tachibana_session(existing_url):
-        print("  ✅ Tachibana API セッション有効")
-        return existing_url
+    # ファイルが30分以内 かつ 今日のセッション → スキップ（再起動時の多重認証防止）
+    if session_is_today:
+        try:
+            mtime = os.path.getmtime(TACHIBANA_LOGIN_FILE)
+            if _time.time() - mtime < 1800:
+                existing_url = load_tachibana_url()
+                if existing_url:
+                    print("  ✅ Tachibana API セッション有効（30分以内のログイン）")
+                    return existing_url
+        except FileNotFoundError:
+            pass
+        # 今日ログイン済みだが30分超 → そのまま使える（注文URLも有効）
+        existing_url = load_tachibana_url()
+        if existing_url:
+            print(f"  ✅ Tachibana API セッション有効（本日 {last_login[8:10]}:{last_login[10:12]} ログイン済み）")
+            return existing_url
 
-    # セッション期限切れ or ファイルなし → 電話認証フロー
+    # 昨日以前のセッション or ファイルなし → 電話認証フロー
+    existing_url = load_tachibana_url()
     if existing_url:
-        print("  ⚠️  Tachibana API セッションが期限切れです（毎朝の認証が必要）")
+        print("  ⚠️  Tachibana API セッションが前日のものです（毎朝の電話認証が必要）")
     else:
         print("  ℹ️  Tachibana API 未接続（初回認証が必要）")
+        print("  ℹ️  ※ 毎朝 python tachibana_login.py を先に実行することを推奨します")
 
     print()
     print("  ┌─────────────────────────────────────────────────┐")
@@ -1144,15 +1143,22 @@ def main():
 
     candidate_rows = []
 
-    # ── 0. S3からDBを最新版にダウンロード ──
-    try:
-        import download_db
-        download_db.main()
-        _db.init_db()  # ダウンロード後にテーブル存在確認
-    except SystemExit:
-        print("  ⚠️  S3ダウンロード失敗 - ローカルDBで続行します")
-    except Exception as e:
-        print(f"  ⚠️  S3ダウンロードエラー: {e} - ローカルDBで続行します")
+    # ── 0. DBの鮮度確認 → 古ければS3から取得、今日更新済みならスキップ ──
+    import time as _time
+    _db_path = Path(__file__).parent / "out" / "stock.db"
+    _db_age_hours = (_time.time() - _db_path.stat().st_mtime) / 3600 if _db_path.exists() else 999
+    if _db_age_hours > 20:  # 20時間以上古い（=昨日以前）→ S3から取得
+        print(f"  DBが{_db_age_hours:.0f}時間前のものです。S3から最新版を取得します...")
+        try:
+            import download_db
+            download_db.run(db_only=True)
+            _db.init_db()
+        except SystemExit:
+            print("  ⚠️  S3ダウンロード失敗 - ローカルDBで続行します")
+        except Exception as e:
+            print(f"  ⚠️  S3ダウンロードエラー: {e} - ローカルDBで続行します")
+    else:
+        print(f"  ✅ ローカルDB使用（{_db_age_hours:.1f}時間前に更新済み）")
 
     # ── Tachibana API セッション確保（期限切れなら電話認証フローを案内）──
     print("  Tachibana API セッション確認中...")
@@ -1338,7 +1344,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"【前日closing_watch 仕込み済みポジション確認】")
     print(f"  ※ 逆張り買いは前日引け前（closing_watch）で実施済み")
-    print(f"  ※ 本日の決済目安: TP+3% / SL-6%（翌日引け決済）")
+    print(f"  ※ 本日の決済目安: TP+3.2% / SL-6.2%（GA最適化結果 2026-05-26）")
     print(f"{'='*60}")
 
     df_b = _db.get_watchlist()

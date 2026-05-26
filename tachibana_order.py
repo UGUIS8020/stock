@@ -142,6 +142,7 @@ def place_buy_order(url_request, code, shares, price=None):
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
         f'"sIssueCode":"{code}",'
+        '"sMarketCode":"00101",'      # 00101=東証
         '"sBaibaikubun":"1",'        # 1=買
         '"sOrderSinkubun":"0",'      # 0=現物
         f'"sSasiNeKubun":"{sasi_kubun}",'
@@ -163,7 +164,8 @@ def place_buy_order(url_request, code, shares, price=None):
     try:
         result = _api_get(url_request + "?" + params)
         p_errno = result.get("p_errno")   # None if key absent
-        print(f"  [DEBUG] buy response keys: {list(result.keys())[:8]}  p_errno={p_errno}")
+        s_result = result.get("sResultCode", "")
+        print(f"  [DEBUG] buy response keys: {list(result.keys())[:8]}  p_errno={p_errno} sResultCode={s_result}")
         if p_errno is None:
             return {
                 "success":  False,
@@ -171,11 +173,8 @@ def place_buy_order(url_request, code, shares, price=None):
                 "message":  f"APIレスポンス異常（p_ernoキーなし）: {str(result)[:200]}",
                 "raw":      result,
             }
-        if p_errno == "0":
-            order_no = (result.get("sOrderNo")
-                        or (result.get("CLMKabuNewOrder") or {}).get("sOrderNo", ""))
-            if not order_no:
-                print(f"  [DEBUG] full response: {result}")
+        if p_errno == "0" and s_result == "0":
+            order_no = result.get("sOrderNumber", "")
             return {
                 "success":  True,
                 "order_no": order_no,
@@ -183,10 +182,12 @@ def place_buy_order(url_request, code, shares, price=None):
                 "raw":      result,
             }
         else:
+            err_msg = result.get("sResultText") or result.get("p_err") or "不明"
+            print(f"  [DEBUG] full response: {result}")
             return {
                 "success":  False,
                 "order_no": None,
-                "message":  f"注文エラー (p_errno={p_errno}): {result.get('p_err', '不明')}",
+                "message":  f"注文エラー (p_errno={p_errno} sResultCode={s_result}): {err_msg}",
                 "raw":      result,
             }
     except Exception as e:
@@ -236,6 +237,7 @@ def place_sell_order(url_request, code, shares, price=None):
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
         f'"sIssueCode":"{code}",'
+        '"sMarketCode":"00101",'      # 00101=東証
         '"sBaibaikubun":"2",'
         '"sOrderSinkubun":"0",'
         f'"sSasiNeKubun":"{sasi_kubun}",'
@@ -256,9 +258,10 @@ def place_sell_order(url_request, code, shares, price=None):
     )
     try:
         result = _api_get(url_request + "?" + params)
-        p_errno = result.get("p_errno", "0")
-        if p_errno == "0":
-            order_no = result.get("sOrderNo", result.get("CLMKabuNewOrder", {}).get("sOrderNo", ""))
+        p_errno = result.get("p_errno", "")
+        s_result = result.get("sResultCode", "")
+        if p_errno == "0" and s_result == "0":
+            order_no = result.get("sOrderNumber", "")
             return {
                 "success":  True,
                 "order_no": order_no,
@@ -266,10 +269,11 @@ def place_sell_order(url_request, code, shares, price=None):
                 "raw":      result,
             }
         else:
+            err_msg = result.get("sResultText") or result.get("p_err") or "不明"
             return {
                 "success":  False,
                 "order_no": None,
-                "message":  f"売り注文エラー (p_errno={p_errno}): {result.get('p_err', '不明')}",
+                "message":  f"売り注文エラー (p_errno={p_errno} sResultCode={s_result}): {err_msg}",
                 "raw":      result,
             }
     except Exception as e:

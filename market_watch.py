@@ -47,7 +47,7 @@ WATCH_END_MIN      = 30    # 監視終了（9:30）
 
 # TP/SL設定
 TP_PCT = 0.03   # 利確 +3%
-SL_PCT = 0.05   # 損切 -5%
+SL_PCT = 0.01   # 損切 -1%（最適化結果: SL=-1%でSharpe14倍改善）
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A = 10   # 戦略A: scoreで降順
@@ -103,23 +103,15 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "description":           "PANIC日 → 全見送り",
         }
 
-    # WEAK日のCAUTION → AI推奨が「様子見」なら条件付きエントリー検討、それ以外は観察のみ
-    # 【根拠】WEAK日CAUTION銘柄は損失傾向（バックテスト）。
-    #         ただしAI「様子見」は期日付き材料等の個別要因を捉えている可能性がある。
-    #         +2%確認後にAI判断を起動。「見送り推奨」や判定なしはデータ蓄積のみ。
+    # WEAK日のCAUTION → 9:05以降に成行買い
+    # 【根拠】WEAK×CAUTION N=44 avg+0.97% Sharpe=0.43（SL=-1%）が全セグメント中最高
+    #         旧ロジック（OBSERVE）はこの利益を全て取り逃していた
     if condition == "WEAK" and judgment == "CAUTION":
-        if ai_recommendation == "様子見":
-            return {
-                "style":                 "WAIT_CONFIRM",
-                "ai_trigger_min":        3,
-                "confirm_threshold_pct": 0.0,
-                "description":           "WEAK日CAUTION + AI様子見 → 9:03以降 即AI判断（事前様子見済み）",
-            }
         return {
-            "style":                 "OBSERVE",
-            "ai_trigger_min":        None,
-            "confirm_threshold_pct": None,
-            "description":           "WEAK日CAUTION → 9:30まで観察のみ（買い禁止・データ蓄積用）",
+            "style":                 "WAIT_CONFIRM",
+            "ai_trigger_min":        5,
+            "confirm_threshold_pct": 0.0,
+            "description":           "WEAK日CAUTION → 9:05以降 成行買い（avg+0.97%・N=44）",
         }
 
     if condition == "WEAK":
@@ -135,22 +127,22 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
 
     if condition in ("NORMAL", "STRONG"):
         if judgment == "CAUTION":
-            # CAUTION: 通常より高い上昇確認閾値でエントリー
-            threshold = 0.5 if condition == "STRONG" else 1.0
+            # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
+            # NORMAL日CAUTIONは1.0%上昇確認（有効ゾーン外の慎重銘柄）
+            threshold = 0.3 if condition == "STRONG" else 1.0
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        5,
                 "confirm_threshold_pct": threshold,
-                "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後に慎重エントリー",
+                "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
             }
         else:
-            # BUY: 通常の上昇確認閾値
-            threshold = 0.3 if condition == "STRONG" else 0.5
+            # NORMAL日BUY（最良ゾーン銘柄）
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        5,
-                "confirm_threshold_pct": threshold,
-                "description":           f"{condition}日BUY → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
+                "confirm_threshold_pct": 0.5,
+                "description":           f"{condition}日BUY → 9:05以降 前日比+0.5%以上を確認後エントリー",
             }
 
     # UNKNOWN など
@@ -306,11 +298,21 @@ def _extract_rb_score(reason):
 
 def load_candidates():
     """本日のBUY/CAUTION候補を読み込み、MAX_WATCH_A/B件に絞り込む。"""
-    if not os.path.exists(CANDIDATES_LOG_CSV):
+    today_df = pd.DataFrame()
+    try:
+        import db as _db, sqlite3
+        conn = sqlite3.connect(_db.DB_PATH)
+        today_df = pd.read_sql(
+            f'SELECT date,strategy,code,condition,name,score,ratio,judgment,reason '
+            f'FROM candidates_log WHERE date="{TODAY}"', conn)
+        conn.close()
+    except Exception:
+        pass
+
+    if today_df.empty:
+        print("  ⚠️  candidates_log にデータがありません。scan_morning.py を先に実行してください。")
         return [], "UNKNOWN"
 
-    df        = pd.read_csv(CANDIDATES_LOG_CSV, encoding="utf-8-sig")
-    today_df  = df[df["date"] == TODAY]
     condition = today_df["condition"].iloc[0] if not today_df.empty else "UNKNOWN"
     targets   = today_df[today_df["judgment"].isin(["BUY", "CAUTION"])].copy()
     original  = len(targets)
@@ -342,14 +344,15 @@ def load_candidates():
 
 
 def load_market_info():
-    """morning_log.csvから地合い情報を読み込む"""
-    if not os.path.exists(MORNING_LOG_CSV):
-        return {}
+    """morning_log テーブルから本日の地合い情報を読み込む"""
     try:
-        df    = pd.read_csv(MORNING_LOG_CSV, encoding="utf-8-sig")
-        today = df[df["date"] == TODAY]
-        if not today.empty:
-            return today.iloc[0].to_dict()
+        import db as _db, sqlite3
+        conn = sqlite3.connect(_db.DB_PATH)
+        df = pd.read_sql(
+            'SELECT * FROM morning_log WHERE date=?', conn, params=[TODAY])
+        conn.close()
+        if not df.empty:
+            return df.iloc[0].to_dict()
     except Exception:
         pass
     return {}
@@ -439,7 +442,7 @@ def confirm_and_order(candidate, price, url_request):
                 buy_px = int(rec_price or price or 0)
                 if buy_px > 0:
                     tachibana_order.save_position(code, name, shares, buy_px,
-                                                  strategy="A", tp_pct=0.05, sl_pct=0.05)
+                                                  strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
             else:
                 print(f"  ❌ 発注失敗: {result['message']}")
                 print(f"     APIレスポンス: {result['raw']}")
@@ -721,7 +724,7 @@ def main(start_now=False):
     else:
         print(f"  🌐 Yahoo Finance: 遅延価格取得モード（立花APIにログインすると精度向上）")
     mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
-    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//1000}万円分 / 1,000円以上→{DEFAULT_SHARES}株")
+    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / 1,000円以上→{DEFAULT_SHARES}株")
 
     print(f"  監視対象: {len(candidates)}銘柄  地合い: {condition}")
     for c in candidates:
