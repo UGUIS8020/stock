@@ -1,18 +1,18 @@
 戦略B 遺伝的アルゴリズム最適化レポート
-実行日時: 2026-05-26 08:40
-人口: 20,000人  世代数: 100  所要時間: 141秒
-データ期間: 2025-04-10 〜 2026-03-26
-ウォークフォワード分割日: 2025-11-20
+実行日時: 2026-05-26 18:15
+人口: 20,000人  世代数: 100  所要時間: 120秒
+データ期間: 2025-03-04 〜 2026-03-26
+ウォークフォワード分割日: 2025-10-08
 
 【In/Out両方プラス（推奨戦略）上位5件】
-  drop-3.2〜-2.7% / RB>=3 / gap<=+3.3% / NORMAL+STRONG / TP+1.6%/SL-6.5% | N=273 WR=57.1% avg=+0.113% Sharpe=+1.056
-  drop-3.2〜-2.7% / RB>=2 / gap<=+3.1% / NORMAL+STRONG / TP+3.2%/SL-6.2% | N=371 WR=53.1% avg=+0.130% Sharpe=+1.054
-  drop-3.2〜-3.0% / RB>=2 / gap<=+4.7% / NORMAL+STRONG / TP+4.6%/SL-7.0% | N=354 WR=52.5% avg=+0.141% Sharpe=+1.054
-  drop-3.2〜-2.7% / RB>=2 / gap<=+3.5% / NORMAL+STRONG / TP+4.0%/SL-4.6% | N=378 WR=52.1% avg=+0.112% Sharpe=+0.871
-  drop-3.2〜-2.7% / RB>=2 / gap<=+5.0% / NORMAL+STRONG / TP+2.4%/SL-5.9% | N=382 WR=53.1% avg=+0.105% Sharpe=+0.858
+  drop-5.0〜-3.1% / RB>=4 / gap<=+0.3% / NORMAL+STRONG / TP+5.4%/SL-0.5% | N=148 WR=29.1% avg=+0.378% Sharpe=+3.502
+  drop-5.2〜-3.0% / RB>=4 / gap<=+0.7% / NORMAL+STRONG / TP+2.6%/SL-0.5% | N=210 WR=25.2% avg=+0.240% Sharpe=+3.207
+  drop-5.5〜-3.0% / RB>=4 / gap<=+0.3% / NORMAL+STRONG / TP+3.8%/SL-0.5% | N=169 WR=22.5% avg=+0.258% Sharpe=+2.977
+  drop-5.3〜-3.0% / RB>=6 / gap<=+0.8% / NORMAL+STRONG / TP+2.9%/SL-0.6% | N=214 WR=29.4% avg=+0.233% Sharpe=+2.901
+  drop-5.4〜-3.0% / RB>=4 / gap<=+0.3% / NORMAL+STRONG / TP+4.0%/SL-0.5% | N=193 WR=24.4% avg=+0.248% Sharpe=+2.894
 
 【世代別Sharpe推移（10世代ごと）】
-     1世代: best=+3.500  top5avg=+2.437
+     1世代: best=+4.004  top5avg=+3.357
     11世代: best=+5.000  top5avg=+5.000
     21世代: best=+5.000  top5avg=+5.000
     31世代: best=+5.000  top5avg=+5.000

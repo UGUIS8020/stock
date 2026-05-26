@@ -3,10 +3,11 @@ closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン +
 
 【パラメータ根拠】
   GA最適化（20,000人×100世代, 2026-05-26）OOS検証済み:
-    drop -3.2〜-2.7% / RB>=2 / gap<=+3.1% / NORMAL+STRONG
-    N=371件 / WR=53.1% / avg=+0.130% / OOS Sharpe=+1.054
-  TP+3.2% / SL-6.2%  ← 2026-05-26更新（旧: TP+5.0% / SL-5.0%）
+    drop -5.0〜-3.1% / RB>=4 / NORMAL+STRONG / cd>=3
+    N=148件 / WR=29.1% / avg=+0.378% / OOS Sharpe=+3.502
+  TP+5.4% / SL-0.5%  ← 2026-05-26更新（旧: TP+3.2% / SL-6.2%）
   ※フィルタ: 株価200円以上・売買代金5,000万円以上・±10%超除外
+  ※地合い: NORMAL+STRONG（旧: STRONGのみ）
 
 実行方法:
     python closing_watch.py       # 14:43まで待機して自動開始
@@ -49,10 +50,10 @@ SCAN_START_HOUR    = 14
 SCAN_START_MIN     = 55
 ORDER_DEADLINE_MIN = 15 * 60 + 15  # 15:15 以降は発注しない（引けオークション開始前）
 
-DROP_LO      = -6.7   # 下落下限（GA再検証2026-05-24 30000人・フィルタ済）
-DROP_HI      = -4.0   # 下落上限（GA再検証2026-05-24 30000人・フィルタ済）
-RB_MIN       = 4      # RBスコア最小値（GA再検証2026-05-24 30000人・フィルタ済）
-CD_MIN       = 2      # 連続下落日数最小値（cd≥2: 前日も下落していること）
+DROP_LO      = -5.0   # 下落下限（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
+DROP_HI      = -3.1   # 下落上限（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
+RB_MIN       = 4      # RBスコア最小値（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
+CD_MIN       = 3      # 連続下落日数最小値（cd≥3: 前々日も下落していること）
 MIN_VOLUME          = 50_000
 MAX_POSITIONS_PER_DAY = 3      # 1日の最大自動発注件数（安全装置）
 
@@ -293,11 +294,12 @@ def enrich_with_rb(candidates):
         try:
             hist = db.get_stock_history(c["code"])
             c["rb_score"]    = calc_rebound_score(hist) if len(hist) >= 26 else 0
-            # 連続下落チェック（直近DB日=前日、その前=2日前）
-            if len(hist) >= 2:
+            # 連続下落チェック（cd≥3: 前日・前々日も下落していること）
+            if len(hist) >= 3:
                 y_close  = float(hist["Close"].iloc[-1])   # 前日終値
                 d2_close = float(hist["Close"].iloc[-2])   # 2日前終値
-                c["consec_drop_ok"] = y_close < d2_close   # 前日も下落していれば cd≥2 成立
+                d3_close = float(hist["Close"].iloc[-3])   # 3日前終値
+                c["consec_drop_ok"] = y_close < d2_close and d2_close < d3_close
             else:
                 c["consec_drop_ok"] = False
         except Exception:
@@ -325,8 +327,8 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     price     = candidate["price"]
     shares    = calc_shares(price)
     estimated = int(price * shares)
-    tp_price  = round(price * 1.032)
-    sl_price  = round(price * 0.938)
+    tp_price  = round(price * 1.054)
+    sl_price  = round(price * 0.995)
 
     # 重複発注防止
     if str(code) in ordered_today:
@@ -343,14 +345,14 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     mode = "本番" if tachibana_order.LIVE_TRADING else "モック"
     print(f"\n  📤 自動発注 [{mode}]: [{code}] {name}  "
           f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
-    print(f"     TP目安: {tp_price:,}円 (+3.2%)  SL目安: {sl_price:,}円 (-6.2%)")
+    print(f"     TP目安: {tp_price:,}円 (+5.4%)  SL目安: {sl_price:,}円 (-0.5%)")
 
     result = tachibana_order.place_buy_order(url_request, code, shares)
     if result["success"]:
         print(f"  ✅ {result['message']}")
         tachibana_order.save_position(
             code, name, shares, price,
-            strategy="B", tp_pct=0.032, sl_pct=0.062,
+            strategy="B", tp_pct=0.054, sl_pct=0.005,
             entry_change_pct=candidate.get("change_pct"),
             rb_score=candidate.get("rb_score"),
             condition=condition,
@@ -374,8 +376,8 @@ def save_closing_log(candidates):
         "change_pct": c["change_pct"],
         "rb_score":   c["rb_score"],
         "price":      c["price"],
-        "tp_price":   round(c["price"] * 1.032),
-        "sl_price":   round(c["price"] * 0.938),
+        "tp_price":   round(c["price"] * 1.054),
+        "sl_price":   round(c["price"] * 0.995),
     } for c in candidates]
     db.save_closing_log_db(rows)
     print(f"\n  💾 ログ保存: closing_log（{len(rows)}件）")
@@ -434,13 +436,12 @@ def main(start_now=False, manual=False):
     nikkei_info = f"  日経{nikkei_change:+.2f}%" if nikkei_change is not None else ""
     print(f"  地合い（スキャン補正後）: {condition}  AD比率: {ad_ratio:.2f}{nikkei_info}")
 
-    # STRONG以外は終了
-    if condition != "STRONG":
+    # WEAK/PANIC は終了（NORMAL+STRONG のみ有効）
+    if condition not in ("STRONG", "NORMAL"):
         print(f"\n  ⚠️  本日は{condition}地合いです。")
-        print(f"     戦略B引け前買いはSTRONG地合いのみ有効のため終了します。")
-        req_str = f"AD>={STRONG_AD} かつ 日経>={STRONG_NIKKEI}%"
+        print(f"     戦略B引け前買いはSTRONG/NORMAL地合いのみ有効のため終了します。")
         now_str = f"AD{ad_ratio:.2f}{nikkei_info}"
-        print(f"     （STRONG条件: {req_str} / 現在: {now_str}）")
+        print(f"     （現在: {now_str}）")
         return
 
     if not raw_candidates:
@@ -483,13 +484,13 @@ def main(start_now=False, manual=False):
         return
 
     print(f"\n{'='*62}")
-    print(f"【引け前候補】STRONG地合い × {DROP_HI}〜{DROP_LO}% × RB>={RB_MIN} × cd≥{CD_MIN}  {len(candidates)}件")
+    print(f"【引け前候補】STRONG/NORMAL地合い × {DROP_HI}〜{DROP_LO}% × RB>={RB_MIN} × cd≥{CD_MIN}  {len(candidates)}件")
     print(f"{'='*62}")
     print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'TP目安':>8} {'SL目安':>8} {'出来高':>10}")
     print(f"  {'─'*72}")
     for c in candidates:
-        tp = round(c["price"] * 1.032)
-        sl = round(c["price"] * 0.938)
+        tp = round(c["price"] * 1.054)
+        sl = round(c["price"] * 0.995)
         print(f"  {c['code']:<7} {c.get('name',''):<14} {c['change_pct']:>+6.2f}% "
               f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
 
@@ -515,8 +516,8 @@ def main(start_now=False, manual=False):
             code  = c["code"]
             name  = c.get("name", code)
             price = c["price"]
-            tp    = round(price * 1.032)
-            sl    = round(price * 0.938)
+            tp    = round(price * 1.054)
+            sl    = round(price * 0.995)
             print(f"\n  [{code}] {name}  {price:,.0f}円  {c['change_pct']:+.2f}%  "
                   f"RB{c['rb_score']}点  TP:{tp:,}円  SL:{sl:,}円")
             ans = input("  >>> 発注しますか？ [y=発注 / n=見送り / q=終了] : ").strip().lower()
