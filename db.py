@@ -181,6 +181,7 @@ def init_db():
     conn.commit()
     conn.close()
     migrate_candidates_log_columns()
+    migrate_daily_prices_market_code()
 
 
 # ══════════════════════════════════════════════════════
@@ -661,6 +662,56 @@ def migrate_candidates_log_columns():
                           ("result_pct", "REAL"), ("result_grade", "TEXT")]:
         if col not in existing:
             conn.execute(f"ALTER TABLE candidates_log ADD COLUMN {col} {typedef}")
+    conn.commit()
+    conn.close()
+
+
+def migrate_daily_prices_market_code():
+    """daily_prices に market_code 列が未追加の場合のみ追加する（冪等）。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(daily_prices)").fetchall()}
+    if "market_code" not in existing:
+        conn.execute("ALTER TABLE daily_prices ADD COLUMN market_code TEXT")
+        conn.commit()
+    conn.close()
+
+
+def get_market_code_db(code):
+    """
+    daily_prices から銘柄の市場コード（Tachibana sMarketCode 形式）を返す。
+    JQuants の Mkt コード(例: "0111") を 5桁 Tachibana コード(例: "00111") に変換。
+    見つからない場合は None を返す。
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT market_code FROM daily_prices WHERE code=? AND market_code IS NOT NULL LIMIT 1",
+        [str(code)]
+    ).fetchone()
+    conn.close()
+    if row and row[0]:
+        mkt = str(row[0]).strip()
+        # JQuants 4桁コード → Tachibana 5桁コード（先頭に "0" を付加）
+        if len(mkt) == 4 and mkt.isdigit():
+            return "0" + mkt
+        # すでに5桁の場合はそのまま
+        if len(mkt) == 5 and mkt.isdigit():
+            return mkt
+    return None
+
+
+def upsert_market_codes(code_mkt_dict):
+    """
+    {code: mkt_code} の辞書を daily_prices に一括更新する。
+    mkt_code は JQuants の Mkt フィールド値（例: "0111"）。
+    """
+    if not code_mkt_dict:
+        return
+    conn = get_conn()
+    for code, mkt in code_mkt_dict.items():
+        conn.execute(
+            "UPDATE daily_prices SET market_code=? WHERE code=?",
+            [str(mkt), str(code)]
+        )
     conn.commit()
     conn.close()
 

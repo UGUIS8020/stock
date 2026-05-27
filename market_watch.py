@@ -24,6 +24,7 @@ import requests
 import urllib3
 import pandas as pd
 import tachibana_order
+import db
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
@@ -436,7 +437,8 @@ def confirm_and_order(candidate, price, url_request):
                 print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
                 return
             print(f"  📤 発注中... {code} {shares}株 成行買い")
-            result = tachibana_order.place_buy_order(url_request, code, shares)
+            mkt_code = db.get_market_code_db(code)
+            result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
             if result["success"]:
                 print(f"  ✅ {result['message']}")
                 buy_px = int(rec_price or price or 0)

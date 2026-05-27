@@ -1447,19 +1447,8 @@ def main():
 
     import subprocess, sys as _sys
 
-    # ── 戦略A：朝に BUY/CAUTION 候補がある場合のみ寄り付き監視・発注 ──
-    has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
-    if has_buy and condition != "PANIC":
-        try:
-            import market_watch
-            market_watch.main()
-        except Exception as e:
-            print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
-            print("   → python market_watch.py を手動で実行してください")
-
-    # ── PANIC以外は常に position_monitor・closing_watch を起動 ──
-    # 朝の地合いに関わらず午後に地合いが変化する可能性があるため常時起動する
-    # closing_watch が14:30に実際のAD比率を計測してSTRONG以外なら自動終了する
+    # ── PANIC以外: position_monitor・daytime を market_watch より先に起動 ──
+    # market_watch（ブロッキング）より前に起動することで9:00から並行稼働させる
     if condition != "PANIC":
         try:
             subprocess.Popen([_sys.executable, str(_BASE_DIR / "position_monitor.py")])
@@ -1470,16 +1459,90 @@ def main():
 
         try:
             subprocess.Popen([_sys.executable, str(_BASE_DIR / "daytime.py")])
-            print("  📈 daytime をバックグラウンドで起動しました（9:00〜14:00 自動売買）")
+            print("  📈 daytime をバックグラウンドで起動しました（9:00〜14:30 自動売買）")
         except Exception as e:
             print(f"⚠️  daytime の起動に失敗しました: {e}")
 
+    # ── 戦略A：BUY/CAUTION 候補がある場合のみ寄り付き監視・発注 ──
+    has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
+    if has_buy and condition != "PANIC":
+        try:
+            import market_watch
+            market_watch.main()
+        except Exception as e:
+            print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
+            print("   → python market_watch.py を手動で実行してください")
+
+    # ── closing_watch（ブロッキング）──
+    if condition != "PANIC":
         try:
             import closing_watch
             closing_watch.main()
         except Exception as e:
             print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
             print("   → python closing_watch.py を手動で実行してください")
+
+    # ── closing_watch 終了後、16:45 に scan_daily.py を自動実行（データ未取得時は15分おきにリトライ）──
+    _run_scan_daily_at_1640()
+
+
+def _run_scan_daily_at_1640():
+    """closing_watch 終了後、16:45 まで待機して scan_daily.py を自動実行する。
+    データ未取得の場合は 15 分おきに 20:00 まで最大 3 回リトライする。"""
+    import time as _time
+    import sqlite3 as _sqlite3
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    _JST    = _tz(_td(hours=9))
+    now     = _dt.now(_JST)
+    target  = now.replace(hour=16, minute=45, second=0, microsecond=0)
+    today   = now.strftime("%Y-%m-%d")
+
+    if now < target:
+        wait = int((target - now).total_seconds())
+        print(f"\n  ⏳ scan_daily.py を 16:45 に自動実行します（あと {wait//60}分{wait%60}秒）")
+        _time.sleep(wait)
+
+    def _has_today_data():
+        try:
+            conn = _sqlite3.connect(str(_BASE_DIR / "out" / "stock.db"))
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM daily_prices WHERE Date=?", (today,)
+            ).fetchone()[0]
+            conn.close()
+            return cnt > 0
+        except Exception:
+            return False
+
+    max_retries = 3
+    retry_interval = 15 * 60  # 15分
+
+    for attempt in range(max_retries + 1):
+        now_str = _dt.now(_JST).strftime("%H:%M")
+        print(f"\n{'='*60}")
+        if attempt == 0:
+            print(f"  📊 scan_daily.py を自動起動します（{now_str}）")
+        else:
+            print(f"  🔄 scan_daily.py リトライ {attempt}/{max_retries}（{now_str}）")
+        print(f"{'='*60}")
+
+        try:
+            subprocess.run([_sys.executable, str(_BASE_DIR / "scan_daily.py")])
+        except Exception as e:
+            print(f"⚠️  scan_daily.py の実行に失敗しました: {e}")
+
+        if _has_today_data():
+            print(f"  ✅ {today} のデータ取得完了")
+            return
+
+        if attempt < max_retries:
+            next_time = (_dt.now(_JST) + _td(seconds=retry_interval)).strftime("%H:%M")
+            if _dt.now(_JST).hour >= 20:
+                print(f"  ⚠️  20:00 を過ぎたためリトライ中止")
+                break
+            print(f"  ⚠️  データ未取得 → {next_time} に再試行します")
+            _time.sleep(retry_interval)
+
+    print(f"  ❌ データ取得できませんでした → python scan_daily.py を手動で実行してください")
 
 
 if __name__ == "__main__":

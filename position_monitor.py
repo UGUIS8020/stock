@@ -140,7 +140,8 @@ def main():
                     name  = pos["name"]
                     shares = int(pos["shares"])
                     print(f"  📤 引け成行売り: [{code}] {name} {shares}株")
-                    result = tachibana_order.place_sell_order(url_request, code, shares)
+                    mkt_code = db.get_market_code_db(code)
+                    result = tachibana_order.place_sell_order(url_request, code, shares, market_code=mkt_code)
                     if result["success"]:
                         data    = fetch_prices(url_price, [code])
                         current = (data.get(code) or {}).get("price") or float(pos["buy_price"])
@@ -200,7 +201,8 @@ def main():
                 gap_pct = (open_px - buy_px) / buy_px * 100
                 if gap_pct > GAP_SELL_THRESHOLD:
                     print(f"  🚀 {code} {name}: 翌朝ギャップ+{gap_pct:.2f}% → 即売り（シミュ検証済み）")
-                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]))
+                    mkt_code = db.get_market_code_db(code)
+                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code)
                     if result["success"]:
                         pos["status"]     = "closed"
                         pos["sell_price"] = str(open_px)
@@ -224,7 +226,8 @@ def main():
                 reason = f"TP({tp_px:.0f}円)" if hit_tp else f"SL({sl_px:.0f}円)"
                 print(f"  {'🎯' if hit_tp else '🛑'} {code} {name}: "
                       f"{reason} 到達 ({current}円 {chg:+.2f}%) → 売り発注")
-                result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]))
+                mkt_code = db.get_market_code_db(code)
+                result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code)
                 if result["success"]:
                     pos["status"]      = "closed"
                     pos["sell_price"]  = str(current)

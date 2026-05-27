@@ -70,7 +70,7 @@ ORDER_AMOUNT          = 300_000   # 1発注あたりの目安金額（30万円�
 MAX_DAYTIME_POSITIONS = 3         # 日中最大ポジション数
 
 # ── シグナル条件（analyze_a.py 統計分析結果に基づく）──
-REQUIRE_STRONG  = True   # TrueならSTRONG地合いのみ発注（NORMAL/WEAKは見送り）
+REQUIRE_STRONG  = False  # False=STRONG・NORMAL地合いで発注（WEAKはcan_orderで除外）
 GAP_MAX_PCT     = 2.0    # 寄り付きギャップ上限（+2%超のギャップアップは除外）
 GAP_MIN_PCT     = -5.0   # 寄り付きギャップ下限（-5%超の急落も除外）
 PREV_RISE_MIN   = 0.0    # 前日騰落率の下限（前日プラスの銘柄のみ対象）
@@ -444,7 +444,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
 
     print(f"\n  監視開始: {WATCH_START_HOUR}:{WATCH_START_MIN:02d} 〜 "
           f"{WATCH_END_HOUR}:{WATCH_END_MIN:02d}  対象: {len(codes)}銘柄")
-    print(f"  地合い: {condition}  （{'発注有効' if condition == 'STRONG' else '監視のみ'}）")
+    print(f"  地合い: {condition}  （{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
     if is_monday:
         print(f"  ⚠️  月曜モード: 最大ポジション={max_positions} / gap≥{gap_min:+.0f}% / score<{score_max}")
     print(f"  条件: STRONG地合い × gap{gap_min:+}〜{GAP_MAX_PCT:+}% × 前日プラス × モメンタム{MOMENTUM_PCT:+.1f}%以上")
@@ -508,7 +508,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
         new_signals.sort(key=lambda x: -x[3])
 
         can_order = (DAYTIME_TRADING and
-                     (not REQUIRE_STRONG or condition == "STRONG") and
+                     condition in ("STRONG", "NORMAL") and
                      bool(url_request))
 
         for code, name, sig, adj_score, attr_w in new_signals:
@@ -534,7 +534,8 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 print(f"     ⚠️  最大ポジション数({max_positions})到達 → 発注スキップ")
                 continue
             shares = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
-            result = tachibana_order.place_buy_order(url_request, code, shares)
+            mkt_code = db.get_market_code_db(code)
+            result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
             if result["success"]:
                 tachibana_order.save_position(
                     code, name, shares, sig["price"], "D",

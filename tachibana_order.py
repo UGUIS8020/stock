@@ -43,7 +43,11 @@ _p_no = _init_p_no()
 
 def _next_p_no():
     global _p_no
-    _p_no += 1
+    try:
+        saved = int(_P_NO_FILE.read_text().strip())
+        _p_no = max(_p_no, saved) + 1
+    except Exception:
+        _p_no += 1
     try:
         _P_NO_FILE.write_text(str(_p_no))
     except Exception:
@@ -97,7 +101,7 @@ def get_buying_power(url_request):
         return None
 
 
-def place_buy_order(url_request, code, shares, price=None):
+def place_buy_order(url_request, code, shares, price=None, market_code=None):
     """
     現物 成行買い注文を発注する。
 
@@ -106,6 +110,8 @@ def place_buy_order(url_request, code, shares, price=None):
         code: 銘柄コード（例: "8289"）
         shares: 発注株数（例: 100）
         price: None=成行、数値=指値
+        market_code: 立花証券 sMarketCode（例: "00111"=Prime, "00112"=Standard）
+                     None の場合は DB から自動取得し、見つからなければ "00101" を使用
 
     Returns:
         dict: {
@@ -125,6 +131,13 @@ def place_buy_order(url_request, code, shares, price=None):
             "raw":      {},
         }
 
+    if market_code is None:
+        try:
+            import db as _db
+            market_code = _db.get_market_code_db(code) or "00101"
+        except Exception:
+            market_code = "00101"
+
     # 成行: sSasiNeKubun="1", sSasiNe="0"
     # 指値: sSasiNeKubun="2", sSasiNe=str(price)
     if price is None:
@@ -142,7 +155,7 @@ def place_buy_order(url_request, code, shares, price=None):
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
         f'"sIssueCode":"{code}",'
-        '"sMarketCode":"00101",'      # 00101=東証
+        f'"sMarketCode":"{market_code}",'
         '"sBaibaikubun":"1",'        # 1=買
         '"sOrderSinkubun":"0",'      # 0=現物
         f'"sSasiNeKubun":"{sasi_kubun}",'
@@ -212,7 +225,7 @@ def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0
     )
 
 
-def place_sell_order(url_request, code, shares, price=None):
+def place_sell_order(url_request, code, shares, price=None, market_code=None):
     """現物 成行売り注文を発注する。戻り値は place_buy_order と同じ構造。"""
     if not LIVE_TRADING:
         print(f"  🔧 [モックモード] 実際の注文は出ません（LIVE_TRADING=False）")
@@ -222,6 +235,13 @@ def place_sell_order(url_request, code, shares, price=None):
             "message":  f"[モック] {code} {shares}株 成行売り（発注なし）",
             "raw":      {},
         }
+
+    if market_code is None:
+        try:
+            import db as _db
+            market_code = _db.get_market_code_db(code) or "00101"
+        except Exception:
+            market_code = "00101"
 
     if price is None:
         sasi_kubun = "1"
@@ -237,7 +257,7 @@ def place_sell_order(url_request, code, shares, price=None):
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
         f'"sIssueCode":"{code}",'
-        '"sMarketCode":"00101",'      # 00101=東証
+        f'"sMarketCode":"{market_code}",'
         '"sBaibaikubun":"2",'
         '"sOrderSinkubun":"0",'
         f'"sSasiNeKubun":"{sasi_kubun}",'

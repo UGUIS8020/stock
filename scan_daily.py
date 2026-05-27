@@ -712,6 +712,17 @@ def main():
         name_dict = {}
         exclude_codes = set()
 
+    # 市場コードを JQuants から取得して DB に保存（sResultCode=11008 対策）
+    try:
+        df_list = cli.get_list()
+        if not df_list.empty and "Mkt" in df_list.columns:
+            df_list["code4"] = df_list["Code"].astype(str).str[:4]
+            code_mkt = dict(zip(df_list["code4"], df_list["Mkt"].astype(str)))
+            _db.upsert_market_codes(code_mkt)
+            print(f"  市場コード更新: {len(code_mkt)}銘柄")
+    except Exception as e:
+        print(f"  市場コード取得スキップ: {e}")
+
     mc = judge_market_condition(df_today)
     condition = print_market_condition(mc)
 
@@ -733,7 +744,7 @@ def main():
             update_cache(code4, today_row.iloc[0])
 
         hist = _db.get_stock_history(code4)
-        s = calc_score(hist[hist["Date"] < pd.Timestamp(TODAY)])
+        s = calc_score(hist)
         if s is None:
             continue
 

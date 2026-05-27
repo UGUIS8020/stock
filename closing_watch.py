@@ -347,7 +347,8 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
           f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
     print(f"     TP目安: {tp_price:,}円 (+1.9%)  SL目安: {sl_price:,}円 (-5.6%)")
 
-    result = tachibana_order.place_buy_order(url_request, code, shares)
+    mkt_code = db.get_market_code_db(code)
+    result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
     if result["success"]:
         print(f"  ✅ {result['message']}")
         tachibana_order.save_position(
