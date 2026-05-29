@@ -207,8 +207,8 @@ def load_prev_ohlcv(codes):
     try:
         all_rows = pd.read_sql(
             f"SELECT code, High, Low, Close, Volume, Date FROM daily_prices "
-            f"WHERE code IN ({placeholders}) ORDER BY code, Date DESC",
-            conn, params=str_codes
+            f"WHERE code IN ({placeholders}) AND Date < ? ORDER BY code, Date DESC",
+            conn, params=str_codes + [TODAY]
         )
     finally:
         conn.close()
@@ -431,7 +431,8 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     codes         = [str(c["code"]) for c in candidates]
     names         = {str(c["code"]): c.get("name", c["code"]) for c in candidates}
     scores        = {str(c["code"]): c.get("score", 0) for c in candidates}
-    signaled      = set()    # 本日発報済みコード
+    signaled      = set()    # 発注完了 or 永続失敗（このセッションでチェックしない）
+    alerted       = set()    # シグナル表示済み（重複表示防止のみ）
     ordered_today = set(db.get_today_ordered_codes(TODAY))
     first_prices  = {}       # 初回観測時の騰落率（≈ 寄り付きギャップの近似）
     signal_count  = 0
@@ -478,7 +479,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
         # ── Step1: このポーリングで出たシグナルを全件収集 ──
         new_signals = []
         for code in codes:
-            if code in signaled:
+            if code in signaled:   # 発注完了 or 永続失敗 → スキップ
                 continue
             quote = quotes.get(code)
             if not quote:
@@ -499,10 +500,12 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             adj_score  = (float(scores.get(code) or 0) + 1.0) * attr_w
 
             name = names.get(code, code)
-            new_signals.append((code, name, sig, adj_score, attr_w))
-            signaled.add(code)
-            signal_count += 1
-            save_signal(code, name, sig)
+            is_retry = code in alerted   # 既に表示済み = 発注失敗後の再試行
+            new_signals.append((code, name, sig, adj_score, attr_w, is_retry))
+            if not is_retry:
+                alerted.add(code)
+                signal_count += 1
+                save_signal(code, name, sig)
 
         # ── Step2: adj_score 降順でソートして優先発注 ────────
         new_signals.sort(key=lambda x: -x[3])
@@ -511,27 +514,34 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                      condition in ("STRONG", "NORMAL") and
                      bool(url_request))
 
-        for code, name, sig, adj_score, attr_w in new_signals:
+        for code, name, sig, adj_score, attr_w, is_retry in new_signals:
             tp = round(sig["price"] * (1 + TP_PCT))
             sl = round(sig["price"] * (1 - SL_PCT))
-            print(f"\n  🔔 [{now_str}] シグナル: {code} {name}"
-                  f"  adj_score={adj_score:.2f}（w={attr_w:.2f}）")
-            print(f"     前日比: {sig['change_pct']:+.2f}%  寄付ギャップ: {sig['gap_pct']:+.2f}%"
-                  f"  前日騰落: {sig['prev_rise']:+.2f}%")
-            print(f"     現在値: {sig['price']:,.0f}円  "
-                  f"TP: {tp:,.0f}円（+{TP_PCT*100:.0f}%）  SL: {sl:,.0f}円（-{SL_PCT*100:.0f}%）")
+            if is_retry:
+                print(f"\n  🔄 [{now_str}] 再試行: {code} {name}"
+                      f"  adj_score={adj_score:.2f}（w={attr_w:.2f}）")
+            else:
+                print(f"\n  🔔 [{now_str}] シグナル: {code} {name}"
+                      f"  adj_score={adj_score:.2f}（w={attr_w:.2f}）")
+                print(f"     前日比: {sig['change_pct']:+.2f}%  寄付ギャップ: {sig['gap_pct']:+.2f}%"
+                      f"  前日騰落: {sig['prev_rise']:+.2f}%")
+                print(f"     現在値: {sig['price']:,.0f}円  "
+                      f"TP: {tp:,.0f}円（+{TP_PCT*100:.0f}%）  SL: {sl:,.0f}円（-{SL_PCT*100:.0f}%）")
 
             if not can_order:
                 reason = ("DAYTIME_TRADING=False" if not DAYTIME_TRADING
                           else f"地合い={condition}")
                 print(f"     [{reason}] 発注スキップ")
+                signaled.add(code)   # 発注条件外は再試行しても意味がないのでスキップ
                 continue
             if code in ordered_today:
                 print(f"     ℹ️  本日発注済み → スキップ")
+                signaled.add(code)
                 continue
             open_pos = db.load_open_positions()
             if len(open_pos) >= max_positions:
                 print(f"     ⚠️  最大ポジション数({max_positions})到達 → 発注スキップ")
+                signaled.add(code)
                 continue
             shares = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
             mkt_code = db.get_market_code_db(code)
@@ -543,13 +553,18 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                     entry_change_pct=sig["change_pct"],
                 )
                 ordered_today.add(code)
+                signaled.add(code)   # 発注成功 → 以降スキップ
                 print(f"     ✅ 買い発注完了: {shares}株  {result['message']}")
             else:
-                print(f"     ❌ 発注失敗: {result['message']}")
+                msg = result["message"]
+                print(f"     ❌ 発注失敗: {msg}")
+                if "規制銘柄" in msg:
+                    signaled.add(code)   # 規制は永続的失敗 → 再試行しない
+                    print(f"     ⛔ 規制銘柄のため以降スキップ")
 
         if not new_signals:
             active = len(codes) - len(signaled)
-            print(f"  [{now_str}] 監視中: {active}銘柄  発報済み: {len(signaled)}件", end="\r")
+            print(f"  [{now_str}] 監視中: {active}銘柄  発報済み: {len(alerted)}件", end="\r")
 
         time.sleep(POLL_INTERVAL)
 

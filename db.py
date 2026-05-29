@@ -676,10 +676,23 @@ def migrate_daily_prices_market_code():
     conn.close()
 
 
+
+# JQuants Mkt コード → Tachibana sMarketCode マッピング
+# 00111/00102/00104 いずれも11008エラーのため、全銘柄 "00101"（東証）で統一
+_JQUANTS_TO_TACHIBANA = {
+    "0111": "00101",
+    "0112": "00101",
+    "0113": "00101",
+    "00111": "00101",
+    "00112": "00101",
+    "00113": "00101",
+}
+
+
 def get_market_code_db(code):
     """
     daily_prices から銘柄の市場コード（Tachibana sMarketCode 形式）を返す。
-    JQuants の Mkt コード(例: "0111") を 5桁 Tachibana コード(例: "00111") に変換。
+    JQuants の Mkt コード(例: "0111") を Tachibana コードに変換して返す。
     見つからない場合は None を返す。
     """
     conn = get_conn()
@@ -690,10 +703,12 @@ def get_market_code_db(code):
     conn.close()
     if row and row[0]:
         mkt = str(row[0]).strip()
-        # JQuants 4桁コード → Tachibana 5桁コード（先頭に "0" を付加）
+        mapped = _JQUANTS_TO_TACHIBANA.get(mkt)
+        if mapped:
+            return mapped
+        # 未知の4桁コードは先頭に "0" を付加してフォールバック
         if len(mkt) == 4 and mkt.isdigit():
             return "0" + mkt
-        # すでに5桁の場合はそのまま
         if len(mkt) == 5 and mkt.isdigit():
             return mkt
     return None

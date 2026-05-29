@@ -129,8 +129,8 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
     if condition in ("NORMAL", "STRONG"):
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
-            # NORMAL日CAUTIONは1.0%上昇確認（有効ゾーン外の慎重銘柄）
-            threshold = 0.3 if condition == "STRONG" else 1.0
+            # NORMAL日CAUTIONは0.5%上昇確認（1.0%は高すぎて未達が続いたため引き下げ）
+            threshold = 0.3 if condition == "STRONG" else 0.5
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        5,
@@ -138,7 +138,7 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
             }
         else:
-            # NORMAL日BUY（最良ゾーン銘柄）
+            # NORMAL日BUY → 0.5%確認後エントリー
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        5,

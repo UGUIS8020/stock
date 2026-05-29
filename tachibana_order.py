@@ -20,6 +20,15 @@ load_dotenv()
 LOGIN_FILE      = str(Path(__file__).parent / "tachibana_login_response.json")
 SECOND_PASSWORD = os.getenv("TACHIBANA_SECOND_PASSWORD", "")
 
+def _load_zyoutoeki_c():
+    try:
+        with open(LOGIN_FILE, encoding="utf-8") as f:
+            return json.load(f).get("sZyoutoekiKazeiC", "1")
+    except Exception:
+        return "1"
+
+ZYOUTOEKI_C = _load_zyoutoeki_c()
+
 # ── 安全装置 ────────────────────────────────────────────
 LIVE_TRADING = True
 
@@ -80,6 +89,50 @@ def load_url_request():
         return None
 
 
+def check_kisoku_before_order(url_request, code):
+    """
+    発注前に立花APIで取引規制を確認する。
+
+    Returns:
+        {"blocked": bool, "reason": str}
+        APIエラー時は blocked=False（確認できなかった旨のみ警告）
+    """
+    params = (
+        "{"
+        f'"p_no":"{_next_p_no()}",'
+        f'"p_sd_date":"{_p_sd_date()}",'
+        '"sCLMID":"CLMIssueSizyouKiseiKabu",'
+        f'"sIssueCode":"{code}",'
+        '"sJsonOfmt":"5"'
+        "}"
+    )
+    try:
+        result = _api_get(url_request + "?" + params)
+        p_errno = result.get("p_errno", "")
+        if p_errno != "0":
+            print(f"  [規制チェック] {code}: API応答 p_errno={p_errno} → 確認スキップ")
+            return {"blocked": False, "reason": f"規制チェックAPI失敗(p_errno={p_errno})"}
+
+        # トップレベルの sTeisiKubun
+        teisi = result.get("sTeisiKubun", "0") or "0"
+        if teisi != "0":
+            return {"blocked": True, "reason": f"取引停止・制限中 (sTeisiKubun={teisi})"}
+
+        # リスト形式で返ってくる場合
+        items = result.get("aCLMIssueSizyouKiseiKabu", [])
+        for item in items:
+            teisi_i = item.get("sTeisiKubun", "0") or "0"
+            if teisi_i != "0":
+                return {"blocked": True, "reason": f"取引停止・制限中 (sTeisiKubun={teisi_i})"}
+
+        print(f"  [規制チェック] {code}: 規制なし ✅")
+        return {"blocked": False, "reason": "規制なし"}
+
+    except Exception as e:
+        print(f"  [規制チェック] {code}: 通信エラー({e}) → 確認スキップ")
+        return {"blocked": False, "reason": f"規制チェック通信エラー"}
+
+
 def get_buying_power(url_request):
     """現物買余力を照会して残高(円)を返す。取得失敗時はNone。"""
     params = (
@@ -102,27 +155,8 @@ def get_buying_power(url_request):
 
 
 def place_buy_order(url_request, code, shares, price=None, market_code=None):
-    """
-    現物 成行買い注文を発注する。
-
-    Args:
-        url_request: 業務URL（tachibana_login_response.json の sUrlRequest）
-        code: 銘柄コード（例: "8289"）
-        shares: 発注株数（例: 100）
-        price: None=成行、数値=指値
-        market_code: 立花証券 sMarketCode（例: "00111"=Prime, "00112"=Standard）
-                     None の場合は DB から自動取得し、見つからなければ "00101" を使用
-
-    Returns:
-        dict: {
-            "success": bool,
-            "order_no": str or None,  # 注文番号
-            "message": str,           # 結果メッセージ
-            "raw": dict,              # APIレスポンス生データ
-        }
-    """
+    """現物買い注文を発注する（price=None で成行、数値で指値）。"""
     if not LIVE_TRADING:
-        # モックモード: 実際の注文は出さない
         print(f"  🔧 [モックモード] 実際の注文は出ません（LIVE_TRADING=False）")
         return {
             "success":  True,
@@ -131,59 +165,57 @@ def place_buy_order(url_request, code, shares, price=None, market_code=None):
             "raw":      {},
         }
 
-    if market_code is None:
-        try:
-            import db as _db
-            market_code = _db.get_market_code_db(code) or "00101"
-        except Exception:
-            market_code = "00101"
+    # ── 発注前 取引規制チェック ──────────────────────────
+    kisoku = check_kisoku_before_order(url_request, code)
+    if kisoku["blocked"]:
+        print(f"  ⛔ [{code}] 規制銘柄のため発注中止: {kisoku['reason']}")
+        return {
+            "success":  False,
+            "order_no": None,
+            "message":  f"規制銘柄のため発注中止: {kisoku['reason']}",
+            "raw":      {},
+        }
 
-    # 成行: sSasiNeKubun="1", sSasiNe="0"
-    # 指値: sSasiNeKubun="2", sSasiNe=str(price)
+    # 成行: sCondition="0", sOrderPrice="0"
+    # 指値: sCondition="2"（未確認）, sOrderPrice=str(price)
     if price is None:
-        sasi_kubun = "1"   # 成行
-        sasi_ne    = "0"
+        condition   = "0"
+        order_price = "0"
     else:
-        sasi_kubun = "2"   # 指値
-        sasi_ne    = str(int(price))
-
-    today = datetime.now().strftime("%Y%m%d")
+        condition   = "2"
+        order_price = str(int(price))
 
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
+        f'"sZyoutoekiKazeiC":"{ZYOUTOEKI_C}",'
         f'"sIssueCode":"{code}",'
-        f'"sMarketCode":"{market_code}",'
-        '"sBaibaikubun":"1",'        # 1=買
-        '"sOrderSinkubun":"0",'      # 0=現物
-        f'"sSasiNeKubun":"{sasi_kubun}",'
-        f'"sSasiNe":"{sasi_ne}",'
-        f'"sOrdersu":"{shares}",'
-        f'"sExpireDate":"{today}",'  # 当日有効
-        '"sGyakusasiOrderType":"0",' # 逆指値なし
+        '"sSizyouC":"00",'
+        '"sBaibaiKubun":"3",'
+        f'"sCondition":"{condition}",'
+        f'"sOrderPrice":"{order_price}",'
+        f'"sOrderSuryou":"{shares}",'
+        '"sGenkinShinyouKubun":"0",'
+        '"sOrderExpireDay":"0",'
+        '"sGyakusasiOrderType":"0",'
         '"sGyakusasiZyouken":"0",'
-        '"sGyakusasiSasiNe":"0",'
-        '"sEigyouDay":"0",'
-        '"sZyoutoekiKazeiC":"0",'
-        '"sUkewatasiDay":"0",'
-        '"sTatebiType":"0",'
-        '"sTategyokuZansu":"0",'
+        '"sGyakusasiPrice":"*",'
+        '"sTatebiType":"*",'
         f'"sSecondPassword":"{SECOND_PASSWORD}",'
         '"sJsonOfmt":"5"'
         "}"
     )
     try:
         result = _api_get(url_request + "?" + params)
-        p_errno = result.get("p_errno")   # None if key absent
+        p_errno  = result.get("p_errno")
         s_result = result.get("sResultCode", "")
-        print(f"  [DEBUG] buy response keys: {list(result.keys())[:8]}  p_errno={p_errno} sResultCode={s_result}")
         if p_errno is None:
             return {
                 "success":  False,
                 "order_no": None,
-                "message":  f"APIレスポンス異常（p_ernoキーなし）: {str(result)[:200]}",
+                "message":  f"APIレスポンス異常: {str(result)[:200]}",
                 "raw":      result,
             }
         if p_errno == "0" and s_result == "0":
@@ -196,7 +228,6 @@ def place_buy_order(url_request, code, shares, price=None, market_code=None):
             }
         else:
             err_msg = result.get("sResultText") or result.get("p_err") or "不明"
-            print(f"  [DEBUG] full response: {result}")
             return {
                 "success":  False,
                 "order_no": None,
@@ -236,42 +267,31 @@ def place_sell_order(url_request, code, shares, price=None, market_code=None):
             "raw":      {},
         }
 
-    if market_code is None:
-        try:
-            import db as _db
-            market_code = _db.get_market_code_db(code) or "00101"
-        except Exception:
-            market_code = "00101"
-
     if price is None:
-        sasi_kubun = "1"
-        sasi_ne    = "0"
+        condition   = "0"
+        order_price = "0"
     else:
-        sasi_kubun = "2"
-        sasi_ne    = str(int(price))
+        condition   = "2"
+        order_price = str(int(price))
 
-    today = datetime.now().strftime("%Y%m%d")
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
+        f'"sZyoutoekiKazeiC":"{ZYOUTOEKI_C}",'
         f'"sIssueCode":"{code}",'
-        f'"sMarketCode":"{market_code}",'
-        '"sBaibaikubun":"2",'
-        '"sOrderSinkubun":"0",'
-        f'"sSasiNeKubun":"{sasi_kubun}",'
-        f'"sSasiNe":"{sasi_ne}",'
-        f'"sOrdersu":"{shares}",'
-        f'"sExpireDate":"{today}",'
+        '"sSizyouC":"00",'
+        '"sBaibaiKubun":"1",'
+        f'"sCondition":"{condition}",'
+        f'"sOrderPrice":"{order_price}",'
+        f'"sOrderSuryou":"{shares}",'
+        '"sGenkinShinyouKubun":"0",'
+        '"sOrderExpireDay":"0",'
         '"sGyakusasiOrderType":"0",'
         '"sGyakusasiZyouken":"0",'
-        '"sGyakusasiSasiNe":"0",'
-        '"sEigyouDay":"0",'
-        '"sZyoutoekiKazeiC":"0",'
-        '"sUkewatasiDay":"0",'
-        '"sTatebiType":"0",'
-        '"sTategyokuZansu":"0",'
+        '"sGyakusasiPrice":"*",'
+        '"sTatebiType":"*",'
         f'"sSecondPassword":"{SECOND_PASSWORD}",'
         '"sJsonOfmt":"5"'
         "}"

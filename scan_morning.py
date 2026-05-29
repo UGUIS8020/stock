@@ -372,10 +372,13 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
     レイヤー5: 前日WEAK補正        0〜1点  (リバウンドパターン対応)
     レイヤー6: 前日日本市場騰落    0〜2点  ★新規追加
     ─────────────────────────────────────────
-    合計 8〜13点 → STRONG  ※閾値引き上げ（旧7→新8）
-         5〜8点  → NORMAL
-         3〜4点  → WEAK
-         0〜2点  → PANIC
+    判定ロジック（評価順）
+    ─────────────────────────────────────────
+    ① PANIC : score<=3 かつ 日経先物<=-1.0%（急落局面を優先捕捉）
+    ② STRONG: score>=8 かつ 米指数2つ以上↑
+    ③ NORMAL: score>=4
+    ④ WEAK  : score>=2
+    ⑤ PANIC : それ以外（score<=1 で日経は急落していない）
 
     [シミュレーション根拠]
     2025-04〜2026-03の1年間・4432銘柄で検証。
@@ -493,17 +496,21 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
         breakdown.append("  前日市場騰落  : キャッシュ未取得  → +0点")
 
     # ── 総合判定 ──────────────────────────────────────
-    # STRONG: 閾値を7→8に引き上げ（シミュレーションで旧7は日平均-0.057%、新8は+0.170%）
-    # 米3指数のうち2つ以上上昇していることも要求（過剰判定防止）
-    if score >= 8 and up_count >= 2:
-        condition         = "STRONG"
-        strategy_a_thr    = 7.5
-        stop_loss_pct     = -5.0
-    # PANICも日経先物が実際に急落していることを確認（過剰判定防止）
-    elif score <= 1 and nk_chg <= -1.0:
+    # 評価順序: PANIC → STRONG → NORMAL → WEAK → PANIC(残余)
+    #
+    # PANIC: 日経先物が実際に急落(-1.0%以下)かつスコアが低い(3以下)
+    #   score=2〜3でも日経が急落していればPANIC相当として先に捕捉する
+    #   nk_chg のデフォルトは 0.0（取得失敗時）なのでデータ欠損時は誤作動しない
+    if score <= 3 and nk_chg <= -1.0:
         condition         = "PANIC"
         strategy_a_thr    = 99.0
         stop_loss_pct     = -3.0
+    # STRONG: 高スコア + 米3指数のうち2つ以上上昇（過剰判定防止）
+    # 閾値を7→8に引き上げ（シミュレーションで旧7は日平均-0.057%、新8は+0.170%）
+    elif score >= 8 and up_count >= 2:
+        condition         = "STRONG"
+        strategy_a_thr    = 7.5
+        stop_loss_pct     = -5.0
     elif score >= 4:
         condition         = "NORMAL"
         strategy_a_thr    = 7.5
@@ -512,7 +519,7 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
         condition         = "WEAK"
         strategy_a_thr    = 8.0
         stop_loss_pct     = -4.0
-    else:
+    else:  # score <= 1 かつ nk_chg > -1.0（日経は急落していないが全体が弱い）
         condition         = "PANIC"
         strategy_a_thr    = 99.0
         stop_loss_pct     = -3.0
@@ -571,7 +578,7 @@ def judge_entry_a(row, condition, strategy_a_thr):
                            f"- 全CAUTION（CAUTION avg+2.05% / BUY avg-0.43%）")
 
     # ── NORMAL日 ─────────────────────────────────────────
-    # キーファクター: 前日-2〜0%が一貫してプラス / ratio10倍超・前日急騰は見送り
+    # キーファクター: 前日-3〜+1%が対象 / ratio10倍超・前日急騰は見送り
     # 推奨出口: TP+3%/SL-1%（最適化済み）
     if condition == "NORMAL":
         if ratio >= 10.0:
@@ -584,18 +591,14 @@ def judge_entry_a(row, condition, strategy_a_thr):
                                    f"- 逆行リスクあり")
             return "CAUTION", (f"NORMAL日 高スコア({score:.1f}) - score9+は"
                                f"NORMAL日WR37%・avg-0.24%のため慎重")
-        # 最良ゾーン: score5〜7 × ratio3〜10x × 前日-2〜0% → avg+0.285% / WR54%
-        if 5.0 <= score < 7.0 and 3.0 <= ratio < 10.0 and -2.0 <= today_rise <= 0.0:
-            return "BUY", (f"NORMAL日 最良ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
-                           f" - avg+0.285%・WR54%")
-        # 有効ゾーン: score7〜9 × ratio3〜6x × 前日-2〜0% → avg+0.170% / WR54%
-        if 7.0 <= score < 9.0 and 3.0 <= ratio < 6.0 and -2.0 <= today_rise <= 0.0:
-            return "CAUTION", (f"NORMAL日 有効ゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
-                               f" - avg+0.170%・WR54%")
-        # 前日-2〜0% × その他 → avg+0.132% / WR50%
-        if -2.0 <= today_rise <= 0.0:
-            return "CAUTION", (f"NORMAL日 + 前日微下落({today_rise:+.1f}%) score{score:.1f}×ratio{ratio:.1f}倍"
-                               f" - avg+0.132%・少額様子見")
+        # BUYゾーン: score7〜9 × ratio3〜10x × 前日-3〜+1% → 確認後エントリー
+        if 7.0 <= score < 9.0 and 3.0 <= ratio < 10.0 and -3.0 <= today_rise <= 1.0:
+            return "BUY", (f"NORMAL日 BUYゾーン score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                           f" - avg+0.170%・WR54%")
+        # CAUTIONゾーン: 前日-3〜+1% × その他条件
+        if -3.0 <= today_rise <= 1.0:
+            return "CAUTION", (f"NORMAL日 + 前日{today_rise:+.1f}% score{score:.1f}×ratio{ratio:.1f}倍"
+                               f" - 様子見")
         return "PASS", f"NORMAL日 + 前日{today_rise:+.1f}%（有効条件外）"
 
     # ── WEAK日 ───────────────────────────────────────────
