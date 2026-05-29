@@ -22,6 +22,16 @@ out/sim_precise_err.txt
 out/evolve_log.txt
 out/evolve_err.txt
 
+# daytime.py / 実行ログ（自動生成）
+out/dt_live.txt
+out/dt_out.txt
+out/daytime_stdout.log
+out/daytime_stderr.log
+
+# ランタイム管理ファイル
+out/last_p_no.txt
+out/backtest_log.csv
+
 # 立花証券セッション情報（ログインするたびに再生成される）
 tachibana_login_response.json
 
