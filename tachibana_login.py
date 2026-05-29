@@ -105,6 +105,10 @@ if __name__ == "__main__":
 
     if do_login():
         print()
-        print("セッション更新完了。market_watch.py を再起動してください。")
+        print("セッション更新完了。scan_morning.py を起動します...")
+        print()
+        import subprocess
+        from pathlib import Path
+        subprocess.run([sys.executable, str(Path(__file__).parent / "scan_morning.py")])
     else:
         sys.exit(1)
