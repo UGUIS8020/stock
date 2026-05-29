@@ -35,10 +35,10 @@ from scan_morning_tachibana_session import (
     _tprice, _tquote, _quote_summary, fetch_stock_hist,
     TACHIBANA_LOGIN_FILE,
 )
-from scan_morning_strategy_judge import (
-    SURGE_SCORE_MIN, SURGE_RATIO_MIN, is_surge_flag,
-    judge_entry_a, judge_entry_b,
+from scan_morning_strategy_a import (
+    SURGE_SCORE_MIN, SURGE_RATIO_MIN, is_surge_flag, judge_entry_a,
 )
+from scan_morning_strategy_b import judge_entry_b
 from scan_morning_strategy_d import (
     scan_strategy_d, calc_stop_loss, calc_score_d,
 )

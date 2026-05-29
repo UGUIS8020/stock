@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-scan_morning_strategy_judge.py - 戦略A/B 買い判定ロジック
+scan_morning_strategy_a.py - 戦略A（モメンタム買い）判定ロジック
 
-scan_morning.py から分割。バックテスト結果に基づく判定ロジック。
+バックテスト根拠: backtest_log.csv SL=-1%/TP=+3%適用後
+  STRONG  CAUTION avg+2.05% / BUY avg-0.43% → 全CAUTION
+  NORMAL  BUY avg+0.81% → 有効ゾーンのみBUY
+  WEAK    score>=thr でCAUTION
 修正時は backtest_log.csv の分析結果との整合性を確認すること。
 """
 
-# ── 急騰フラグ閾値 ────────────────────────────────────
-# 【根拠】backtest_log.csv分析: score>=9.5 & ratio>=10倍の銘柄は
-#         高値+10%以上到達率10.6% / TP+8%設定で平均+1.02%（通常銘柄TP+3%の3倍）
+# 急騰フラグ閾値
+# 【根拠】score>=9.5 & ratio>=10倍: 高値+10%以上到達率10.6% / TP+8%で平均+1.02%
 SURGE_SCORE_MIN = 9.5
 SURGE_RATIO_MIN = 10.0
 
@@ -22,14 +24,7 @@ def is_surge_flag(row):
 
 
 def judge_entry_a(row, condition, strategy_a_thr):
-    """
-    戦略A 買い判定（地合い別に完全分離）
-
-    バックテスト根拠: backtest_log.csv SL=-1%/TP=+3%適用後
-      STRONG  BUY avg-0.43% Sharpe-0.84 / CAUTION avg+2.05% Sharpe+1.25 → 全CAUTION
-      NORMAL  BUY avg+0.81% / CAUTION avg+0.81% → 有効ゾーンBUY、それ以外CAUTION
-      WEAK    BUY avg+0.73% / CAUTION avg+0.95% → score>=thr でCAUTION
-    """
+    """戦略A 買い判定（地合い別に完全分離）"""
     score      = float(row["score"])
     ratio      = float(row.get("ratio", 0))
     today_rise = float(row.get("today_rise", 0))
@@ -77,42 +72,3 @@ def judge_entry_a(row, condition, strategy_a_thr):
     if score < strategy_a_thr:
         return "PASS", f"WEAK日 + スコア不十分({score:.1f} < 閾値{strategy_a_thr})"
     return "CAUTION", f"WEAK日 score{score:.1f} - スコア条件クリア・慎重にエントリー"
-
-
-def judge_entry_b(row, condition):
-    """
-    戦略B 買い判定（リバウンド狙い）
-
-    [simulate_b_full.py検証結果 2025-04〜2026-03]
-      閾値-4〜-5% × NORMAL日: 勝率50.5% / avg+0.219% ★
-      閾値-5%以下 × NORMAL日: 勝率47.2% / avg+0.020%
-      WEAK日（閾値問わず）  : 勝率30% / avg-1.26% ← 最悪
-    出口: 引け決済 ≒ TP+5%/SL-5% が最適
-    """
-    drop      = float(row["today_rise"])
-    rb_score  = int(row.get("rebound_score", 0))
-    rb_reason = str(row.get("rebound_reason", "指標なし"))
-
-    if condition == "PANIC":
-        return "PASS", "地合いPANIC - 逆張り非推奨（続落リスク）"
-
-    if drop <= -20:
-        return "PASS", f"暴落{drop:.1f}% + 続落リスク高 - 見送り"
-
-    if condition == "WEAK":
-        return "PASS", f"地合いWEAK + 逆張り非推奨 - WEAK日avg-1.26%（740件）"
-
-    # NORMAL日 × RBスコア3以上 → BUY
-    # evolve.py GA(20000人×100世代, 2026-05-26): TP+1.9%/SL-5.6% OOS WR67%・avg+0.276%
-    if condition == "NORMAL" and rb_score >= 3:
-        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
-
-    # STRONG日 × RB4以上 → BUY
-    if condition == "STRONG" and rb_score >= 4:
-        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
-
-    # STRONG日 × RB3 → CAUTION
-    if condition == "STRONG" and rb_score == 3:
-        return "CAUTION", f"地合いSTRONG + リバウンド候補({rb_score}点) - RB3はやや低め・様子見 / {rb_reason}"
-
-    return "PASS", f"リバウンドスコア低({rb_score}点) - 見送り"
