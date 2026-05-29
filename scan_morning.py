@@ -545,19 +545,31 @@ def main():
 
     import subprocess, sys as _sys
 
+    _OUT_DIR = _BASE_DIR / "out"
+
     # ── PANIC以外: position_monitor・daytime を market_watch より先に起動 ──
     # market_watch（ブロッキング）より前に起動することで9:00から並行稼働させる
     if condition != "PANIC":
         try:
-            subprocess.Popen([_sys.executable, str(_BASE_DIR / "position_monitor.py")])
+            subprocess.Popen(
+                [_sys.executable, str(_BASE_DIR / "position_monitor.py")],
+                stdout=open(str(_OUT_DIR / "position_monitor.log"), "w", encoding="utf-8"),
+                stderr=open(str(_OUT_DIR / "position_monitor_err.log"), "w", encoding="utf-8"),
+            )
             print("  📊 position_monitor をバックグラウンドで起動しました（15:28まで監視）")
+            print(f"     ログ: out/position_monitor.log")
         except Exception as e:
             print(f"⚠️  position_monitor の起動に失敗しました: {e}")
             print("   → python position_monitor.py を手動で実行してください")
 
         try:
-            subprocess.Popen([_sys.executable, str(_BASE_DIR / "daytime.py")])
+            subprocess.Popen(
+                [_sys.executable, "-u", str(_BASE_DIR / "daytime.py")],
+                stdout=open(str(_OUT_DIR / "dt_live.txt"), "w", encoding="utf-8"),
+                stderr=open(str(_OUT_DIR / "dt_err.txt"), "w", encoding="utf-8"),
+            )
             print("  📈 daytime をバックグラウンドで起動しました（9:00〜14:30 自動売買）")
+            print(f"     ログ: out/dt_live.txt")
         except Exception as e:
             print(f"⚠️  daytime の起動に失敗しました: {e}")
 
