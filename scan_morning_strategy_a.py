@@ -47,18 +47,32 @@ def judge_entry_a(row, condition, strategy_a_thr):
                            f"- 全CAUTION（CAUTION avg+2.05% / BUY avg-0.43%）")
 
     # ── NORMAL日 ─────────────────────────────────────────
-    # 2年分シミュレーション（simulate_ratio.py）でBUYゾーンに安定した条件なし
-    # 月次勝率が36〜68%と不安定なため、STRONG日と同様に全CAUTION
-    # → daytime.py で+0.3%モメンタム確認後エントリー
+    # analyze_a_normal.py（2年・57万件）でOOS検証通過した条件を実装
+    # ※ gap_pct（寄り付きギャップ）は daytime.py 段階で gap<0 に絞ること
+    #   → daytime.py: NORMAL日は GAP_MAX_PCT=0.0 に設定済み
     if condition == "NORMAL":
         if ratio >= 10.0:
             return "PASS", f"NORMAL日 + ratio過多({ratio:.1f}倍) - 10倍超は過熱"
-        if today_rise > 2.0:
+        if today_rise > 3.0:
             return "PASS", f"NORMAL日 + 前日急騰({today_rise:+.1f}%) - 出尽くし見送り"
         if score < 5.0:
             return "PASS", f"NORMAL日 + スコア低すぎ({score:.1f})"
-        return "CAUTION", (f"NORMAL日 score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}% "
-                           f"- 全CAUTION（2年データでBUYゾーン統計的根拠なし）")
+
+        # BUYゾーン① score5〜7 × ratio4〜8 × 前日-1〜+2%
+        #   OOS検証: 勝率65.6% / 平均+0.372%（最優秀）
+        if 5.0 <= score < 7.0 and 4.0 <= ratio < 8.0 and -1.0 <= today_rise <= 2.0:
+            return "BUY", (f"NORMAL日BUY① score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                           f" - OOS勝率65.6%・平均+0.372%")
+
+        # BUYゾーン② score7〜9 × ratio<6 × 前日0〜+3%
+        #   OOS検証: 勝率58.9% / 平均+0.318%
+        if 7.0 <= score < 9.0 and ratio < 6.0 and 0.0 <= today_rise <= 3.0:
+            return "BUY", (f"NORMAL日BUY② score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                           f" - OOS勝率58.9%・平均+0.318%")
+
+        # それ以外はCAUTION → daytime.py でモメンタム確認後エントリー
+        return "CAUTION", (f"NORMAL日 score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
+                           f" - 条件外・様子見")
 
     # ── WEAK日 ───────────────────────────────────────────
     # WEAK×CAUTION avg+0.95% / BUY avg+0.73% → score>=thr でCAUTION

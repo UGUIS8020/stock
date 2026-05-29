@@ -443,12 +443,21 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     gap_min       = MON_GAP_MIN_PCT   if is_monday else GAP_MIN_PCT
     score_max     = MON_SCORE_MAX     if is_monday else None
 
+    # 地合い別 gap_max 調整
+    # NORMAL日は gap < 0（マイナスギャップ）のみ通過
+    # 根拠: analyze_a_normal.py OOS検証結果
+    #   gap 0〜+2%: 勝率47.1% / 平均+0.017% → ランダム以下
+    #   gap  < 0%:  勝率53〜57% / 平均+0.13〜0.37% → 有効
+    gap_max = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
+
     print(f"\n  監視開始: {WATCH_START_HOUR}:{WATCH_START_MIN:02d} 〜 "
           f"{WATCH_END_HOUR}:{WATCH_END_MIN:02d}  対象: {len(codes)}銘柄")
     print(f"  地合い: {condition}  （{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
     if is_monday:
         print(f"  ⚠️  月曜モード: 最大ポジション={max_positions} / gap≥{gap_min:+.0f}% / score<{score_max}")
-    print(f"  条件: STRONG地合い × gap{gap_min:+}〜{GAP_MAX_PCT:+}% × 前日プラス × モメンタム{MOMENTUM_PCT:+.1f}%以上")
+    if condition == "NORMAL":
+        print(f"  ⚠️  NORMAL日: gap < 0%（マイナスギャップのみ）に絞って発注")
+    print(f"  条件: {condition}地合い × gap{gap_min:+}〜{gap_max:+}% × 前日プラス × モメンタム{MOMENTUM_PCT:+.1f}%以上")
     print(f"  TP: +{TP_PCT*100:.0f}%  SL: -{SL_PCT*100:.0f}%\n")
 
     # 前日OHLCV 読み込み（2日分 → 前日騰落率も取得）
@@ -486,7 +495,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 continue
             sig = check_signal(code, quote, prev_ohlcv.get(code), first_prices,
                                score=scores.get(code),
-                               gap_min=gap_min, gap_max=GAP_MAX_PCT,
+                               gap_min=gap_min, gap_max=gap_max,
                                score_max=score_max)
             if sig is None:
                 continue
