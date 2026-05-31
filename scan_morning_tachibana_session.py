@@ -138,36 +138,26 @@ def ensure_tachibana_session():
         return None
 
     today_str = datetime.now().strftime("%Y%m%d")
-    session_is_today = False
-    last_login = ""
-    try:
-        with open(TACHIBANA_LOGIN_FILE, encoding="utf-8") as f:
-            _d = json.load(f)
-        last_login = _d.get("sLastLoginDate", "")
-        session_is_today = last_login.startswith(today_str)
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
 
-    # 30分以内 かつ 今日のセッション → スキップ（再起動時の多重認証防止）
-    if session_is_today:
+    # まず実際にセッションが有効かどうかを確認（日付に関係なく）
+    existing_url = load_tachibana_url()
+    if existing_url and _check_tachibana_session(existing_url):
+        # ファイルの更新日時が今日なら「本日ログイン済み」として表示
         try:
             mtime = os.path.getmtime(TACHIBANA_LOGIN_FILE)
-            if time.time() - mtime < 1800:
-                existing_url = load_tachibana_url()
-                if existing_url:
-                    print("  ✅ Tachibana API セッション有効（30分以内のログイン）")
-                    return existing_url
-        except FileNotFoundError:
-            pass
-        existing_url = load_tachibana_url()
-        if existing_url:
-            print(f"  ✅ Tachibana API セッション有効（本日 {last_login[8:10]}:{last_login[10:12]} ログイン済み）")
-            return existing_url
+            file_date = datetime.fromtimestamp(mtime).strftime("%Y%m%d")
+            if file_date == today_str:
+                login_time = datetime.fromtimestamp(mtime).strftime("%H:%M")
+                print(f"  ✅ Tachibana API セッション有効（本日 {login_time} ログイン済み）")
+            else:
+                print("  ✅ Tachibana API セッション有効（セッション確認済み）")
+        except Exception:
+            print("  ✅ Tachibana API セッション有効")
+        return existing_url
 
-    # 昨日以前のセッション or ファイルなし → 電話認証フロー
-    existing_url = load_tachibana_url()
+    # セッションが無効 → 電話認証フロー
     if existing_url:
-        print("  ⚠️  Tachibana API セッションが前日のものです（毎朝の電話認証が必要）")
+        print("  ⚠️  Tachibana API セッションが期限切れです（電話認証が必要）")
     else:
         print("  ℹ️  Tachibana API 未接続（初回認証が必要）")
         print("  ℹ️  ※ 毎朝 python tachibana_login.py を先に実行することを推奨します")
