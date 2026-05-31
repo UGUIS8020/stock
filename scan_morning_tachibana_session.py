@@ -72,9 +72,9 @@ def _check_tachibana_session(url_price):
         resp = http.request("GET", url_price + "?" + params,
                             timeout=urllib3.Timeout(connect=3, read=5))
         result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
-        if result.get("p_errno", "") != "0":
-            return False
-        return len(result.get("aCLMMfdsMarketPrice", [])) > 0
+        # p_errno="0" であればセッション有効
+        # aCLMMfdsMarketPrice が空でも市場時間外では正常（セッション切れではない）
+        return result.get("p_errno", "") == "0"
     except Exception:
         return False
 
