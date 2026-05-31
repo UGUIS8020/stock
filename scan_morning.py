@@ -29,6 +29,7 @@ _db.init_db()
 from scan_morning_market_data import (
     fetch_us_market, fetch_nikkei, fetch_sgx, fetch_usdjpy,
     fetch_macro_indicators, get_prev_day_condition, fetch_prev_day_breadth,
+    MACRO_SECTORS,
 )
 from scan_morning_tachibana_session import (
     load_tachibana_url, ensure_tachibana_session, fetch_tachibana_prices,
