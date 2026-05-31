@@ -26,11 +26,22 @@ TACHIBANA_PASSWORD   = os.getenv("TACHIBANA_LOGIN_PASS")
 
 
 def load_tachibana_url():
-    """tachibana_login_response.json から株価URLを読み込む。失敗時はNone。"""
+    """tachibana_login_response.json から株価URL(sUrlPrice)を読み込む。失敗時はNone。"""
     try:
         with open(TACHIBANA_LOGIN_FILE, encoding="utf-8") as f:
             data = json.load(f)
         url = data.get("sUrlPrice", "")
+        return url if url else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _load_tachibana_url_request():
+    """tachibana_login_response.json から業務URL(sUrlRequest)を読み込む。失敗時はNone。"""
+    try:
+        with open(TACHIBANA_LOGIN_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        url = data.get("sUrlRequest", "")
         return url if url else None
     except (FileNotFoundError, json.JSONDecodeError):
         return None
@@ -49,31 +60,36 @@ def _url_encode(s):
     return ''.join(table[c] if c in table else c for c in s)
 
 
-def _check_tachibana_session(url_price):
-    """株価URLに試験リクエストを送り、セッションが有効かどうか確認する。"""
-    if not url_price:
+def _check_tachibana_session(url_request):
+    """業務URL(sUrlRequest)に試験リクエストを送り、セッションが有効かどうか確認する。
+    sUrlPriceは市場時間外やログイン直後にp_errno=-1を返す場合があるため、
+    sUrlRequestのCLMZanKaiKanougaku（買余力照会）でチェックする。
+    """
+    if not url_request:
         return False
     try:
         t = datetime.now()
         p_sd = (f"{t.year}.{t.month:02}.{t.day:02}"
                 f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
                 f".{t.microsecond // 1000:03}")
+        try:
+            p_no_file = Path(TACHIBANA_LOGIN_FILE).parent / "out" / "last_p_no.txt"
+            p_no = str(int(p_no_file.read_text().strip()) + 1)
+            p_no_file.write_text(p_no)
+        except Exception:
+            p_no = str(int(time.time()))
         params = (
             '{'
-            '"p_no":"0",'
+            f'"p_no":"{p_no}",'
             f'"p_sd_date":"{p_sd}",'
-            '"sCLMID":"CLMMfdsGetMarketPrice",'
-            '"sTargetIssueCode":"7203",'
-            '"sTargetColumn":"pDPP,pPRP",'
+            '"sCLMID":"CLMZanKaiKanougaku",'
             '"sJsonOfmt":"5"'
             '}'
         )
         http = urllib3.PoolManager()
-        resp = http.request("GET", url_price + "?" + params,
+        resp = http.request("GET", url_request + "?" + params,
                             timeout=urllib3.Timeout(connect=3, read=5))
         result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
-        # p_errno="0" であればセッション有効
-        # aCLMMfdsMarketPrice が空でも市場時間外では正常（セッション切れではない）
         return result.get("p_errno", "") == "0"
     except Exception:
         return False
@@ -139,9 +155,10 @@ def ensure_tachibana_session():
 
     today_str = datetime.now().strftime("%Y%m%d")
 
-    # まず実際にセッションが有効かどうかを確認（日付に関係なく）
-    existing_url = load_tachibana_url()
-    if existing_url and _check_tachibana_session(existing_url):
+    # sUrlRequestでセッション有効性を確認（sUrlPriceは市場時間外やログイン直後に応答しないことがある）
+    existing_url        = load_tachibana_url()
+    existing_url_request = _load_tachibana_url_request()
+    if existing_url_request and _check_tachibana_session(existing_url_request):
         # ファイルの更新日時が今日なら「本日ログイン済み」として表示
         try:
             mtime = os.path.getmtime(TACHIBANA_LOGIN_FILE)
