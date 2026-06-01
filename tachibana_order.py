@@ -110,8 +110,8 @@ def check_kisoku_before_order(url_request, code):
         result = _api_get(url_request + "?" + params)
         p_errno = result.get("p_errno", "")
         if p_errno != "0":
-            print(f"  [規制チェック] {code}: API応答 p_errno={p_errno} → 確認スキップ")
-            return {"blocked": False, "reason": f"規制チェックAPI失敗(p_errno={p_errno})"}
+            print(f"  [規制チェック] {code}: API応答 p_errno={p_errno} → 安全のため発注停止")
+            return {"blocked": True, "reason": f"規制確認不可のため発注停止(p_errno={p_errno})"}
 
         # トップレベルの sTeisiKubun
         teisi = result.get("sTeisiKubun", "0") or "0"
@@ -129,8 +129,8 @@ def check_kisoku_before_order(url_request, code):
         return {"blocked": False, "reason": "規制なし"}
 
     except Exception as e:
-        print(f"  [規制チェック] {code}: 通信エラー({e}) → 確認スキップ")
-        return {"blocked": False, "reason": f"規制チェック通信エラー"}
+        print(f"  [規制チェック] {code}: 通信エラー({e}) → 安全のため発注停止")
+        return {"blocked": True, "reason": f"規制確認不可のため発注停止(通信エラー)"}
 
 
 def get_buying_power(url_request):
