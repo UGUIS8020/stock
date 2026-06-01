@@ -600,6 +600,8 @@ def main():
 def _run_scan_daily_at_1640():
     """closing_watch 終了後、16:45 まで待機して scan_daily.py を自動実行する。
     データ未取得の場合は 15 分おきに 20:00 まで最大 3 回リトライする。"""
+    import subprocess as _subprocess
+    import sys as _sys2
     import time as _time
     import sqlite3 as _sqlite3
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -637,7 +639,7 @@ def _run_scan_daily_at_1640():
         print(f"{'='*60}")
 
         try:
-            subprocess.run([_sys.executable, str(_BASE_DIR / "scan_daily.py")])
+            _subprocess.run([_sys2.executable, str(_BASE_DIR / "scan_daily.py")])
         except Exception as e:
             print(f"⚠️  scan_daily.py の実行に失敗しました: {e}")
 
