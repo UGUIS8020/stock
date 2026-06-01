@@ -682,7 +682,13 @@ def main():
     df_a = pd.DataFrame(results_a).sort_values("score", ascending=False)
     today_surge = dict(zip(df_today["code4"], df_today["today_rise"].astype(float)))
     df_a["today_rise"] = df_a["code"].map(today_surge).fillna(0)
-    top_a = df_a[df_a["score"] >= SCORE_MIN_A].head(TOP_N)
+    # ratio >= 5.0 は翌朝 judge_entry_a_strong でPASS（勝率45%）のため先に除外
+    # これにより翌朝の候補がSTRONG翌日でも有効な銘柄で埋まる
+    RATIO_LIMIT_A = 5.0
+    top_a = df_a[
+        (df_a["score"] >= SCORE_MIN_A) &
+        (df_a["ratio"] < RATIO_LIMIT_A)
+    ].head(TOP_N)
 
     def get_rank(row):
         s = row["score"]
