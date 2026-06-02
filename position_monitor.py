@@ -26,6 +26,19 @@ GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
 GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
 FORCE_CLOSE_MIN    = 15 * 60 + 25  # 15:25 前日ポジションを引け成行で強制決済
 
+# p_noはsUrlPriceとsUrlRequestで共有シーケンス → last_p_no.txtを使う
+from pathlib import Path as _Path
+_PM_P_NO_FILE = _Path(__file__).parent / "out" / "last_p_no.txt"
+
+def _pm_next_p_no():
+    """daytime.py と共通の last_p_no.txt から p_no を取得する。"""
+    try:
+        n = int(_PM_P_NO_FILE.read_text().strip()) + 1
+    except Exception:
+        n = int(time.time())
+    _PM_P_NO_FILE.write_text(str(n))
+    return str(n)
+
 
 def load_positions():
     db.init_db()
@@ -54,7 +67,6 @@ def fetch_prices(url_price, codes):
     if not url_price or not codes:
         return {}
     http    = urllib3.PoolManager()
-    p_base  = int(time.time()) % 100000
     prices  = {}
     batch   = 50
     for i in range(0, len(codes), batch):
@@ -65,7 +77,7 @@ def fetch_prices(url_price, codes):
                  f".{t.microsecond // 1000:03}")
         params = (
             "{"
-            f'"p_no":"{p_base + i}",'
+            f'"p_no":"{_pm_next_p_no()}",'
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(chunk)}",'

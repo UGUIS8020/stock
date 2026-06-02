@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-立花APIで銘柄の取引規制情報を取得・確認するスクリプト
-CLMIssueSizyouKiseiKabu / CLMIssueSizyouMstKabu / CLMHosyoukinMst を使用
+CLMIssueSizyouKiseiKabu 動作確認スクリプト
 """
 import sys, json, urllib3, time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+JST = timezone(timedelta(hours=9))
 LOGIN_FILE = Path(__file__).parent / "tachibana_login_response.json"
 P_NO_FILE  = Path(__file__).parent / "out" / "last_p_no.txt"
 
@@ -24,7 +24,7 @@ def next_pno():
     except Exception:
         n = int(time.time())
     P_NO_FILE.write_text(str(n))
-    t = datetime.now()
+    t = datetime.now(JST)
     psd = f"{t.year}.{t.month:02}.{t.day:02}-{t.hour:02}:{t.minute:02}:{t.second:02}.{t.microsecond//1000:03}"
     return str(n), psd
 
@@ -32,94 +32,42 @@ def api_get(url):
     resp = http.request("GET", url, timeout=urllib3.Timeout(connect=5, read=10))
     return json.loads(resp.data.decode("shift-jis", errors="ignore"))
 
+# テスト銘柄
 TEST_CODES = [
-    ("6081", "アライドアーキテクツ", "規制中？"),
-    ("9278", "ブックオフ",           "Prime 正常"),
-    ("4885", "室町ケミカル",         "Standard 正常"),
+    ("6081", "アライドアーキテクツ", "信用規制中のはず"),
+    ("7203", "トヨタ自動車",         "正常銘柄"),
+    ("9278", "ブックオフ",           "正常銘柄"),
 ]
 
-print("=" * 70)
-print("  立花API 取引規制情報 確認 (専用API使用)")
-print("=" * 70)
+print("=" * 60)
+print("  CLMIssueSizyouKiseiKabu 規制情報API 動作確認")
+print("=" * 60)
 
-# 【1】CLMIssueSizyouKiseiKabu（市場別銘柄規制）
-print("\n【1】CLMIssueSizyouKiseiKabu（規制情報）")
-print("-" * 70)
 for code, name, note in TEST_CODES:
-    pno, psd = next_pno()
-    params = (
-        "{"
-        f'"p_no":"{pno}",'
-        f'"p_sd_date":"{psd}",'
-        '"sCLMID":"CLMIssueSizyouKiseiKabu",'
-        f'"sIssueCode":"{code}",'
-        '"sJsonOfmt":"5"'
-        "}"
-    )
-    r = api_get(url_request + "?" + params)
-    p_errno = r.get("p_errno", "?")
-    print(f"  {code} {name} ({note}): p_errno={p_errno}")
-    if p_errno == "0":
-        # レスポンスのキーを全部表示
-        keys = [k for k in r.keys() if k not in ("p_no", "p_sd_date", "p_rv_date", "p_errno", "p_err", "sCLMID")]
-        print(f"    レスポンスキー: {keys}")
-        for k in keys:
-            print(f"    {k}: {r[k]}")
-    else:
-        print(f"    エラー: {r.get('p_err', str(r)[:150])}")
-    print()
-    time.sleep(0.8)
+    for label, base_url in [("sUrlRequest", url_request), ("sUrlMaster", url_master)]:
+        if not base_url:
+            continue
+        pno, psd = next_pno()
+        params = (
+            "{"
+            f'"p_no":"{pno}",'
+            f'"p_sd_date":"{psd}",'
+            '"sCLMID":"CLMIssueSizyouKiseiKabu",'
+            f'"sIssueCode":"{code}",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        r = api_get(base_url + "?" + params)
+        p_errno = r.get("p_errno", "?")
+        print(f"\n{code} {name}（{note}）[{label}]")
+        print(f"  p_errno={p_errno}")
+        if p_errno == "0":
+            keys = [k for k in r.keys() if k not in ("p_no","p_sd_date","p_rv_date","p_errno","p_err","sCLMID")]
+            for k in keys:
+                print(f"  {k}: {r[k]}")
+        else:
+            print(f"  エラー: {r.get('p_err','')[:120]}")
+        time.sleep(0.8)
+    break  # 最初の銘柄だけ両URL試す
 
-# 【2】CLMIssueSizyouMstKabu（市場別銘柄マスター）
-print("\n【2】CLMIssueSizyouMstKabu（信用区分）")
-print("-" * 70)
-for code, name, note in TEST_CODES:
-    pno, psd = next_pno()
-    params = (
-        "{"
-        f'"p_no":"{pno}",'
-        f'"p_sd_date":"{psd}",'
-        '"sCLMID":"CLMIssueSizyouMstKabu",'
-        f'"sIssueCode":"{code}",'
-        '"sJsonOfmt":"5"'
-        "}"
-    )
-    r = api_get(url_request + "?" + params)
-    p_errno = r.get("p_errno", "?")
-    print(f"  {code} {name} ({note}): p_errno={p_errno}")
-    if p_errno == "0":
-        keys = [k for k in r.keys() if k not in ("p_no", "p_sd_date", "p_rv_date", "p_errno", "p_err", "sCLMID")]
-        for k in keys:
-            print(f"    {k}: {r[k]}")
-    else:
-        print(f"    エラー: {r.get('p_err', str(r)[:150])}")
-    print()
-    time.sleep(0.8)
-
-# 【3】CLMHosyoukinMst（保証金マスター）
-print("\n【3】CLMHosyoukinMst（担保率・増担保規制）")
-print("-" * 70)
-for code, name, note in TEST_CODES[:2]:
-    pno, psd = next_pno()
-    params = (
-        "{"
-        f'"p_no":"{pno}",'
-        f'"p_sd_date":"{psd}",'
-        '"sCLMID":"CLMHosyoukinMst",'
-        f'"sIssueCode":"{code}",'
-        '"sJsonOfmt":"5"'
-        "}"
-    )
-    r = api_get(url_request + "?" + params)
-    p_errno = r.get("p_errno", "?")
-    print(f"  {code} {name} ({note}): p_errno={p_errno}")
-    if p_errno == "0":
-        keys = [k for k in r.keys() if k not in ("p_no", "p_sd_date", "p_rv_date", "p_errno", "p_err", "sCLMID")]
-        for k in keys:
-            print(f"    {k}: {r[k]}")
-    else:
-        print(f"    エラー: {r.get('p_err', str(r)[:150])}")
-    print()
-    time.sleep(0.8)
-
-print("=" * 70)
+print("\n" + "=" * 60)
