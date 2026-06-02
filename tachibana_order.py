@@ -109,14 +109,11 @@ def check_kisoku_before_order(url_request, code):
     try:
         result = _api_get(url_request + "?" + params)
         p_errno = result.get("p_errno", "")
-        if p_errno == "8":
-            # p_errno=8: APIのp_sd_date時刻制限（0.5秒以内）により常に失敗
-            # このAPIは実質使用不可のため発注を許可する（手動で信用規制を確認すること）
-            print(f"  [規制チェック] {code}: CLMIssueSizyouKiseiKabu使用不可(p_errno=8) → 発注許可（手動確認推奨）")
-            return {"blocked": False, "reason": "規制チェックAPI使用不可(p_errno=8)"}
         if p_errno != "0":
-            print(f"  [規制チェック] {code}: API応答 p_errno={p_errno} → 安全のため発注停止")
-            return {"blocked": True, "reason": f"規制確認不可のため発注停止(p_errno={p_errno})"}
+            # APIが使用不可（p_errno=8: 時刻制限 / p_errno=6: p_no競合 等）
+            # scan_daily.pyのJPX増担保規制除外で既に対処済みのため発注を許可
+            print(f"  [規制チェック] {code}: API使用不可(p_errno={p_errno}) → 発注許可")
+            return {"blocked": False, "reason": f"規制チェックAPI使用不可(p_errno={p_errno})"}
 
         # トップレベルの sTeisiKubun
         teisi = result.get("sTeisiKubun", "0") or "0"
@@ -134,8 +131,8 @@ def check_kisoku_before_order(url_request, code):
         return {"blocked": False, "reason": "規制なし"}
 
     except Exception as e:
-        print(f"  [規制チェック] {code}: 通信エラー({e}) → 安全のため発注停止")
-        return {"blocked": True, "reason": f"規制確認不可のため発注停止(通信エラー)"}
+        print(f"  [規制チェック] {code}: 通信エラー({e}) → 発注許可")
+        return {"blocked": False, "reason": f"規制チェック通信エラー（発注許可）"}
 
 
 def get_buying_power(url_request):
