@@ -617,6 +617,18 @@ def main():
         name_dict = {}
         exclude_codes = set()
 
+    # 増担保規制銘柄を除外（JPXサイトから自動取得）
+    try:
+        from fetch_kisoku_list import fetch_margin_restricted_codes
+        margin_codes = fetch_margin_restricted_codes()
+        if margin_codes:
+            exclude_codes |= margin_codes
+            print(f"  増担保規制除外: {len(margin_codes)}銘柄 {sorted(margin_codes)}")
+        else:
+            print("  増担保規制リスト: 取得失敗（スキップ）")
+    except Exception as e:
+        print(f"  増担保規制リスト: 取得エラー（{e}）→ スキップ")
+
     # 市場コードを JQuants から取得して DB に保存（sResultCode=11008 対策）
     try:
         df_list = cli.get_list()
