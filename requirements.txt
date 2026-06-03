@@ -8,3 +8,5 @@ jquants-api-client==2.0.0
 python-dotenv==1.2.1
 boto3
 jpholiday
+anthropic
+feedparser
