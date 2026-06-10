@@ -352,7 +352,7 @@ def verify_candidates_log(df_today, name_dict):
             print(f"  ── BUY累積: {len(buy_v)}件  勝率{bwr:.0f}%  平均{bavg:+.2f}%")
 
 
-def verify_scan_a(top20_codes, name_dict, df_today):
+def verify_scan_a(name_dict, df_today):
     df = _db.get_scan_results()
     if df.empty:
         return None
@@ -361,7 +361,7 @@ def verify_scan_a(top20_codes, name_dict, df_today):
         return None
 
     print(f"\n=== 📋 【戦略A】前日順張り候補の検証 ===")
-    s_hit = a_hit = b_hit = miss = down = 0
+    tp_hit = near_hit = miss = down = 0
 
     backtest_rows = []
     scan_date = df["scan_date"].max()
@@ -381,9 +381,8 @@ def verify_scan_a(top20_codes, name_dict, df_today):
         pass
 
     for _, row in unverified.iterrows():
-        code4    = str(row["code"])
-        is_top20 = code4 in top20_codes
-        name     = name_dict.get(code4, "")
+        code4 = str(row["code"])
+        name  = name_dict.get(code4, "")
         t        = df_today[df_today["code4"] == code4]
 
         if not t.empty and t.iloc[0]["Open"] > 0:
@@ -398,20 +397,21 @@ def verify_scan_a(top20_codes, name_dict, df_today):
             open_p = close_p = high_p = rise = max_rise = None
             rise_str = "  N/A"
 
-        # ── グレード判定を高値ベースに変更 ──────────────────
-        if is_top20:
-            status = "✅ S級(TOP20)"; grade = "S"; s_hit += 1
-        elif max_rise is not None and max_rise >= 5.0:
-            status = "✨ A級(高値+5%超)"; grade = "A"; a_hit += 1
+        # ── グレード判定（高値ベース、戦略A利確目標+3%基準）──────────────────
+        is_hit = max_rise is not None and max_rise >= 3.0
+        if is_hit:
+            status = "✅ TP到達(高値+3%超)"; grade = "TP";   tp_hit   += 1
         elif max_rise is not None and max_rise >= 2.0:
-            status = "📈 B級(高値+2%超)"; grade = "B"; b_hit += 1
+            status = "✨ 惜しい(高値+2%台)"; grade = "NEAR"; near_hit += 1
+        elif max_rise is not None and max_rise >= 0:
+            status = "📈 小幅プラス";         grade = "SMALL"; miss    += 1
         elif max_rise is not None and max_rise < 0:
-            status = "❌ 逆行";           grade = "FAIL"; down += 1
+            status = "❌ 逆行";               grade = "FAIL";  down    += 1
         else:
-            status = "➖ 横ばい";         grade = "FLAT"; miss += 1
+            status = "➖ データなし";          grade = "N/A";   miss    += 1
 
         df.loc[(df["scan_date"] == row["scan_date"]) &
-               (df["code"] == row["code"]), "actual_top20"] = int(is_top20)
+               (df["code"] == row["code"]), "actual_top20"] = int(is_hit)
         print(f"  {status} [{code4}]{name}  {rise_str}  スコア:{row['score']:.2f}")
 
         backtest_rows.append({
@@ -428,22 +428,20 @@ def verify_scan_a(top20_codes, name_dict, df_today):
             "result_pct":       rise,          # 終値ベース（実損益）
             "max_rise_pct":     max_rise,      # ← 追加（高値ベース）
             "grade":            grade,
-            "is_top20":         int(is_top20),
+            "is_top20":         int(is_hit),
             "market_condition": row.get("market_condition", "UNKNOWN"),
         })
 
     total = len(unverified)
     success_rate = None
     if total > 0:
-        meaningful   = s_hit + a_hit + b_hit
-        success_rate = round(meaningful / total * 100, 1)
+        success_rate = round(tp_hit / total * 100, 1)
         print(f"\n  【集計】")
-        print(f"  ✅ S級(TOP20)      : {s_hit}件")
-        print(f"  ✨ A級(高値+5%超)  : {a_hit}件")
-        print(f"  📈 B級(高値+2%超)  : {b_hit}件")
-        print(f"  ➖ 横ばい          : {miss}件")
-        print(f"  ❌ 逆行            : {down}件")
-        print(f"  利確チャンスあり(高値+2%以上): {meaningful}/{total}件 ({success_rate}%)")
+        print(f"  ✅ TP到達(高値+3%超): {tp_hit}件")
+        print(f"  ✨ 惜しい(高値+2%台): {near_hit}件")
+        print(f"  📈 小幅プラス       : {miss}件")
+        print(f"  ❌ 逆行             : {down}件")
+        print(f"  TP到達率(高値+3%以上): {tp_hit}/{total}件 ({success_rate}%)")
 
     _db.save_scan_results(df)
 
@@ -645,7 +643,7 @@ def main():
 
     verify_strategy_c(df_today, name_dict)
     verify_candidates_log(df_today, name_dict)
-    success_rate = verify_scan_a(top20_codes, name_dict, df_today)
+    success_rate = verify_scan_a(name_dict, df_today)
 
     save_market_log(mc, success_rate)
     show_market_log_summary()
