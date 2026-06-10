@@ -294,7 +294,7 @@ def verify_candidates_log(df_today, name_dict):
 
     print(f"\n=== 📋 【朝スキャン検証】本日 scan_morning.py 判定の結果 ===")
     tp_pct = 3.0
-    sl_pct = -7.0
+    sl_pct = -1.0  # market_watch.py の SL_PCT と統一
     updated = 0
     win = loss = tp_hit = sl_hit = 0
     today_results = []  # 当日分の結果を集計用に保持
@@ -315,25 +315,25 @@ def verify_candidates_log(df_today, name_dict):
         ret_low   = round((low_p   - open_p) / open_p * 100, 2)
 
         if ret_high >= tp_pct and ret_low > sl_pct:
-            grade = f"TP+{tp_pct:.0f}%"; tp_hit += 1; win += 1
+            grade = f"TP+{tp_pct:.0f}%"; result_pct = tp_pct; tp_hit += 1; win += 1
         elif ret_low <= sl_pct and ret_high < tp_pct:
-            grade = f"SL{sl_pct:.0f}%"; sl_hit += 1; loss += 1
+            grade = f"SL{sl_pct:.0f}%"; result_pct = sl_pct; sl_hit += 1; loss += 1
         elif ret_close >= 0:
-            grade = "引け+"; win += 1
+            grade = "引け+"; result_pct = ret_close; win += 1
         else:
-            grade = "引け-"; loss += 1
+            grade = "引け-"; result_pct = ret_close; loss += 1
 
         _db.update_candidates_result(
             row["date"], row["strategy"], code4,
-            open_p, close_p, high_p, low_p, ret_close, grade)
+            open_p, close_p, high_p, low_p, result_pct, grade)
 
-        today_results.append({"judgment": row["judgment"], "result_pct": ret_close})
+        today_results.append({"judgment": row["judgment"], "result_pct": result_pct})
         jdg  = str(row.get("judgment", ""))
         strat = str(row.get("strategy", ""))
         name  = name_dict.get(code4, str(row.get("name", "")))
         icon  = "✅" if grade.startswith("TP") else ("❌" if grade.startswith("SL") else ("⚠️" if ret_close >= 0 else "❌"))
         print(f"  {icon} [{code4}]{name}  {jdg}({strat})  "
-              f"寄:{open_p:.0f}→終:{close_p:.0f}  {ret_close:+.1f}%  [{grade}]")
+              f"寄:{open_p:.0f}→終:{close_p:.0f}  実損益:{result_pct:+.1f}%  引け:{ret_close:+.1f}%  [{grade}]")
         updated += 1
 
     if updated > 0:
