@@ -62,6 +62,17 @@ CHEAP_THRESHOLD  = 1_000
 MAX_ORDER_AMOUNT = 100_000
 
 
+_P_NO_FILE = Path("out/last_p_no.txt")
+
+def _next_p_no():
+    try:
+        n = int(_P_NO_FILE.read_text().strip()) + 1
+    except Exception:
+        n = int(time.time())
+    _P_NO_FILE.write_text(str(n))
+    return n
+
+
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
     1,000円未満の安い株は100,000円以内で買えるだけ。"""
@@ -141,7 +152,7 @@ def _fetch_price_batch(url_price, codes, http):
                  f".{t.microsecond // 1000:03}")
     params = (
         "{"
-        f'"p_no":"{int(time.time()) % 100000}",'
+        f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{p_sd_date}",'
         '"sCLMID":"CLMMfdsGetMarketPrice",'
         f'"sTargetIssueCode":"{code_list}",'

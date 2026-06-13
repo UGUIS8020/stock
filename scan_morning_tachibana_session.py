@@ -211,7 +211,11 @@ def fetch_tachibana_prices(url_price, codes):
     batch_size = 120
     http = urllib3.PoolManager()
     quotes = {}
-    p_no_base = int(time.time()) % 100000
+    p_no_file = Path("out/last_p_no.txt")
+    try:
+        p_no_base = int(p_no_file.read_text().strip()) + 1
+    except Exception:
+        p_no_base = int(time.time())
     for i, start in enumerate(range(0, len(codes), batch_size)):
         batch     = codes[start:start + batch_size]
         code_list = ",".join(str(c) for c in batch)
@@ -230,6 +234,7 @@ def fetch_tachibana_prices(url_price, codes):
             "}"
         )
         try:
+            p_no_file.write_text(str(p_no_base + i))
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=5))
             result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
