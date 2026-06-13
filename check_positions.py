@@ -1,48 +1,58 @@
 # -*- coding: utf-8 -*-
-import sys, json, urllib3, time
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
+"""
+check_positions.py - 立花証券APIで実際の保有株を照会する
 
+使い方:
+    python check_positions.py
+"""
+import sys
 sys.stdout.reconfigure(encoding="utf-8")
-JST = timezone(timedelta(hours=9))
 
-d = json.load(open('tachibana_login_response.json', encoding='utf-8'))
-url_price = d['sUrlPrice']
+import tachibana_order
+import db
 
-PM_FILE = Path('out/last_p_no.txt')
-try:
-    n = int(PM_FILE.read_text().strip()) + 1
-except Exception:
-    n = int(time.time())
-PM_FILE.write_text(str(n))
+db.init_db()
 
-t = datetime.now(JST)
-psd = f'{t.year}.{t.month:02}.{t.day:02}-{t.hour:02}:{t.minute:02}:{t.second:02}.{t.microsecond//1000:03}'
-params = (
-    '{'
-    f'"p_no":"{n}",'
-    f'"p_sd_date":"{psd}",'
-    '"sCLMID":"CLMMfdsGetMarketPrice",'
-    '"sTargetIssueCode":"2462,6203",'
-    '"sTargetColumn":"pDPP,pPRP",'
-    '"sJsonOfmt":"5"'
-    '}'
-)
+url_request = tachibana_order.load_url_request()
+if not url_request:
+    print("❌ ログインが必要です。先に tachibana_login.py を実行してください。")
+    sys.exit(1)
 
-http = urllib3.PoolManager()
-resp = http.request('GET', url_price + '?' + params, timeout=urllib3.Timeout(connect=5, read=10))
-r = json.loads(resp.data.decode('shift-jis', errors='ignore'))
+print("\n  立花証券 保有株照会中...")
+api_positions = tachibana_order.get_positions(url_request)
 
-print(f'p_errno={r.get("p_errno")}')
-for item in r.get('aCLMMfdsMarketPrice', []):
-    code  = item.get('sIssueCode', '')
-    price = float(item.get('pDPP') or item.get('pPRP') or 0)
-    names = {'2462': 'ライク', '6203': '豊和工業'}
-    buy   = {'2462': 1493, '6203': 1783}
-    tp    = {'2462': 1538, '6203': 1836}
-    sl    = {'2462': 1478, '6203': 1765}
-    if price:
-        pct = (price - buy[code]) / buy[code] * 100
-        status = '✅TP圏' if price >= tp[code] else ('🔴SL圏' if price <= sl[code] else '🟡保有中')
-        print(f'  {code} {names.get(code,"")} : {price:.0f}円 ({pct:+.2f}%) {status}')
-        print(f'    TP={tp[code]}円  SL={sl[code]}円')
+if not api_positions:
+    print("  ⚠️  APIから保有株を取得できませんでした（セッション切れ or 保有なし）")
+else:
+    print(f"\n  {'─'*60}")
+    print(f"  {'コード':<6} {'銘柄名':<20} {'株数':>5} {'買値':>7} {'現在値':>7} {'損益':>7}")
+    print(f"  {'─'*60}")
+    total_invest = 0
+    total_pnl    = 0
+    for p in api_positions:
+        invest  = (p['buy_price'] or 0) * p['shares']
+        pnl_yen = invest * (p['pnl_pct'] or 0) / 100
+        total_invest += invest
+        total_pnl    += pnl_yen
+        icon = "✅" if (p['pnl_pct'] or 0) >= 3.0 else ("🔴" if (p['pnl_pct'] or 0) <= -1.0 else "🟡")
+        print(f"  {p['code']:<6} {p['name'][:18]:<20} {p['shares']:>5}株"
+              f"  {p['buy_price']:>7,.0f}円"
+              f"  {p['current_price']:>7,.0f}円"
+              f"  {p['pnl_pct']:>+6.2f}%  {icon}")
+    print(f"  {'─'*60}")
+    print(f"  合計: {len(api_positions)}銘柄  投資額 {total_invest:,.0f}円  評価損益 {total_pnl:+,.0f}円")
+
+# システムDBの保有株と比較
+db_positions = db.load_open_positions()
+print(f"\n  システムDB保有: {len(db_positions)}件")
+
+if api_positions and db_positions:
+    api_codes = {p['code'] for p in api_positions}
+    db_codes  = {p['code'] for p in db_positions}
+    only_api  = api_codes - db_codes
+    only_db   = db_codes  - api_codes
+    if only_api:
+        print(f"  ⚠️  APIのみ（DBに未登録）: {sorted(only_api)}")
+        print(f"     → register_positions.py で登録してください")
+    if only_db:
+        print(f"  ⚠️  DBのみ（既に売却済み？）: {sorted(only_db)}")

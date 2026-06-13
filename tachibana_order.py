@@ -156,6 +156,52 @@ def get_buying_power(url_request):
         return None
 
 
+def get_positions(url_request):
+    """現物保有株一覧を照会して返す。
+    戻り値: [{"code", "name", "shares", "buy_price", "current_price", "pnl_pct"}, ...]
+    """
+    params = (
+        "{"
+        f'"p_no":"{_next_p_no()}",'
+        f'"p_sd_date":"{_p_sd_date()}",'
+        '"sCLMID":"CLMKabuZanList",'
+        '"sJsonOfmt":"5"'
+        "}"
+    )
+    try:
+        result = _api_get(url_request + "?" + params)
+        if result.get("p_errno", "0") != "0":
+            return []
+        positions = []
+        for item in result.get("aCLMKabuZanList", []):
+            def _f(k):
+                v = item.get(k, "")
+                if isinstance(v, str):
+                    v = v.strip('"')
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return None
+            code        = str(item.get("sIssueCode", "")).strip('"')
+            name        = str(item.get("sIssueName", "")).strip('"')
+            shares      = int(_f("sZansuuKabu") or 0)
+            buy_price   = _f("sHiritsuTanka")
+            current     = _f("sGenzaiTanka") or _f("sHiritsuTanka")
+            pnl_pct     = round((current - buy_price) / buy_price * 100, 2) if (buy_price and current) else None
+            if code and shares > 0:
+                positions.append({
+                    "code":          code,
+                    "name":          name,
+                    "shares":        shares,
+                    "buy_price":     buy_price,
+                    "current_price": current,
+                    "pnl_pct":       pnl_pct,
+                })
+        return positions
+    except Exception:
+        return []
+
+
 def place_buy_order(url_request, code, shares, price=None, market_code=None):
     """現物買い注文を発注する（price=None で成行、数値で指値）。"""
     if not LIVE_TRADING:
