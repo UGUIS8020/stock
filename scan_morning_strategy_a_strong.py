@@ -35,7 +35,7 @@ def judge_entry_a_strong(score, ratio, today_rise):
     if score >= 9.0:
         return "PASS", f"STRONG日 + スコア過熱({score:.1f}) - 9以上は勝率39%・逆効果"
 
-    # 上記以外は全CAUTION → daytime.py で+0.3%モメンタム確認後エントリー
+    # 上記以外は全CAUTION → market_watch.py で+0.3%確認後エントリー（9:05以降）
     # ※ score<5 / today_rise>=2 は除外不要（分析で高パフォーマンス確認済み）
     return "CAUTION", (f"STRONG日 score{score:.1f}×ratio{ratio:.1f}倍×前日{today_rise:+.1f}%"
-                       f" - 全CAUTION（daytime.pyでモメンタム確認）")
+                       f" - 全CAUTION（market_watch:+0.3%確認後エントリー）")

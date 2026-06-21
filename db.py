@@ -101,6 +101,8 @@ def init_db():
             entry_change_pct REAL,
             rb_score         REAL,
             condition        TEXT,
+            account_type     TEXT DEFAULT 'genbutsu',
+            zyoutoeki_c      TEXT DEFAULT '1',
             PRIMARY KEY (date, code)
         );
 
@@ -182,6 +184,7 @@ def init_db():
     conn.close()
     migrate_candidates_log_columns()
     migrate_daily_prices_market_code()
+    migrate_positions_account_type()
 
 
 # ══════════════════════════════════════════════════════
@@ -211,10 +214,17 @@ def get_stock_history(code, days=None):
     return df
 
 
-def get_all_codes():
-    """daily_prices に登録済みの全銘柄コードリストを返す。"""
+def get_all_codes(exclude_etf=False):
+    """daily_prices に登録済みの全銘柄コードリストを返す。
+    exclude_etf=True の場合、ETF/ETN（market_code='0109'）を除外する。
+    """
     conn = get_conn()
-    rows = conn.execute("SELECT DISTINCT code FROM daily_prices").fetchall()
+    if exclude_etf:
+        rows = conn.execute(
+            "SELECT DISTINCT code FROM daily_prices WHERE market_code != '0109'"
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT DISTINCT code FROM daily_prices").fetchall()
     conn.close()
     return [r[0] for r in rows]
 
@@ -425,8 +435,12 @@ def save_watchlist(df):
 # ══════════════════════════════════════════════════════
 
 def save_position_db(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
-                     entry_change_pct=None, rb_score=None, condition=None):
-    """買い約定後にポジションを positions テーブルへ記録する。"""
+                     entry_change_pct=None, rb_score=None, condition=None,
+                     account_type="genbutsu", zyoutoeki_c="1"):
+    """買い約定後にポジションを positions テーブルへ記録する。
+    account_type: "genbutsu"=現物, "shinyou"=信用
+    zyoutoeki_c : "1"=特定(源泉あり), "2"=特定(源泉なし), "3"=一般, "0"=NISA
+    """
     tp_price = round(buy_price * (1 + tp_pct))
     sl_price = round(buy_price * (1 - sl_pct))
     today    = datetime.now().strftime("%Y-%m-%d")
@@ -436,8 +450,8 @@ def save_position_db(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pc
         INSERT OR IGNORE INTO positions
             (date, code, name, shares, buy_price, tp_price, sl_price,
              strategy, buy_time, status, exit_reason,
-             entry_change_pct, rb_score, condition)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '', ?, ?, ?)
+             entry_change_pct, rb_score, condition, account_type, zyoutoeki_c)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', '', ?, ?, ?, ?, ?)
     """, [
         today, str(code), str(name), int(shares),
         float(buy_price), float(tp_price), float(sl_price),
@@ -445,21 +459,31 @@ def save_position_db(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pc
         None if entry_change_pct is None else round(float(entry_change_pct), 2),
         None if rb_score         is None else rb_score,
         None if condition        is None else str(condition),
+        str(account_type),
+        str(zyoutoeki_c),
     ])
     conn.commit()
     conn.close()
     print(f"  [DB] ポジション記録: {code} {name} {shares}株 "
           f"買値{buy_price}円 TP:{tp_price}円(+{tp_pct*100:.0f}%) "
-          f"SL:{sl_price}円(-{sl_pct*100:.1f}%)")
+          f"SL:{sl_price}円(-{sl_pct*100:.1f}%) [{account_type}/zyoutoeki={zyoutoeki_c}]")
 
 
-def load_open_positions():
-    """status='open' のポジションを dict リストで返す（position_monitor 互換）。"""
+def load_open_positions(strategy=None):
+    """status='open' のポジションを dict リストで返す（position_monitor 互換）。
+    strategy 指定時はその戦略のポジションのみを返す（A/B/D 独立カウント用）。
+    """
     conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM positions WHERE status='open' ORDER BY date, code",
-        conn
-    )
+    if strategy:
+        df = pd.read_sql(
+            "SELECT * FROM positions WHERE status='open' AND strategy=? ORDER BY date, code",
+            conn, params=[strategy]
+        )
+    else:
+        df = pd.read_sql(
+            "SELECT * FROM positions WHERE status='open' ORDER BY date, code",
+            conn
+        )
     conn.close()
     if df.empty:
         return []
@@ -579,6 +603,29 @@ def get_today_condition_db(today):
 # morning_log（朝スキャン結果）
 # ══════════════════════════════════════════════════════
 
+def update_morning_log_condition(date, new_condition, new_score, new_nk_chg):
+    """morning_log の地合い予測・スコア・日経変化率を更新する（9:05再判定用）。"""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE morning_log
+        SET condition_forecast=?, condition_score=?, nikkei_change=?
+        WHERE date=?
+    """, [new_condition, float(new_score), round(float(new_nk_chg), 2), str(date)])
+    conn.commit()
+    conn.close()
+
+
+def update_condition_in_candidates_log(date, new_condition):
+    """candidates_log の全レコードの condition を更新する（9:05再判定用）。"""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE candidates_log SET condition=? WHERE date=?",
+        [new_condition, str(date)]
+    )
+    conn.commit()
+    conn.close()
+
+
 def save_morning_log_db(row):
     """
     morning_log テーブルに朝スキャン結果を保存（INSERT OR REPLACE）。
@@ -673,6 +720,18 @@ def migrate_daily_prices_market_code():
     if "market_code" not in existing:
         conn.execute("ALTER TABLE daily_prices ADD COLUMN market_code TEXT")
         conn.commit()
+    conn.close()
+
+
+def migrate_positions_account_type():
+    """positions に account_type / zyoutoeki_c 列が未追加の場合のみ追加する（冪等）。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
+    if "account_type" not in existing:
+        conn.execute("ALTER TABLE positions ADD COLUMN account_type TEXT DEFAULT 'genbutsu'")
+    if "zyoutoeki_c" not in existing:
+        conn.execute("ALTER TABLE positions ADD COLUMN zyoutoeki_c TEXT DEFAULT '1'")
+    conn.commit()
     conn.close()
 
 

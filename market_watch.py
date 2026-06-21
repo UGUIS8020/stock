@@ -23,6 +23,7 @@ import argparse
 import requests
 import urllib3
 import pandas as pd
+import yfinance as yf
 import tachibana_order
 import db
 from datetime import datetime, timezone, timedelta
@@ -43,17 +44,21 @@ TODAY              = datetime.now(JST).strftime("%Y-%m-%d")
 POLL_INTERVAL_SEC  = 15    # 価格取得間隔（秒）
 WATCH_START_HOUR   = 9     # 監視開始時刻
 WATCH_START_MIN    = 0
-AI_JUDGE_MIN       = 5     # 発注判断開始（9:05）
+AI_JUDGE_MIN       = 4     # 発注判断開始（9:04）
 WATCH_END_MIN      = 30    # 監視終了（9:30）
 
 # TP/SL設定
-TP_PCT = 0.03   # 利確 +3%
-SL_PCT = 0.01   # 損切 -1%（最適化結果: SL=-1%でSharpe14倍改善）
+TP_PCT = 0.04   # 利確 +4%（変更: 3%→4% / grid_search_a.py OOS Sharpe +0.290 vs 旧3%=+0.162）
+SL_PCT = 0.06   # 損切 -6%（変更: 5%→6% / grid_search_a.py OOS Sharpe +0.290 vs 旧5%=+0.162）
+
+# 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
+MAX_POSITIONS = 3
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A = 10   # 戦略A: scoreで降順
 
 # 発注設定
+AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
 DEFAULT_SHARES   = 100      # 高値株のデフォルト株数
 CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
 MAX_ORDER_AMOUNT = 100_000  # 安い株の1発注上限額
@@ -105,8 +110,7 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
         }
 
     # WEAK日のCAUTION → 9:05以降に成行買い
-    # 【根拠】WEAK×CAUTION N=44 avg+0.97% Sharpe=0.43（SL=-1%）が全セグメント中最高
-    #         旧ロジック（OBSERVE）はこの利益を全て取り逃していた
+    # 【根拠】WEAK×CAUTION N=44 avg+0.97%（SL=-5%基準で再評価要）
     if condition == "WEAK" and judgment == "CAUTION":
         return {
             "style":                 "WAIT_CONFIRM",
@@ -138,12 +142,13 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
             }
         else:
-            # NORMAL日BUY → 0.5%確認後エントリー
+            # NORMAL日BUY → 前日比0.0%以上（プラスかフラット）でエントリー
+            # CAUTIONより低い閾値でBUY判定の優位性を活かす（OOS勝率65.6%）
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        5,
-                "confirm_threshold_pct": 0.5,
-                "description":           f"{condition}日BUY → 9:05以降 前日比+0.5%以上を確認後エントリー",
+                "confirm_threshold_pct": 0.0,
+                "description":           f"{condition}日BUY → 9:05以降 前日比0.0%以上を確認後エントリー（OOS勝率65.6%）",
             }
 
     # UNKNOWN など
@@ -169,6 +174,125 @@ def is_v_recovery(history, dip_threshold=-0.3, recovery_min=0.5):
     min_chg  = min(changes[:-1])   # 最終点を除いた最安値
     latest   = changes[-1]
     return min_chg <= dip_threshold and (latest - min_chg) >= recovery_min
+
+
+# ══════════════════════════════════════════════
+# 9:05 地合い再判定（立花API 実日経 + yfinance 前日終値）
+# ══════════════════════════════════════════════
+def _fetch_nikkei_905(url_price):
+    """立花APIで code=101 (日経225) の直近約定価格(pDPP)を取得する。"""
+    if not url_price:
+        return None
+    http = urllib3.PoolManager(cert_reqs="CERT_NONE")
+    p_no_file = Path("out/last_p_no.txt")
+    try:
+        p_no = int(p_no_file.read_text().strip()) + 1
+    except Exception:
+        p_no = int(time.time())
+    p_no_file.write_text(str(p_no))
+    t = datetime.now(JST)
+    psd = (f"{t.year}.{t.month:02}.{t.day:02}"
+           f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
+           f".{t.microsecond // 1000:03}")
+    params = (
+        '{"p_no":"' + str(p_no) + '",'
+        '"p_sd_date":"' + psd + '",'
+        '"sCLMID":"CLMMfdsGetMarketPrice",'
+        '"sTargetIssueCode":"101",'
+        '"sTargetColumn":"pDPP",'
+        '"sJsonOfmt":"5"}'
+    )
+    try:
+        resp = http.request("GET", url_price + "?" + params,
+                            timeout=urllib3.Timeout(connect=3, read=5))
+        result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
+        for item in result.get("aCLMMfdsMarketPrice", []):
+            v = str(item.get("pDPP", "")).strip('"')
+            if v:
+                return float(v)
+    except Exception:
+        pass
+    return None
+
+
+def _get_nikkei_prev_close():
+    """yfinance ^N225 で前日終値を返す。取得失敗時は None。"""
+    try:
+        hist = yf.Ticker("^N225").history(period="5d")
+        today_str = datetime.now(JST).strftime("%Y-%m-%d")
+        closes = []
+        for ts, close in zip(hist.index, hist["Close"]):
+            try:
+                date_str = ts.tz_convert("Asia/Tokyo").strftime("%Y-%m-%d")
+            except Exception:
+                date_str = str(ts)[:10]
+            if date_str < today_str:
+                closes.append(float(close))
+        return closes[-1] if closes else None
+    except Exception:
+        return None
+
+
+def _refresh_condition_905(current_condition, market_info, url_price):
+    """9:05に日経実値でLayer3スコアを再計算し、地合いが変われば新しい地合い文字列を返す。
+    変化なし or 取得失敗時は None を返す。
+    """
+    actual_nk = _fetch_nikkei_905(url_price)
+    if actual_nk is None:
+        print("  ⚠️  9:05 日経取得失敗 → 地合い再判定スキップ")
+        return None
+
+    prev_close = _get_nikkei_prev_close()
+    if prev_close is None:
+        print("  ⚠️  9:05 日経前日終値取得失敗 → 地合い再判定スキップ")
+        return None
+
+    actual_nk_chg = (actual_nk - prev_close) / prev_close * 100
+    saved_nk_chg  = float(market_info.get("nikkei_change") or 0.0)
+    saved_score   = int(market_info.get("condition_score") or 0)
+
+    def _l3(chg):
+        if chg >= 1.0:  return 3
+        if chg >= 0.0:  return 2
+        if chg >= -0.5: return 1
+        if chg >= -1.5: return 0
+        return -1
+
+    old_pts = _l3(saved_nk_chg)
+    new_pts = _l3(actual_nk_chg)
+
+    print(f"\n  📊 9:05 日経実値: {actual_nk:,.0f}円  前日比{actual_nk_chg:+.2f}%"
+          f"  (朝スキャン時: {saved_nk_chg:+.2f}%  Layer3: {old_pts}pt)")
+
+    if old_pts == new_pts:
+        print(f"  ✅ Layer3スコア変化なし({old_pts}pt) → 地合い変更不要")
+        return None
+
+    new_score = saved_score - old_pts + new_pts
+    print(f"  📈 スコア再計算: {saved_score}pt → {new_score}pt  (Layer3: {old_pts}→{new_pts}pt)")
+
+    dow    = float(market_info.get("dow_change")    or 0)
+    nasdaq = float(market_info.get("nasdaq_change") or 0)
+    sp500  = float(market_info.get("sp500_change")  or 0)
+    up_count = sum(1 for v in [dow, nasdaq, sp500] if v > 0)
+
+    if new_score <= 3 and actual_nk_chg <= -1.0:
+        new_cond = "PANIC"
+    elif new_score >= 8 and up_count >= 2:
+        new_cond = "STRONG"
+    elif new_score >= 4:
+        new_cond = "NORMAL"
+    elif new_score >= 2:
+        new_cond = "WEAK"
+    else:
+        new_cond = "PANIC"
+
+    try:
+        db.update_morning_log_condition(TODAY, new_cond, new_score, actual_nk_chg)
+    except Exception as e:
+        print(f"  ⚠️  morning_log 更新失敗: {e}")
+
+    return new_cond if new_cond != current_condition else None
 
 
 # ══════════════════════════════════════════════
@@ -389,9 +513,7 @@ def ask_claude_entry(candidate, price_history, condition, market_info, timing=No
     raise NotImplementedError("AI判断は無効化されています")
 
 def confirm_and_order(candidate, price, url_request):
-    """
-    発注確認プロンプトを表示し、ユーザーの yes/no に応じて Tachibana API で発注する。
-    """
+    """AUTO_ORDER=True: 確認なしで自動発注。False: y/n プロンプト表示。"""
     code      = candidate["code"]
     name      = candidate["name"]
     rec_price = price
@@ -406,23 +528,33 @@ def confirm_and_order(candidate, price, url_request):
     if url_request:
         buying_power = tachibana_order.get_buying_power(url_request)
 
-    print(f"\n\a{'━'*56}")
-    print(f"  🔔🔔🔔  発注確認  [{code}] {name}  🔔🔔🔔")
+    mode = "本番" if tachibana_order.LIVE_TRADING else "モック（実発注なし）"
+
+    print(f"\n{'━'*56}")
+    print(f"  {'🤖 自動発注' if AUTO_ORDER else '🔔🔔🔔  発注確認'}  [{code}] {name}")
     print(f"{'━'*56}")
     print(f"     現在値   : {price:>8,.0f}円" if price else "     現在値   : 取得中")
-    print(f"     推奨買い : {rec_price:>8,.0f}円" if rec_price else "")
     print(f"     指値売り : {sell_p:>8,.0f}円" if sell_p else "")
     print(f"     損切り   : {stop_p:>8,.0f}円" if stop_p else "")
-    print(f"     発注株数 : {shares}株  （変更: 数字を入力）")
+    print(f"     発注株数 : {shares}株")
     print(f"     概算金額 : {estimated:>8,.0f}円")
     if buying_power is not None:
         print(f"     買余力   : {buying_power:>8,.0f}円")
         if estimated > buying_power:
             print(f"  ⚠️  買余力不足の可能性があります")
-    mode = "本番" if tachibana_order.LIVE_TRADING else "モック（実発注なし）"
     print(f"     モード   : {mode}")
     print(f"{'━'*56}")
 
+    if AUTO_ORDER:
+        # 自動発注
+        if not url_request:
+            print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
+            return
+        print(f"  📤 自動発注中... {code} {shares}株 成行買い")
+        _do_order(code, name, shares, rec_price or price, url_request)
+        return
+
+    # 手動確認モード
     while True:
         ans = input(">>> [y=発注 / n=見送り / 数字=株数変更] : ").strip().lower()
 
@@ -442,18 +574,23 @@ def confirm_and_order(candidate, price, url_request):
                 print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
                 return
             print(f"  📤 発注中... {code} {shares}株 成行買い")
-            mkt_code = db.get_market_code_db(code)
-            result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
-            if result["success"]:
-                print(f"  ✅ {result['message']}")
-                buy_px = int(rec_price or price or 0)
-                if buy_px > 0:
-                    tachibana_order.save_position(code, name, shares, buy_px,
-                                                  strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
-            else:
-                print(f"  ❌ 発注失敗: {result['message']}")
-                print(f"     APIレスポンス: {result['raw']}")
+            _do_order(code, name, shares, rec_price or price, url_request)
             return
+
+
+def _do_order(code, name, shares, buy_price, url_request):
+    """発注処理本体（自動・手動共通）。"""
+    mkt_code = db.get_market_code_db(code)
+    result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
+    if result["success"]:
+        print(f"  ✅ {result['message']}")
+        buy_px = int(buy_price or 0)
+        if buy_px > 0:
+            tachibana_order.save_position(code, name, shares, buy_px,
+                                          strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
+    else:
+        print(f"  ❌ 発注失敗: {result['message']}")
+        print(f"     APIレスポンス: {result['raw']}")
 
 
 
@@ -468,6 +605,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
     histories = {c["code"]: [] for c in candidates}
     ordered   = {c["code"]: False for c in candidates}   # 発注済みフラグ
     results   = {c["code"]: "監視中" for c in candidates}
+    condition_refreshed = False  # 9:05 地合い再判定フラグ
 
     print(f"\n{'='*60}")
     print(f"【リアルタイム監視】{len(candidates)}銘柄  地合い:{condition}")
@@ -488,6 +626,20 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         market_start  = WATCH_START_HOUR * 60 + WATCH_START_MIN
         order_start   = WATCH_START_HOUR * 60 + AI_JUDGE_MIN
         watch_end     = WATCH_START_HOUR * 60 + WATCH_END_MIN
+
+        # 9:05 地合い再判定（初回のみ）
+        if not condition_refreshed and now_min >= order_start:
+            condition_refreshed = True
+            new_cond = _refresh_condition_905(condition, market_info, url_price)
+            if new_cond:
+                print(f"\n  🔄 9:05 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
+                condition = new_cond
+                timings = {c["code"]: decide_timing(condition, c["judgment"], "", c.get("strategy", "A"))
+                           for c in candidates if not ordered[c["code"]]}
+                try:
+                    db.update_condition_in_candidates_log(TODAY, new_cond)
+                except Exception:
+                    pass
 
         # 終了判定
         if now_min >= watch_end:
@@ -574,6 +726,9 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         print()  # 改行
 
         # タイミング戦略に応じてルールベースで発注判断
+        # ── パス1: SKIP/OBSERVE/OPEN_MARKET を処理 ──────────────────
+        wait_confirm_ready = []   # WAIT_CONFIRM で閾値超えの候補を蓄積
+
         for c in candidates:
             code   = c["code"]
             timing = timings[code]
@@ -611,27 +766,50 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 print(f"\n  🚫 {code} {c['name']}: 異常検知 → 強制見送り（{anomaly}）")
                 continue
 
-            # OPEN_MARKET: トリガー時刻到達で即発注
+            # OPEN_MARKET: トリガー時刻到達で即発注（変更なし）
             if timing["style"] == "OPEN_MARKET":
+                open_pos = db.load_open_positions(strategy="A")
+                if len(open_pos) >= MAX_POSITIONS:
+                    ordered[code] = True
+                    results[code] = f"見送り(上限{MAX_POSITIONS}件)"
+                    print(f"\n  ⚠️ {code} {c['name']}: 戦略A上限({MAX_POSITIONS}件)到達 → 見送り")
+                    continue
                 ordered[code] = True
                 results[code] = "発注"
                 print(f"\n  🟢 {code} {c['name']}: {timing['description']}")
                 confirm_and_order(c, latest_px, url_request)
                 continue
 
-            # WAIT_CONFIRM: 上昇閾値を超えたら発注
+            # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
             if timing["style"] == "WAIT_CONFIRM":
                 if latest_chg >= threshold:
-                    ordered[code] = True
-                    results[code] = "発注"
-                    print(f"\n  🟢 {code} {c['name']}: 前日比{latest_chg:+.1f}% ≥ 閾値{threshold:+.1f}% → 発注")
-                    confirm_and_order(c, latest_px, url_request)
+                    wait_confirm_ready.append((latest_chg, c, latest_px, threshold))
                 elif now_min >= WATCH_START_HOUR * 60 + WATCH_END_MIN - 1:
                     ordered[code] = True
                     results[code] = "見送り(上昇未確認)"
                     print(f"\n  🔴 {code} {c['name']}: 9:{WATCH_END_MIN:02d}まで前日比+{threshold}%未達"
                           f"（現在{latest_chg:+.1f}%）→ 見送り")
                 continue
+
+        # ── パス2: WAIT_CONFIRM → 上昇率が高い順に発注（B案）────────
+        # 同一ティック内で閾値を超えた全候補を上昇率降順に並べ、
+        # ポジション枠がある限り順番に発注する
+        wait_confirm_ready.sort(key=lambda x: -x[0])
+        for latest_chg, c, latest_px, threshold in wait_confirm_ready:
+            code = c["code"]
+            if ordered[code]:
+                continue
+            open_pos = db.load_open_positions(strategy="A")
+            if len(open_pos) >= MAX_POSITIONS:
+                ordered[code] = True
+                results[code] = f"見送り(上限{MAX_POSITIONS}件)"
+                print(f"\n  ⚠️ {code} {c['name']}: 戦略A上限({MAX_POSITIONS}件)到達 → 見送り")
+                continue
+            ordered[code] = True
+            results[code] = "発注"
+            print(f"\n  🟢 {code} {c['name']}: 前日比{latest_chg:+.1f}% ≥ 閾値{threshold:+.1f}%"
+                  f" → 発注（上昇率優先）")
+            confirm_and_order(c, latest_px, url_request)
 
         time.sleep(POLL_INTERVAL_SEC)
 

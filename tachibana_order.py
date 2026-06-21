@@ -202,6 +202,63 @@ def get_positions(url_request):
         return []
 
 
+def get_margin_positions(url_request):
+    """信用建玉一覧を照会して返す。
+    戻り値: [{"code", "name", "shares", "buy_price", "current_price", "pnl_pct", "account_type"}, ...]
+    account_type は常に "shinyou"。
+    """
+    params = (
+        "{"
+        f'"p_no":"{_next_p_no()}",'
+        f'"p_sd_date":"{_p_sd_date()}",'
+        '"sCLMID":"CLMShinyouZanList",'
+        '"sJsonOfmt":"5"'
+        "}"
+    )
+    try:
+        result = _api_get(url_request + "?" + params)
+        if result.get("p_errno", "0") != "0":
+            return []
+        positions = []
+        for item in result.get("aCLMShinyouZanList", []):
+            def _f(k):
+                v = item.get(k, "")
+                if isinstance(v, str):
+                    v = v.strip('"')
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return None
+            code      = str(item.get("sIssueCode", "")).strip('"')
+            name      = str(item.get("sIssueName", "")).strip('"')
+            shares    = int(_f("sZandakaZansuuKabu") or 0)
+            buy_price = _f("sTategyokuTanka")
+            current   = _f("sGenzaiTanka") or buy_price
+            pnl_pct   = round((current - buy_price) / buy_price * 100, 2) if (buy_price and current) else None
+            if code and shares > 0:
+                positions.append({
+                    "code":          code,
+                    "name":          name,
+                    "shares":        shares,
+                    "buy_price":     buy_price,
+                    "current_price": current,
+                    "pnl_pct":       pnl_pct,
+                    "account_type":  "shinyou",
+                })
+        return positions
+    except Exception:
+        return []
+
+
+def get_all_positions(url_request):
+    """現物・信用の全保有株を統合して返す。"""
+    genbutsu = get_positions(url_request)
+    for p in genbutsu:
+        p["account_type"] = "genbutsu"
+    shinyou = get_margin_positions(url_request)
+    return genbutsu + shinyou
+
+
 def place_buy_order(url_request, code, shares, price=None, market_code=None):
     """現物買い注文を発注する（price=None で成行、数値で指値）。"""
     if not LIVE_TRADING:
@@ -304,8 +361,13 @@ def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0
     )
 
 
-def place_sell_order(url_request, code, shares, price=None, market_code=None):
-    """現物 成行売り注文を発注する。戻り値は place_buy_order と同じ構造。"""
+def place_sell_order(url_request, code, shares, price=None, market_code=None,
+                     account_type="genbutsu", zyoutoeki_c=None):
+    """成行売り注文を発注する。戻り値は place_buy_order と同じ構造。
+    account_type: "genbutsu"=現物売り, "shinyou"=信用返済売り
+    zyoutoeki_c : "1"=特定(源泉あり), "2"=特定(源泉なし), "3"=一般, "0"=NISA
+                  None の場合はグローバル設定（ZYOUTOEKI_C）を使用
+    """
     if not LIVE_TRADING:
         print(f"  🔧 [モックモード] 実際の注文は出ません（LIVE_TRADING=False）")
         return {
@@ -322,24 +384,30 @@ def place_sell_order(url_request, code, shares, price=None, market_code=None):
         condition   = "2"
         order_price = str(int(price))
 
+    # 現物="0", 信用返済="2"
+    genkin_shinyou = "2" if account_type == "shinyou" else "0"
+    tatebi_type    = "*"
+    # 税区分: 引数指定があればそちらを優先、なければグローバル設定
+    zyoutoeki = zyoutoeki_c if zyoutoeki_c is not None else ZYOUTOEKI_C
+
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
         '"sCLMID":"CLMKabuNewOrder",'
-        f'"sZyoutoekiKazeiC":"{ZYOUTOEKI_C}",'
+        f'"sZyoutoekiKazeiC":"{zyoutoeki}",'
         f'"sIssueCode":"{code}",'
         '"sSizyouC":"00",'
         '"sBaibaiKubun":"1",'
         f'"sCondition":"{condition}",'
         f'"sOrderPrice":"{order_price}",'
         f'"sOrderSuryou":"{shares}",'
-        '"sGenkinShinyouKubun":"0",'
+        f'"sGenkinShinyouKubun":"{genkin_shinyou}",'
         '"sOrderExpireDay":"0",'
         '"sGyakusasiOrderType":"0",'
         '"sGyakusasiZyouken":"0",'
         '"sGyakusasiPrice":"*",'
-        '"sTatebiType":"*",'
+        f'"sTatebiType":"{tatebi_type}",'
         f'"sSecondPassword":"{SECOND_PASSWORD}",'
         '"sJsonOfmt":"5"'
         "}"

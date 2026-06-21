@@ -128,7 +128,7 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
     # 3/27誤判定の教訓: CME -2.08%（8:30時点）が東京開場前に急反転 → SGXで検知可能
     nk_chg = 0.0  # default（取得失敗時はPANIC判定に使わない）
     nk_data   = sgx if sgx is not None else nikkei
-    nk_source = "SGX先物" if sgx is not None else "CME先物"
+    nk_source = "CME円建先物" if sgx is not None else "CME先物(USD)"
     if nk_data:
         nk_chg = nk_data["change"]
         if nk_chg >= 1.0:
@@ -146,9 +146,9 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
         breakdown.append(f"  {nk_source:<10}: {nk_chg:>+.2f}%  → {pts:>+d}点 ({label})")
         # CMEとSGXが両方取得できた場合、乖離があれば参考表示
         if sgx is not None and nikkei is not None:
-            cme_chg = nikkei["change"]
-            if abs(sgx["change"] - cme_chg) >= 0.5:
-                breakdown.append(f"  ※CME先物    : {cme_chg:>+.2f}%（SGXと{sgx['change']-cme_chg:>+.2f}%乖離）")
+            cme_usd_chg = nikkei["change"]
+            if abs(sgx["change"] - cme_usd_chg) >= 0.5:
+                breakdown.append(f"  ※CME(USD)   : {cme_usd_chg:>+.2f}%（円建と{sgx['change']-cme_usd_chg:>+.2f}%乖離）")
     else:
         breakdown.append("  日経先物     : 取得失敗  → 0点")
 
@@ -313,15 +313,14 @@ def main():
         else:
             print(f"  ❓ {name:<12}: 取得失敗")
 
-    # SGXとCMEの両方を表示（乖離がある場合に視覚的に確認できる）
     if sgx:
-        print(f"  🌐 日経先物(SGX): {sgx['close']:>10,.0f}  ({sgx['change']:>+.2f}%)  ← 直近値")
+        print(f"  🌐 CME円建先物(NIY): {sgx['close']:>10,.0f}  ({sgx['change']:>+.2f}%)  ← 直近値")
     else:
-        print(f"  ❓ 日経先物(SGX): 取得失敗")
+        print(f"  ❓ CME円建先物(NIY): 取得失敗")
     if nikkei:
-        print(f"  🌐 日経先物(CME): {nikkei['close']:>10,.0f}  ({nikkei['change']:>+.2f}%)")
+        print(f"  🌐 CME先物(NKD/USD): {nikkei['close']:>10,.0f}  ({nikkei['change']:>+.2f}%)")
     else:
-        print(f"  ❓ 日経先物(CME): 取得失敗")
+        print(f"  ❓ CME先物(NKD/USD): 取得失敗")
 
     if usdjpy:
         print(f"  💴 ドル円      : {usdjpy:>10.2f} 円")

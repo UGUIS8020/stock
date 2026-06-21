@@ -1,21 +1,21 @@
 """
-closing_watch.py - 引け前（14:43〜14:58）戦略B下落銘柄スキャン + 買い判断
+closing_watch.py - 引け前（15:05〜15:20）戦略B下落銘柄スキャン + 買い判断
 
 【パラメータ根拠】
   GA最適化（20,000人×100世代, 2026-05-26）OOS検証済み:
-    drop -6.8〜-1.0% / RB>=3 / 全地合い
-    N=15件 / WR=66.7% / avg=+0.276% / OOS Sharpe=+2.087
+    drop -5.0〜-3.1% / RB>=4 / STRONG+NORMAL地合い
+    OOS Sharpe=+3.502
   TP+1.9% / SL-5.6%  ← 2026-05-26更新（旧: TP+5.4% / SL-0.5%）
-  ※フィルタ: 株価200円以上・売買代金5,000万円以上・±10%超除外
+  ※フィルタ: 株価200円以上・出来高50,000株以上・±15%超除外
   ※地合い: NORMAL+STRONG（旧: STRONGのみ）
 
 実行方法:
-    python closing_watch.py       # 14:43まで待機して自動開始
+    python closing_watch.py       # 15:05まで待機して自動開始
     python closing_watch.py --now # 即時開始（テスト用）
 
 前提:
     - tachibana_login_response.json が存在すること（scan_morning.py 実行後）
-    - STRONG地合いの日のみ有効（それ以外は自動終了）
+    - STRONG/NORMAL地合いの日のみ有効（WEAK/PANICは自動終了）
 """
 
 import os
@@ -46,9 +46,10 @@ MARKET_LOG_CSV       = str(_BASE_DIR / "out" / "market_log.csv")
 CLOSING_LOG_CSV      = str(_BASE_DIR / "out" / "closing_log.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 
-SCAN_START_HOUR    = 14
-SCAN_START_MIN     = 55
-ORDER_DEADLINE_MIN = 15 * 60 + 15  # 15:15 以降は発注しない（引けオークション開始前）
+SCAN_START_HOUR    = 15
+SCAN_START_MIN     = 5
+ORDER_WAIT_MIN     = 15 * 60 + 13  # 15:13まで待機してから発注（引けギリギリ約15:15執行）
+ORDER_DEADLINE_MIN = 15 * 60 + 20  # 15:20 以降は発注しない（引けオークション開始前）
 
 DROP_LO      = -5.0   # 下落下限（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
 DROP_HI      = -3.1   # 下落上限（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
@@ -60,6 +61,9 @@ MAX_POSITIONS_PER_DAY = 3      # 1日の最大自動発注件数（安全装置�
 DEFAULT_SHARES   = 100
 CHEAP_THRESHOLD  = 1_000
 MAX_ORDER_AMOUNT = 100_000
+
+TP_PCT = 0.019   # +1.9%（GA最適化2026-05-26）
+SL_PCT = 0.056   # -5.6%（GA最適化2026-05-26）
 
 
 _P_NO_FILE = Path("out/last_p_no.txt")
@@ -198,7 +202,7 @@ def get_today_condition():
 
 def _fetch_nikkei_change(url_price, http):
     """日経225の当日騰落率(%)を取得。取得失敗時は None を返す。"""
-    NIKKEI_CODE = "998407"
+    NIKKEI_CODE = "101"   # 立花API: 998407は無効。101が正しい日経225コード
     quotes = _fetch_price_batch(url_price, [NIKKEI_CODE], http)
     q = quotes.get(NIKKEI_CODE)
     if not q or not q.get("price") or not q.get("prev_close") or q["prev_close"] <= 0:
@@ -239,7 +243,7 @@ def scan_dropping_stocks(url_price):
     を返す。戻り値: (ad_ratio, nikkei_change, scanned_cond, dropping)
     """
     http    = urllib3.PoolManager()
-    codes   = db.get_all_codes()
+    codes   = db.get_all_codes(exclude_etf=True)   # ETF/ETN(market_code=0109)を除外
     total   = len(codes)
     batch   = 120
     n_batch = (total + batch - 1) // batch
@@ -338,8 +342,8 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     price     = candidate["price"]
     shares    = calc_shares(price)
     estimated = int(price * shares)
-    tp_price  = round(price * 1.019)
-    sl_price  = round(price * 0.944)
+    tp_price  = round(price * (1 + TP_PCT))
+    sl_price  = round(price * (1 - SL_PCT))
 
     # 重複発注防止
     if str(code) in ordered_today:
@@ -356,7 +360,7 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     mode = "本番" if tachibana_order.LIVE_TRADING else "モック"
     print(f"\n  📤 自動発注 [{mode}]: [{code}] {name}  "
           f"{price:,.0f}円 × {shares}株 = {estimated:,}円")
-    print(f"     TP目安: {tp_price:,}円 (+1.9%)  SL目安: {sl_price:,}円 (-5.6%)")
+    print(f"     TP目安: {tp_price:,}円 (+{TP_PCT*100:.1f}%)  SL目安: {sl_price:,}円 (-{SL_PCT*100:.1f}%)")
 
     mkt_code = db.get_market_code_db(code)
     result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
@@ -364,7 +368,7 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
         print(f"  ✅ {result['message']}")
         tachibana_order.save_position(
             code, name, shares, price,
-            strategy="B", tp_pct=0.019, sl_pct=0.056,
+            strategy="B", tp_pct=TP_PCT, sl_pct=SL_PCT,
             entry_change_pct=candidate.get("change_pct"),
             rb_score=candidate.get("rb_score"),
             condition=condition,
@@ -388,8 +392,8 @@ def save_closing_log(candidates):
         "change_pct": c["change_pct"],
         "rb_score":   c["rb_score"],
         "price":      c["price"],
-        "tp_price":   round(c["price"] * 1.054),
-        "sl_price":   round(c["price"] * 0.995),
+        "tp_price":   round(c["price"] * (1 + TP_PCT)),
+        "sl_price":   round(c["price"] * (1 - SL_PCT)),
     } for c in candidates]
     db.save_closing_log_db(rows)
     print(f"\n  💾 ログ保存: closing_log（{len(rows)}件）")
@@ -501,13 +505,26 @@ def main(start_now=False, manual=False):
     print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'TP目安':>8} {'SL目安':>8} {'出来高':>10}")
     print(f"  {'─'*72}")
     for c in candidates:
-        tp = round(c["price"] * 1.054)
-        sl = round(c["price"] * 0.995)
+        tp = round(c["price"] * (1 + TP_PCT))
+        sl = round(c["price"] * (1 - SL_PCT))
         print(f"  {c['code']:<7} {c.get('name',''):<14} {c['change_pct']:>+6.2f}% "
               f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
 
     # ── 本日すでに発注済みの銘柄を取得（再実行時の重複防止）──
     ordered_today = db.get_today_ordered_codes(TODAY)
+
+    # ── 発注待機（引けギリギリ約15:15執行）──
+    now = datetime.now(JST)
+    now_min = now.hour * 60 + now.minute
+    if now_min < ORDER_WAIT_MIN:
+        wait_sec = (ORDER_WAIT_MIN - now_min) * 60 - now.second
+        print(f"\n  ⏰ {ORDER_WAIT_MIN//60}:{ORDER_WAIT_MIN%60:02d}まで {wait_sec//60}分{wait_sec%60}秒 待機中（引けギリギリ発注）...")
+        while True:
+            now = datetime.now(JST)
+            if now.hour * 60 + now.minute >= ORDER_WAIT_MIN:
+                break
+            time.sleep(5)
+        print(f"  → {ORDER_WAIT_MIN//60}:{ORDER_WAIT_MIN%60:02d} 発注開始")
 
     # ── 発注（自動 or 手動確認）──
     label = "手動確認" if manual else f"自動発注（上限{MAX_POSITIONS_PER_DAY}件）"
@@ -528,10 +545,10 @@ def main(start_now=False, manual=False):
             code  = c["code"]
             name  = c.get("name", code)
             price = c["price"]
-            tp    = round(price * 1.054)
-            sl    = round(price * 0.995)
+            tp    = round(price * (1 + TP_PCT))
+            sl    = round(price * (1 - SL_PCT))
             print(f"\n  [{code}] {name}  {price:,.0f}円  {c['change_pct']:+.2f}%  "
-                  f"RB{c['rb_score']}点  TP:{tp:,}円  SL:{sl:,}円")
+                  f"RB{c['rb_score']}点  TP:{tp:,}円(+{TP_PCT*100:.1f}%)  SL:{sl:,}円(-{SL_PCT*100:.1f}%)")
             ans = input("  >>> 発注しますか？ [y=発注 / n=見送り / q=終了] : ").strip().lower()
             if ans == "q":
                 print("  手動モード終了。")

@@ -135,7 +135,6 @@ def main():
     TODAY       = datetime.now(JST).strftime("%Y-%m-%d")
     gap_checked  = set()   # 当日ギャップチェック済みのcode
     force_closed = False   # 15:25 引け決済実施フラグ
-
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
@@ -151,9 +150,11 @@ def main():
                     code  = pos["code"]
                     name  = pos["name"]
                     shares = int(pos["shares"])
-                    print(f"  📤 引け成行売り: [{code}] {name} {shares}株")
+                    acct = pos.get("account_type") or "genbutsu"
+                    zc   = pos.get("zyoutoeki_c") or None
+                    print(f"  📤 引け成行売り: [{code}] {name} {shares}株 [{acct}]")
                     mkt_code = db.get_market_code_db(code)
-                    result = tachibana_order.place_sell_order(url_request, code, shares, market_code=mkt_code)
+                    result = tachibana_order.place_sell_order(url_request, code, shares, market_code=mkt_code, account_type=acct, zyoutoeki_c=zc)
                     if result["success"]:
                         data    = fetch_prices(url_price, [code])
                         current = (data.get(code) or {}).get("price") or float(pos["buy_price"])
@@ -214,7 +215,9 @@ def main():
                 if gap_pct > GAP_SELL_THRESHOLD:
                     print(f"  🚀 {code} {name}: 翌朝ギャップ+{gap_pct:.2f}% → 即売り（シミュ検証済み）")
                     mkt_code = db.get_market_code_db(code)
-                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code)
+                    acct = pos.get("account_type") or "genbutsu"
+                    zc   = pos.get("zyoutoeki_c") or None
+                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code, account_type=acct, zyoutoeki_c=zc)
                     if result["success"]:
                         pos["status"]     = "closed"
                         pos["sell_price"] = str(open_px)
@@ -239,7 +242,9 @@ def main():
                 print(f"  {'🎯' if hit_tp else '🛑'} {code} {name}: "
                       f"{reason} 到達 ({current}円 {chg:+.2f}%) → 売り発注")
                 mkt_code = db.get_market_code_db(code)
-                result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code)
+                acct = pos.get("account_type") or "genbutsu"
+                zc   = pos.get("zyoutoeki_c") or None
+                result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code, account_type=acct, zyoutoeki_c=zc)
                 if result["success"]:
                     pos["status"]      = "closed"
                     pos["sell_price"]  = str(current)

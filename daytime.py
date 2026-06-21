@@ -55,7 +55,7 @@ _BASE_DIR = Path(__file__).parent
 
 # ── 時間設定 ──────────────────────────────────────
 WATCH_START_HOUR = 9
-WATCH_START_MIN  = 0
+WATCH_START_MIN  = 30  # market_watch.py（9:00-9:30）終了後から開始
 WATCH_END_HOUR   = 14
 WATCH_END_MIN    = 30
 POLL_INTERVAL    = 15   # 秒
@@ -305,7 +305,7 @@ def fetch_prices(url_price, codes):
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(str(c) for c in chunk)}",'
-            '"sTargetColumn":"pDPP,pPRP,pDV",'
+            '"sTargetColumn":"pDPP,pPRP,pOP,pDV",'
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -317,11 +317,13 @@ def fetch_prices(url_price, codes):
                 code = item.get("sIssueCode", "").strip('"')
                 if not code:
                     continue
-                price = _parse_price_field(item, "pDPP") or _parse_price_field(item, "pPRP")
-                prev  = _parse_price_field(item, "pPRP")
-                vol   = int(_parse_price_field(item, "pDV") or 0)
+                price  = _parse_price_field(item, "pDPP") or _parse_price_field(item, "pPRP")
+                prev   = _parse_price_field(item, "pPRP")
+                open_p = _parse_price_field(item, "pOP")
+                vol    = int(_parse_price_field(item, "pDV") or 0)
                 if price:
-                    result[code] = {"price": price, "prev_close": prev, "volume": vol}
+                    result[code] = {"price": price, "prev_close": prev,
+                                    "open_price": open_p, "volume": vol}
         except Exception as e:
             print(f"  ⚠️  価格取得エラー: {e}")
 
@@ -360,10 +362,10 @@ def check_signal(code, quote, prev_ohlcv, first_prices, score=None,
     _gap_min = GAP_MIN_PCT if gap_min is None else gap_min
     _gap_max = GAP_MAX_PCT if gap_max is None else gap_max
 
-    # ── 寄り付きギャップ推定 ─────────────────────
-    # 初回観測時の change_pct を opening gap の近似値とする
+    # ── 寄り付きギャップ ─────────────────────────
+    # 起動時に pOP（始値）から計算済み。未取得の銘柄のみ初回観測値で代用。
     if code not in first_prices:
-        first_prices[code] = change_pct   # 初回記録
+        first_prices[code] = change_pct   # フォールバック（始値取得失敗時）
     gap_pct = first_prices[code]
 
     # フィルター1: ギャップ範囲（月曜は gap_min=0 でマイナスギャップを除外）
@@ -434,7 +436,6 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     signaled      = set()    # 発注完了 or 永続失敗（このセッションでチェックしない）
     alerted       = set()    # シグナル表示済み（重複表示防止のみ）
     ordered_today = set(db.get_today_ordered_codes(TODAY))
-    first_prices  = {}       # 初回観測時の騰落率（≈ 寄り付きギャップの近似）
     signal_count  = 0
 
     # 曜日別パラメータ上書き（月曜は構造的に弱いため制限付き発注）
@@ -450,12 +451,19 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     #   gap  < 0%:  勝率53〜57% / 平均+0.13〜0.37% → 有効
     gap_max = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
 
+    # 月曜×NORMAL: gap条件が相互矛盾（月曜gap≥0% vs NORMAL gap<0%）のため全見送り
+    # 根拠: ga_monday_normal.py GA最適化（2024-06-01〜, N=16,669件）
+    #   月曜×NORMAL OOS: WR=39.2% / avg=-0.273% / Sharpe=-2.795 → 全gap範囲で有害
+    mon_normal_skip = is_monday and condition == "NORMAL"
+
     print(f"\n  監視開始: {WATCH_START_HOUR}:{WATCH_START_MIN:02d} 〜 "
           f"{WATCH_END_HOUR}:{WATCH_END_MIN:02d}  対象: {len(codes)}銘柄")
     print(f"  地合い: {condition}  （{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
-    if is_monday:
+    if mon_normal_skip:
+        print(f"  ⚠️  月曜×NORMAL: 発注見送り（OOS Sharpe=-2.795, WR=39.2%）")
+    elif is_monday:
         print(f"  ⚠️  月曜モード: 最大ポジション={max_positions} / gap≥{gap_min:+.0f}% / score<{score_max}")
-    if condition == "NORMAL":
+    if condition == "NORMAL" and not mon_normal_skip:
         print(f"  ⚠️  NORMAL日: gap < 0%（マイナスギャップのみ）に絞って発注")
     print(f"  条件: {condition}地合い × gap{gap_min:+}〜{gap_max:+}% × 前日プラス × モメンタム{MOMENTUM_PCT:+.1f}%以上")
     print(f"  TP: +{TP_PCT*100:.0f}%  SL: -{SL_PCT*100:.0f}%\n")
@@ -464,6 +472,21 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     print("  前日OHLCV 読み込み中...")
     prev_ohlcv = load_prev_ohlcv(codes)
     print(f"  読み込み完了: {len(prev_ohlcv)}銘柄\n")
+
+    # 寄り付き価格（pOP）でギャップを初期化
+    # バックテスト(analyze_a.py)が使う「9:00始値ベースのgap%」と一致させる
+    first_prices = {}
+    if url_price:
+        print("  寄り付き価格（始値）取得中...")
+        init_q = fetch_prices(url_price, codes)
+        for _code, q in init_q.items():
+            op   = q.get("open_price")
+            prev = q.get("prev_close")
+            if op and op > 0 and prev and prev > 0:
+                first_prices[_code] = round((op - prev) / prev * 100, 2)
+        got = len(first_prices)
+        print(f"  → {got}/{len(codes)}銘柄の始値gap取得完了"
+              f"  (残{len(codes) - got}銘柄は初回観測値で代用)\n")
 
     watch_end_min = WATCH_END_HOUR * 60 + WATCH_END_MIN
 
@@ -521,6 +544,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
 
         can_order = (DAYTIME_TRADING and
                      condition in ("STRONG", "NORMAL") and
+                     not mon_normal_skip and
                      bool(url_request))
 
         for code, name, sig, adj_score, attr_w, is_retry in new_signals:
@@ -547,9 +571,9 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 print(f"     ℹ️  本日発注済み → スキップ")
                 signaled.add(code)
                 continue
-            open_pos = db.load_open_positions()
+            open_pos = db.load_open_positions(strategy="D")
             if len(open_pos) >= max_positions:
-                print(f"     ⚠️  最大ポジション数({max_positions})到達 → 発注スキップ")
+                print(f"     ⚠️  戦略D上限({max_positions})到達 → 発注スキップ")
                 signaled.add(code)
                 continue
             shares = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)

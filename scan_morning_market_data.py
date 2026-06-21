@@ -33,7 +33,7 @@ SEMI_TICKER   = "SOXX"
 
 # ── 日経先物 ───────────────────────────────────────
 NIKKEI_TICKER     = "NKD=F"   # CME日経先物（シカゴ）
-SGX_NIKKEI_TICKER = "NK=F"    # SGX日経先物（シンガポール・東京開場直前まで動く）
+SGX_NIKKEI_TICKER = "NIY=F"   # CME日経/円先物（SGX NK=F廃止のため代替）
 
 # ── マクロ連動セクター定義 ─────────────────────────
 MACRO_SECTORS = [
@@ -139,8 +139,8 @@ def fetch_nikkei():
 
 
 def fetch_sgx():
-    """SGX日経先物を取得。東京開場直前まで動くためCMEより直近の動向を反映する。
-    3/27の誤判定例: CME -2.08%（8:30取得）→ 実際は東京開場前に急反転していた。
+    """CME日経/円先物(NIY=F)を取得。旧SGX(NK=F)廃止後の代替。
+    円建てのため現物指数と直接比較可能。
     """
     try:
         data = yf.Ticker(SGX_NIKKEI_TICKER).history(period="5d")

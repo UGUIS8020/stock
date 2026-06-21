@@ -7,8 +7,8 @@ run_daily.py - 1日の全スクリプトを順番に起動
   2. tachibana_login.py    電話認証 + セッション取得
   3. scan_daily.py         前営業日データ取得・スコアリング
   4. scan_morning.py       地合い予測・候補選定
-  5. market_watch.py       9:00〜9:30 リアルタイム監視・発注（戦略A）
-  6. position_monitor.py   9:30〜15:28 TP/SL自動売り（バックグラウンド）
+  5. position_monitor.py   9:00〜15:28 TP/SL自動売り（バックグラウンド・先行起動）
+  6. market_watch.py       9:00〜9:30 リアルタイム監視・発注（戦略A）
   7. closing_watch.py      14:55〜15:15 引け前スキャン・発注（戦略B）
 
 使い方:
@@ -41,12 +41,16 @@ def get_prev_business_day():
 
 
 def run_step(label, cmd, cwd):
-    """サブプロセスを実行してリターンコードを返す。"""
+    """サブプロセスを実行してリターンコードを返す。Ctrl+C は graceful に処理。"""
     print(f"\n{'='*60}")
     print(f"  {label}")
     print(f"{'='*60}\n")
-    result = subprocess.run(cmd, cwd=cwd)
-    return result.returncode
+    try:
+        result = subprocess.run(cmd, cwd=cwd)
+        return result.returncode
+    except KeyboardInterrupt:
+        print(f"\n  ⚠️  Ctrl+C を受信 → {label} を中断しました")
+        return 1
 
 
 def main():
@@ -93,18 +97,19 @@ def main():
         print("❌ scan_morning.py エラー。market_watch 以降をスキップします。")
         return
 
-    # ── Step 5: market_watch.py（9:00〜9:30）─────────────
-    rc = run_step("【Step 5/7】market_watch.py（9:00〜9:30 リアルタイム監視・戦略A発注）",
-                  [py, "market_watch.py"], cwd)
-    # market_watch は時間切れでも rc=0 なので中断しない
-
-    # ── Step 6: position_monitor.py（バックグラウンド起動）──
+    # ── Step 5: position_monitor.py（バックグラウンド・先行起動）──
+    # 前日持越しポジションを9:00から監視するため market_watch より先に起動する
     print(f"\n{'='*60}")
-    print(f"  【Step 6/7】position_monitor.py（TP/SL自動売り・バックグラウンド）")
+    print(f"  【Step 5/7】position_monitor.py（TP/SL自動売り・バックグラウンド先行起動）")
     print(f"{'='*60}\n")
     pm_proc = subprocess.Popen([py, "position_monitor.py"], cwd=cwd)
     print(f"  ✅ position_monitor をバックグラウンドで起動しました（PID: {pm_proc.pid}）")
-    print(f"     TP/SL到達で自動売り、15:28に自動終了します")
+    print(f"     前日持越しポジションを9:00から監視、15:28に自動終了します")
+
+    # ── Step 6: market_watch.py（9:00〜9:30）─────────────
+    rc = run_step("【Step 6/7】market_watch.py（9:00〜9:30 リアルタイム監視・戦略A発注）",
+                  [py, "market_watch.py"], cwd)
+    # market_watch は時間切れでも rc=0 なので中断しない
 
     # ── Step 7: closing_watch.py（14:55〜15:15）──────────
     closing_cmd = [py, "closing_watch.py"]
@@ -113,10 +118,17 @@ def main():
     run_step("【Step 7/7】closing_watch.py（14:55〜 引け前スキャン・戦略B発注）",
              closing_cmd, cwd)
 
+
     # position_monitor の終了を待つ（〜15:28）
     print(f"\n  ⏳ position_monitor の終了を待っています...")
-    pm_proc.wait()
-    print(f"  ✅ position_monitor 終了")
+    try:
+        pm_proc.wait()
+        print(f"  ✅ position_monitor 終了")
+    except KeyboardInterrupt:
+        print(f"\n  ⚠️  Ctrl+C を受信 → position_monitor を終了します...")
+        pm_proc.terminate()
+        pm_proc.wait()
+        print(f"  ✅ position_monitor 終了")
 
     print(f"\n{'='*60}")
     print(f"  本日の全ステップ完了（{datetime.now(JST).strftime('%H:%M:%S')}）")
@@ -124,4 +136,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n  ⚠️  run_daily.py を中断しました（Ctrl+C）")
+        sys.exit(1)
