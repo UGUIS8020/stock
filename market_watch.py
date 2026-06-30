@@ -52,13 +52,15 @@ TP_PCT = 0.04   # 利確 +4%（変更: 3%→4% / grid_search_a.py OOS Sharpe +0.
 SL_PCT = 0.06   # 損切 -6%（変更: 5%→6% / grid_search_a.py OOS Sharpe +0.290 vs 旧5%=+0.162）
 
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
-MAX_POSITIONS = 3
+MAX_POSITIONS = 5
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A = 10   # 戦略A: scoreで降順
 
 # 発注設定
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
+LIMIT_ORDER      = False    # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
+LIMIT_WAIT_SECS  = 30       # 指値約定確認の待機秒数
 DEFAULT_SHARES   = 100      # 高値株のデフォルト株数
 CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
 MAX_ORDER_AMOUNT = 100_000  # 安い株の1発注上限額
@@ -550,7 +552,8 @@ def confirm_and_order(candidate, price, url_request):
         if not url_request:
             print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
             return
-        print(f"  📤 自動発注中... {code} {shares}株 成行買い")
+        order_type = "指値" if LIMIT_ORDER else "成行"
+        print(f"  📤 自動発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
         _do_order(code, name, shares, rec_price or price, url_request)
         return
 
@@ -573,24 +576,45 @@ def confirm_and_order(candidate, price, url_request):
             if not url_request:
                 print(f"  ❌ 業務URLが取得できません。再ログインしてください。")
                 return
-            print(f"  📤 発注中... {code} {shares}株 成行買い")
+            order_type = "指値" if LIMIT_ORDER else "成行"
+            print(f"  📤 発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
             _do_order(code, name, shares, rec_price or price, url_request)
             return
 
 
 def _do_order(code, name, shares, buy_price, url_request):
-    """発注処理本体（自動・手動共通）。"""
+    """発注処理本体（自動・手動共通）。
+    LIMIT_ORDER=True: 現在値で指値→LIMIT_WAIT_SECS秒後に未約定なら取消して成行。
+    LIMIT_ORDER=False: 成行のみ。
+    """
     mkt_code = db.get_market_code_db(code)
-    result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
-    if result["success"]:
-        print(f"  ✅ {result['message']}")
-        buy_px = int(buy_price or 0)
-        if buy_px > 0:
-            tachibana_order.save_position(code, name, shares, buy_px,
+
+    if LIMIT_ORDER and buy_price:
+        r = tachibana_order.place_buy_limit_with_fallback(
+            url_request, code, shares, buy_price, mkt_code,
+            wait_secs=LIMIT_WAIT_SECS, strategy="A")
+        if r["success"]:
+            print(f"  ✅ {r['message']}")
+            tachibana_order.save_position(code, name, r["filled"], r["fill_price"],
                                           strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
+        else:
+            print(f"  ❌ 発注失敗: {r['message']}")
     else:
-        print(f"  ❌ 発注失敗: {result['message']}")
-        print(f"     APIレスポンス: {result['raw']}")
+        result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
+        if result["success"]:
+            print(f"  ✅ {result['message']}")
+            buy_px = int(buy_price or 0)
+            if buy_px <= 0:
+                # 価格が取れなかった場合でも候補登録価格で保存（0のままだとDBスキップされるため）
+                buy_px = int(result.get("fill_price") or result.get("price") or buy_price or 0)
+            if buy_px > 0:
+                tachibana_order.save_position(code, name, shares, buy_px,
+                                              strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
+            else:
+                print(f"  ⚠️  買値が取得できないためDBへの記録をスキップしました（手動で register_positions.py を実行してください）")
+        else:
+            print(f"  ❌ 発注失敗: {result['message']}")
+            print(f"     APIレスポンス: {result['raw']}")
 
 
 
@@ -606,6 +630,10 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
     ordered   = {c["code"]: False for c in candidates}   # 発注済みフラグ
     results   = {c["code"]: "監視中" for c in candidates}
     condition_refreshed = False  # 9:05 地合い再判定フラグ
+
+    # 案1+3: CMEが正の日は個別株がCMEを超過上昇していないと発注しない
+    # シミュレーション結果: 現状-51.7% → CME超過フィルタ適用で-0.6%(-51.1pt改善)
+    cme_chg = float(market_info.get("nikkei_change") or 0.0)
 
     print(f"\n{'='*60}")
     print(f"【リアルタイム監視】{len(candidates)}銘柄  地合い:{condition}")
@@ -782,13 +810,16 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
 
             # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
             if timing["style"] == "WAIT_CONFIRM":
-                if latest_chg >= threshold:
-                    wait_confirm_ready.append((latest_chg, c, latest_px, threshold))
+                # CMEが正の日は個別株がCMEを超過上昇していないと発注しない（案1+3）
+                eff_thr = max(threshold, cme_chg) if cme_chg > 0 else threshold
+                if latest_chg >= eff_thr:
+                    wait_confirm_ready.append((latest_chg, c, latest_px, eff_thr))
                 elif now_min >= WATCH_START_HOUR * 60 + WATCH_END_MIN - 1:
                     ordered[code] = True
                     results[code] = "見送り(上昇未確認)"
-                    print(f"\n  🔴 {code} {c['name']}: 9:{WATCH_END_MIN:02d}まで前日比+{threshold}%未達"
-                          f"（現在{latest_chg:+.1f}%）→ 見送り")
+                    cme_note = f" ※CME{cme_chg:+.1f}%超過必要" if cme_chg > threshold else ""
+                    print(f"\n  🔴 {code} {c['name']}: 9:{WATCH_END_MIN:02d}まで前日比+{eff_thr:.1f}%未達"
+                          f"（現在{latest_chg:+.1f}%）→ 見送り{cme_note}")
                 continue
 
         # ── パス2: WAIT_CONFIRM → 上昇率が高い順に発注（B案）────────

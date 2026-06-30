@@ -20,7 +20,7 @@ from pathlib import Path
 
 _BASE_DIR            = Path(__file__).parent
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
-TACHIBANA_API_BASE   = "https://kabuka.e-shiten.jp/e_api_v4r8/"
+TACHIBANA_API_BASE   = "https://kabuka.e-shiten.jp/e_api_v4r9/"
 TACHIBANA_USER_ID    = os.getenv("TACHIBANA_LOGIN_ID")
 TACHIBANA_PASSWORD   = os.getenv("TACHIBANA_LOGIN_PASS")
 

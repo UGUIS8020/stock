@@ -62,8 +62,11 @@ DEFAULT_SHARES   = 100
 CHEAP_THRESHOLD  = 1_000
 MAX_ORDER_AMOUNT = 100_000
 
-TP_PCT = 0.019   # +1.9%（GA最適化2026-05-26）
-SL_PCT = 0.056   # -5.6%（GA最適化2026-05-26）
+TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
+SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
+
+LIMIT_ORDER     = False  # 成行発注（指値はsResultCode=11010エラー多発のため 2026-06-25 変更）
+LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
 
 _P_NO_FILE = Path("out/last_p_no.txt")
@@ -363,21 +366,43 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
     print(f"     TP目安: {tp_price:,}円 (+{TP_PCT*100:.1f}%)  SL目安: {sl_price:,}円 (-{SL_PCT*100:.1f}%)")
 
     mkt_code = db.get_market_code_db(code)
-    result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
-    if result["success"]:
-        print(f"  ✅ {result['message']}")
-        tachibana_order.save_position(
-            code, name, shares, price,
-            strategy="B", tp_pct=TP_PCT, sl_pct=SL_PCT,
-            entry_change_pct=candidate.get("change_pct"),
-            rb_score=candidate.get("rb_score"),
-            condition=condition,
-        )
-        ordered_today.add(str(code))
-        return True
+    order_type = "指値" if LIMIT_ORDER else "成行"
+    print(f"     発注方式: {order_type} @ {price:,.0f}円")
+
+    if LIMIT_ORDER:
+        r = tachibana_order.place_buy_limit_with_fallback(
+            url_request, code, shares, price, mkt_code,
+            wait_secs=LIMIT_WAIT_SECS, strategy="B")
+        if r["success"]:
+            print(f"  ✅ {r['message']}")
+            tachibana_order.save_position(
+                code, name, r["filled"], r["fill_price"],
+                strategy="B", tp_pct=TP_PCT, sl_pct=SL_PCT,
+                entry_change_pct=candidate.get("change_pct"),
+                rb_score=candidate.get("rb_score"),
+                condition=condition,
+            )
+            ordered_today.add(str(code))
+            return True
+        else:
+            print(f"  ❌ 発注失敗: {r['message']}")
+            return False
     else:
-        print(f"  ❌ 発注失敗: {result['message']}")
-        return False
+        result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
+        if result["success"]:
+            print(f"  ✅ {result['message']}")
+            tachibana_order.save_position(
+                code, name, shares, price,
+                strategy="B", tp_pct=TP_PCT, sl_pct=SL_PCT,
+                entry_change_pct=candidate.get("change_pct"),
+                rb_score=candidate.get("rb_score"),
+                condition=condition,
+            )
+            ordered_today.add(str(code))
+            return True
+        else:
+            print(f"  ❌ 発注失敗: {result['message']}")
+            return False
 
 
 # ══════════════════════════════════════════════

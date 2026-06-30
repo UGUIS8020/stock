@@ -194,10 +194,10 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
     # ── 総合判定 ──────────────────────────────────────
     # 評価順序: PANIC → STRONG → NORMAL → WEAK → PANIC(残余)
     #
-    # PANIC: 日経先物が実際に急落(-1.0%以下)かつスコアが低い(3以下)
-    #   score=2〜3でも日経が急落していればPANIC相当として先に捕捉する
-    #   nk_chg のデフォルトは 0.0（取得失敗時）なのでデータ欠損時は誤作動しない
-    if score <= 3 and nk_chg <= -1.0:
+    # PANIC: 日経先物が急落(-2.0%以下)かつスコアが極めて低い(2以下)
+    #   closing_watchのPANIC基準(PANIC_NIKKEI=-2.0)に統一（旧:-1.0%は誤判定多発）
+    #   2026-06-24修正: -1.0%&score<=3 → -2.0%&score<=2（実績: 朝PANIC8件中PANIC確認1件のみ）
+    if score <= 2 and nk_chg <= -2.0:
         condition         = "PANIC"
         strategy_a_thr    = 99.0
         stop_loss_pct     = -3.0
@@ -215,7 +215,7 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
         condition         = "WEAK"
         strategy_a_thr    = 8.0
         stop_loss_pct     = -4.0
-    else:  # score <= 1 かつ nk_chg > -1.0（日経は急落していないが全体が弱い）
+    else:  # score <= 1（海外指標がほぼ全滅、日経先物によらずPANIC相当）
         condition         = "PANIC"
         strategy_a_thr    = 99.0
         stop_loss_pct     = -3.0
@@ -552,7 +552,7 @@ def main():
     if condition != "PANIC":
         try:
             subprocess.Popen(
-                [_sys.executable, str(_BASE_DIR / "position_monitor.py")],
+                [_sys.executable, "-u", str(_BASE_DIR / "position_monitor.py")],
                 stdout=open(str(_OUT_DIR / "position_monitor.log"), "w", encoding="utf-8"),
                 stderr=open(str(_OUT_DIR / "position_monitor_err.log"), "w", encoding="utf-8"),
             )

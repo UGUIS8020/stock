@@ -282,12 +282,12 @@ def place_buy_order(url_request, code, shares, price=None, market_code=None):
         }
 
     # 成行: sCondition="0", sOrderPrice="0"
-    # 指値: sCondition="2"（未確認）, sOrderPrice=str(price)
+    # 指値: sCondition="1", sOrderPrice=str(price)
     if price is None:
         condition   = "0"
         order_price = "0"
     else:
-        condition   = "2"
+        condition   = "1"
         order_price = str(int(price))
 
     params = (
@@ -381,7 +381,7 @@ def place_sell_order(url_request, code, shares, price=None, market_code=None,
         condition   = "0"
         order_price = "0"
     else:
-        condition   = "2"
+        condition   = "1"
         order_price = str(int(price))
 
     # 現物="0", 信用返済="2"
@@ -467,3 +467,93 @@ def check_order(url_request, order_no):
     except Exception:
         pass
     return {"status": "不明", "filled": 0, "raw": {}}
+
+
+def cancel_order(url_request, order_no, max_retry=5):
+    """注文取消。p_errno=8（タイムスタンプ競合）は最大 max_retry 回リトライ。
+    戻り値: {"success": bool, "message": str, "raw": dict}"""
+    for attempt in range(max_retry):
+        if attempt > 0:
+            time.sleep(2.0)   # position_monitor(60秒ループ)との競合を回避するため2秒待機
+        params = (
+            "{"
+            f'"p_no":"{_next_p_no()}",'
+            f'"p_sd_date":"{_p_sd_date()}",'
+            '"sCLMID":"CLMKabuCancel",'
+            f'"sOrderNumber":"{order_no}",'
+            f'"sSecondPassword":"{SECOND_PASSWORD}",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        try:
+            result   = _api_get(url_request + "?" + params)
+            p_errno  = result.get("p_errno", "")
+            s_result = result.get("sResultCode", "")
+            if p_errno == "0" and s_result == "0":
+                return {"success": True, "message": f"注文 {order_no} を取消しました", "raw": result}
+            if p_errno == "8" and attempt < max_retry - 1:
+                continue   # タイムスタンプ競合 → リトライ
+            err_msg = result.get("sResultText", "") or result.get("sErrMessage", "")
+            return {"success": False,
+                    "message": f"取消エラー (p_errno={p_errno} sResultCode={s_result}): {err_msg}",
+                    "raw": result}
+        except Exception as e:
+            return {"success": False, "message": f"通信エラー: {e}", "raw": {}}
+
+
+def place_buy_limit_with_fallback(url_request, code, shares, price, market_code,
+                                  wait_secs=30, strategy="?"):
+    """指値買い→未約定時に成行フォールバック。
+    戻り値:
+      {"success": bool, "fill_price": int, "fill_type": "limit"|"market"|"partial",
+       "filled": int, "order_no": str, "message": str}
+    """
+    # ── 指値発注 ──────────────────────────────────────────
+    r = place_buy_order(url_request, code, shares, price=price, market_code=market_code)
+    if not r["success"]:
+        return {"success": False, "fill_price": 0, "fill_type": "none",
+                "filled": 0, "order_no": "", "message": r["message"]}
+
+    order_no = r.get("order_no", "")
+    print(f"     指値発注: 注文番号 {order_no}  {wait_secs}秒後に約定確認...")
+    time.sleep(wait_secs)
+
+    check  = check_order(url_request, order_no)
+    filled = check.get("filled", 0)
+
+    if filled >= shares:
+        return {"success": True, "fill_price": int(price), "fill_type": "limit",
+                "filled": filled, "order_no": order_no,
+                "message": f"指値約定: {shares}株 @ {price:.0f}円"}
+
+    if filled > 0:
+        return {"success": True, "fill_price": int(price), "fill_type": "partial",
+                "filled": filled, "order_no": order_no,
+                "message": f"一部約定: {filled}株 / {shares}株 @ {price:.0f}円"}
+
+    # ── 未約定 → 取消して成行フォールバック ──────────────
+    order_status = check.get("status", "")
+    print(f"     {wait_secs}秒経過しても未約定（sOrderStatus={order_status!r}）→ 取消して成行に切り替え")
+    cancel = cancel_order(url_request, order_no)
+    if not cancel["success"]:
+        # キャンセル失敗時は注文状態を再確認する
+        # 受付エラー・既取消など「非アクティブ」ならそのまま成行発注して問題ない
+        recheck = check_order(url_request, order_no)
+        re_status  = recheck.get("status", "")
+        re_filled  = recheck.get("filled", 0)
+        if re_filled > 0:
+            # 再確認で約定が判明したケース（稀）
+            return {"success": True, "fill_price": int(price), "fill_type": "limit",
+                    "filled": re_filled, "order_no": order_no,
+                    "message": f"遅延約定検出: {re_filled}株 @ {price:.0f}円"}
+        # 受付エラー(4)・取消済み(3)・失効(5)等の終端ステータス、または注文が見つからない場合は
+        # 注文はすでに非アクティブなので手動取消不要・成行フォールバック続行
+        print(f"     取消失敗（再確認ステータス={re_status!r}）→ 注文は非アクティブと判断し成行フォールバック続行")
+
+    r2 = place_buy_order(url_request, code, shares, market_code=market_code)
+    if r2["success"]:
+        return {"success": True, "fill_price": int(price), "fill_type": "market",
+                "filled": shares, "order_no": r2.get("order_no", ""),
+                "message": f"成行発注（フォールバック）: {shares}株"}
+    return {"success": False, "fill_price": 0, "fill_type": "none",
+            "filled": 0, "order_no": "", "message": f"成行発注失敗: {r2['message']}"}

@@ -68,6 +68,8 @@ SL_PCT = 0.05   # -5%（analyze_a TP/SL最適化結果: Sharpe=6.558, WR=68.5%�
 DAYTIME_TRADING       = True      # False にすると監視のみ（発注なし）
 ORDER_AMOUNT          = 300_000   # 1発注あたりの目安金額（30万円）
 MAX_DAYTIME_POSITIONS = 3         # 日中最大ポジション数
+LIMIT_ORDER           = False     # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
+LIMIT_WAIT_SECS       = 30        # 指値約定確認の待機秒数
 
 # ── シグナル条件（analyze_a.py 統計分析結果に基づく）──
 REQUIRE_STRONG  = False  # False=STRONG・NORMAL地合いで発注（WEAKはcan_orderで除外）
@@ -576,24 +578,46 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 print(f"     ⚠️  戦略D上限({max_positions})到達 → 発注スキップ")
                 signaled.add(code)
                 continue
-            shares = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
+            shares   = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
             mkt_code = db.get_market_code_db(code)
-            result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
-            if result["success"]:
-                tachibana_order.save_position(
-                    code, name, shares, sig["price"], "D",
-                    tp_pct=TP_PCT, sl_pct=SL_PCT,
-                    entry_change_pct=sig["change_pct"],
-                )
-                ordered_today.add(code)
-                signaled.add(code)   # 発注成功 → 以降スキップ
-                print(f"     ✅ 買い発注完了: {shares}株  {result['message']}")
+            order_type = "指値" if LIMIT_ORDER else "成行"
+            print(f"     発注方式: {order_type} @ {sig['price']:,.0f}円")
+            if LIMIT_ORDER:
+                r = tachibana_order.place_buy_limit_with_fallback(
+                    url_request, code, shares, sig["price"], mkt_code,
+                    wait_secs=LIMIT_WAIT_SECS, strategy="D")
+                if r["success"]:
+                    tachibana_order.save_position(
+                        code, name, r["filled"], r["fill_price"], "D",
+                        tp_pct=TP_PCT, sl_pct=SL_PCT,
+                        entry_change_pct=sig["change_pct"],
+                    )
+                    ordered_today.add(code)
+                    signaled.add(code)
+                    print(f"     ✅ 買い発注完了: {r['filled']}株  {r['message']}")
+                else:
+                    msg = r["message"]
+                    print(f"     ❌ 発注失敗: {msg}")
+                    if "規制銘柄" in msg:
+                        signaled.add(code)
+                        print(f"     ⛔ 規制銘柄のため以降スキップ")
             else:
-                msg = result["message"]
-                print(f"     ❌ 発注失敗: {msg}")
-                if "規制銘柄" in msg:
-                    signaled.add(code)   # 規制は永続的失敗 → 再試行しない
-                    print(f"     ⛔ 規制銘柄のため以降スキップ")
+                result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
+                if result["success"]:
+                    tachibana_order.save_position(
+                        code, name, shares, sig["price"], "D",
+                        tp_pct=TP_PCT, sl_pct=SL_PCT,
+                        entry_change_pct=sig["change_pct"],
+                    )
+                    ordered_today.add(code)
+                    signaled.add(code)
+                    print(f"     ✅ 買い発注完了: {shares}株  {result['message']}")
+                else:
+                    msg = result["message"]
+                    print(f"     ❌ 発注失敗: {msg}")
+                    if "規制銘柄" in msg:
+                        signaled.add(code)
+                        print(f"     ⛔ 規制銘柄のため以降スキップ")
 
         if not new_signals:
             active = len(codes) - len(signaled)
