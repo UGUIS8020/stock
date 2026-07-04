@@ -10,3 +10,6 @@ boto3
 jpholiday
 anthropic
 feedparser
+numpy==2.4.6
+cryptography==49.0.0
+beautifulsoup4==4.14.3

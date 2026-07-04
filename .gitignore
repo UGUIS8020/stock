@@ -36,6 +36,9 @@ out/backtest_log.csv
 # 立花証券セッション情報（ログインするたびに再生成される）
 tachibana_login_response.json
 
+# 立花証券 APIキー・秘密鍵（git管理禁止）
+tatibana_key/
+
 # Claude Code ローカル設定
 .claude/
 
