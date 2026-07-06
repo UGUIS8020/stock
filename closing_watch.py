@@ -56,11 +56,11 @@ DROP_HI      = -3.1   # 下落上限（GA最適化2026-05-26 20000人・OOS Shar
 RB_MIN       = 4      # RBスコア最小値（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
 CD_MIN       = 3      # 連続下落日数最小値（cd≥3: 前々日も下落していること）
 MIN_VOLUME          = 50_000
-MAX_POSITIONS_PER_DAY = 3      # 1日の最大自動発注件数（安全装置）
+MAX_POSITIONS_PER_DAY = 5      # 1日の最大自動発注件数（安全装置）
 
-DEFAULT_SHARES   = 100
+DEFAULT_SHARES   = 300
 CHEAP_THRESHOLD  = 1_000
-MAX_ORDER_AMOUNT = 100_000
+MAX_ORDER_AMOUNT = 300_000
 
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
 SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）

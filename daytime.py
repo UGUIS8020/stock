@@ -66,8 +66,11 @@ SL_PCT = 0.05   # -5%（analyze_a TP/SL最適化結果: Sharpe=6.558, WR=68.5%�
 
 # ── 発注設定 ──────────────────────────────────────
 DAYTIME_TRADING       = True      # False にすると監視のみ（発注なし）
-ORDER_AMOUNT          = 300_000   # 1発注あたりの目安金額（30万円）
-MAX_DAYTIME_POSITIONS = 3         # 日中最大ポジション数
+MAX_ORDER_AMOUNT      = 300_000   # 安い株の1発注上限額（30万円）
+DEFAULT_SHARES        = 300       # 高値株のデフォルト株数
+CHEAP_THRESHOLD       = 1_000     # この価格未満は金額ベースで株数計算
+MAX_DAYTIME_POSITIONS = 10        # 日中最大ポジション数（戦略A とは別カウント）
+MIN_VOLUME            = 50_000    # 前日出来高フィルター（5万株未満は除外）
 LIMIT_ORDER           = False     # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
 LIMIT_WAIT_SECS       = 30        # 指値約定確認の待機秒数
 
@@ -390,6 +393,11 @@ def check_signal(code, quote, prev_ohlcv, first_prices, score=None,
     if ma25_dev is not None and ma25_dev > MA25_DEV_MAX:
         return None
 
+    # フィルター5: 前日出来高（小型株による市場インパクト回避）
+    vol = prev.get("volume")
+    if vol is not None and vol < MIN_VOLUME:
+        return None
+
     # シグナルトリガー: 前日終値比でモメンタム確認
     if change_pct < MOMENTUM_PCT:
         return None
@@ -578,7 +586,10 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 print(f"     ⚠️  戦略D上限({max_positions})到達 → 発注スキップ")
                 signaled.add(code)
                 continue
-            shares   = max(100, int(ORDER_AMOUNT // sig["price"] // 100) * 100)
+            if sig["price"] < CHEAP_THRESHOLD:
+                shares = max(100, int(MAX_ORDER_AMOUNT / sig["price"] / 100) * 100)
+            else:
+                shares = DEFAULT_SHARES
             mkt_code = db.get_market_code_db(code)
             order_type = "指値" if LIMIT_ORDER else "成行"
             print(f"     発注方式: {order_type} @ {sig['price']:,.0f}円")

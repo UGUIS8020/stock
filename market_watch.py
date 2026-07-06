@@ -44,7 +44,8 @@ TODAY              = datetime.now(JST).strftime("%Y-%m-%d")
 POLL_INTERVAL_SEC  = 15    # 価格取得間隔（秒）
 WATCH_START_HOUR   = 9     # 監視開始時刻
 WATCH_START_MIN    = 0
-AI_JUDGE_MIN       = 4     # 発注判断開始（9:04）
+AI_JUDGE_MIN       = 5     # 銘柄エントリー判断のデフォルト開始時刻（9:05）
+CONDITION_REFRESH_MIN = 3  # 地合い再判定タイミング（9:03）: 寄り付き初動が落ち着いた直後
 WATCH_END_MIN      = 30    # 監視終了（9:30）
 
 # TP/SL設定
@@ -61,9 +62,9 @@ MAX_WATCH_A = 10   # 戦略A: scoreで降順
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
 LIMIT_ORDER      = False    # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
 LIMIT_WAIT_SECS  = 30       # 指値約定確認の待機秒数
-DEFAULT_SHARES   = 100      # 高値株のデフォルト株数
+DEFAULT_SHARES   = 300      # 高値株のデフォルト株数
 CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
-MAX_ORDER_AMOUNT = 100_000  # 安い株の1発注上限額
+MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額
 
 
 def calc_shares(price):
@@ -116,47 +117,54 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
     if condition == "WEAK" and judgment == "CAUTION":
         return {
             "style":                 "WAIT_CONFIRM",
-            "ai_trigger_min":        5,
             "confirm_threshold_pct": 0.0,
             "description":           "WEAK日CAUTION → 9:05以降 成行買い（avg+0.97%・N=44）",
         }
 
     if condition == "WEAK":
-        # WEAK日BUY: 寄り付き成行（8:55までに注文）
+        # WEAK日BUY: 寄り付き成行（9:03に発注）
         # 【根拠】上昇継続50%・反落0件・終日下落0件（12件）
         # ※ 要再評価: 2026-04-25頃（WEAK日サンプル30件超になったら）
         return {
             "style":                 "OPEN_MARKET",
-            "ai_trigger_min":        3,
+            "ai_trigger_min":        3,   # 9:03 = 寄り付き直後に成行
             "confirm_threshold_pct": 0.0,
             "description":           "WEAK日BUY → 寄り付き成行推奨（上昇継続率50%・反落ゼロ）",
         }
 
     if condition in ("NORMAL", "STRONG"):
+        # 上昇率上限: 出尽くし除外（check_surge.py 2026-07-06分析）
+        # NORMAL: 3%超で勝率14%・avg-3.47% → 除外  STRONG: 5%超のみ除外（3〜5%は+1.38%）
+        surge_limit = 3.0 if condition == "NORMAL" else 5.0
+
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
-            # NORMAL日CAUTIONは0.5%上昇確認（1.0%は高すぎて未達が続いたため引き下げ）
+            #   → 9:03（地合い再判定と同タイミング / analyze_entry_timing: STRONG×9:03 avg+1.41%）
+            # NORMAL日CAUTIONは0.5%上昇確認
+            #   → 9:07（analyze_entry_timing: NORMAL×9:07が最良 avg+0.43%）
             threshold = 0.3 if condition == "STRONG" else 0.5
+            trigger   = CONDITION_REFRESH_MIN if condition == "STRONG" else 7
             return {
                 "style":                 "WAIT_CONFIRM",
-                "ai_trigger_min":        5,
+                "ai_trigger_min":        trigger,
                 "confirm_threshold_pct": threshold,
-                "description":           f"{condition}日CAUTION → 9:05以降 前日比+{threshold}%以上を確認後エントリー",
+                "surge_limit_pct":       surge_limit,
+                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比+{threshold}%〜+{surge_limit:.0f}%でエントリー",
             }
         else:
             # NORMAL日BUY → 前日比0.0%以上（プラスかフラット）でエントリー
-            # CAUTIONより低い閾値でBUY判定の優位性を活かす（OOS勝率65.6%）
+            # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43% vs 9:05 avg+0.12%）
             return {
                 "style":                 "WAIT_CONFIRM",
-                "ai_trigger_min":        5,
+                "ai_trigger_min":        7,
                 "confirm_threshold_pct": 0.0,
-                "description":           f"{condition}日BUY → 9:05以降 前日比0.0%以上を確認後エントリー（OOS勝率65.6%）",
+                "surge_limit_pct":       surge_limit,
+                "description":           f"NORMAL日BUY → 9:07以降 前日比0.0%〜+{surge_limit:.0f}%でエントリー（OOS勝率65.6%）",
             }
 
     # UNKNOWN など
     return {
         "style":                 "WAIT_CONFIRM",
-        "ai_trigger_min":        5,
         "confirm_threshold_pct": 0.5,
         "description":           "地合い不明 → 9:05以降 上昇確認後エントリー",
     }
@@ -236,17 +244,18 @@ def _get_nikkei_prev_close():
 
 
 def _refresh_condition_905(current_condition, market_info, url_price):
-    """9:05に日経実値でLayer3スコアを再計算し、地合いが変われば新しい地合い文字列を返す。
+    """9:03に日経実値でLayer3スコアを再計算し、地合いが変われば新しい地合い文字列を返す。
     変化なし or 取得失敗時は None を返す。
     """
+    t_label = f"9:{CONDITION_REFRESH_MIN:02d}"
     actual_nk = _fetch_nikkei_905(url_price)
     if actual_nk is None:
-        print("  ⚠️  9:05 日経取得失敗 → 地合い再判定スキップ")
+        print(f"  ⚠️  {t_label} 日経取得失敗 → 地合い再判定スキップ")
         return None
 
     prev_close = _get_nikkei_prev_close()
     if prev_close is None:
-        print("  ⚠️  9:05 日経前日終値取得失敗 → 地合い再判定スキップ")
+        print(f"  ⚠️  {t_label} 日経前日終値取得失敗 → 地合い再判定スキップ")
         return None
 
     actual_nk_chg = (actual_nk - prev_close) / prev_close * 100
@@ -263,7 +272,7 @@ def _refresh_condition_905(current_condition, market_info, url_price):
     old_pts = _l3(saved_nk_chg)
     new_pts = _l3(actual_nk_chg)
 
-    print(f"\n  📊 9:05 日経実値: {actual_nk:,.0f}円  前日比{actual_nk_chg:+.2f}%"
+    print(f"\n  📊 {t_label} 日経実値: {actual_nk:,.0f}円  前日比{actual_nk_chg:+.2f}%"
           f"  (朝スキャン時: {saved_nk_chg:+.2f}%  Layer3: {old_pts}pt)")
 
     if old_pts == new_pts:
@@ -651,16 +660,16 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
 
-        market_start  = WATCH_START_HOUR * 60 + WATCH_START_MIN
-        order_start   = WATCH_START_HOUR * 60 + AI_JUDGE_MIN
-        watch_end     = WATCH_START_HOUR * 60 + WATCH_END_MIN
+        market_start    = WATCH_START_HOUR * 60 + WATCH_START_MIN
+        refresh_start   = WATCH_START_HOUR * 60 + CONDITION_REFRESH_MIN
+        watch_end       = WATCH_START_HOUR * 60 + WATCH_END_MIN
 
-        # 9:05 地合い再判定（初回のみ）
-        if not condition_refreshed and now_min >= order_start:
+        # 9:01 地合い再判定（初回のみ）: 全エントリー最早(WEAK BUY 9:03)より前に実施
+        if not condition_refreshed and now_min >= refresh_start:
             condition_refreshed = True
             new_cond = _refresh_condition_905(condition, market_info, url_price)
             if new_cond:
-                print(f"\n  🔄 9:05 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
+                print(f"\n  🔄 9:01 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
                 condition = new_cond
                 timings = {c["code"]: decide_timing(condition, c["judgment"], "", c.get("strategy", "A"))
                            for c in candidates if not ordered[c["code"]]}
@@ -810,6 +819,17 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
 
             # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
             if timing["style"] == "WAIT_CONFIRM":
+                surge_limit = timing.get("surge_limit_pct")
+
+                # 上昇率上限チェック: 出尽くし除外（NORMAL≥3% / STRONG≥5%）
+                if surge_limit is not None and latest_chg >= surge_limit:
+                    if not ordered[code]:
+                        ordered[code] = True
+                        results[code] = "見送り(出尽くし)"
+                        print(f"\n  ⛔ {code} {c['name']}: 前日比{latest_chg:+.1f}% ≥ 上限{surge_limit:.0f}%"
+                              f" → 出尽くし見送り")
+                    continue
+
                 # CMEが正の日は個別株がCMEを超過上昇していないと発注しない（案1+3）
                 eff_thr = max(threshold, cme_chg) if cme_chg > 0 else threshold
                 if latest_chg >= eff_thr:

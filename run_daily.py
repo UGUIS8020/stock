@@ -76,12 +76,16 @@ def main():
     if rc != 0:
         print("⚠️  DBダウンロード失敗。ローカルDBで続行します。")
 
-    # ── Step 2: ログイン ───────────────────────────────────
-    rc = run_step("【Step 2/4】Tachibana ログイン（sAuthId認証）",
-                  [py, "tachibana_login.py"], cwd)
-    if rc != 0:
+    # ── Step 2: ログイン（scan_morning自動起動なし）─────────
+    print(f"\n{'='*60}")
+    print(f"  【Step 2/4】Tachibana ログイン（sAuthId認証）")
+    print(f"{'='*60}\n")
+    sys.path.insert(0, cwd)
+    from tachibana_login import do_login
+    if not do_login():
         print("❌ ログイン失敗。中断します。")
         return
+    print("✅ ログイン完了")
 
     # ── Step 3: 前営業日データ取得 ────────────────────────
     # scan_morning.py が今日のスコアリングに使う前日データを補完する。
