@@ -834,12 +834,6 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 eff_thr = max(threshold, cme_chg) if cme_chg > 0 else threshold
                 if latest_chg >= eff_thr:
                     wait_confirm_ready.append((latest_chg, c, latest_px, eff_thr))
-                elif now_min >= WATCH_START_HOUR * 60 + WATCH_END_MIN - 1:
-                    ordered[code] = True
-                    results[code] = "見送り(上昇未確認)"
-                    cme_note = f" ※CME{cme_chg:+.1f}%超過必要" if cme_chg > threshold else ""
-                    print(f"\n  🔴 {code} {c['name']}: 9:{WATCH_END_MIN:02d}まで前日比+{eff_thr:.1f}%未達"
-                          f"（現在{latest_chg:+.1f}%）→ 見送り{cme_note}")
                 continue
 
         # ── パス2: WAIT_CONFIRM → 上昇率が高い順に発注（B案）────────
@@ -863,6 +857,23 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             confirm_and_order(c, latest_px, url_request)
 
         time.sleep(POLL_INTERVAL_SEC)
+
+    # ループ終了後: 未発注のWAIT_CONFIRM銘柄をまとめて見送り処理
+    for c in candidates:
+        code = c["code"]
+        if ordered[code]:
+            continue
+        timing  = timings[code]
+        if timing["style"] != "WAIT_CONFIRM":
+            continue
+        hist        = histories.get(code, [])
+        latest_chg  = hist[-1]["change_pct"] if hist else 0
+        eff_thr     = timing.get("confirm_threshold_pct", 0.0)
+        cme_note    = f" ※CME{cme_chg:+.1f}%超過必要" if cme_chg > eff_thr else ""
+        ordered[code] = True
+        results[code]  = "見送り(上昇未確認)"
+        print(f"\n  🔴 {code} {c['name']}: 9:{WATCH_END_MIN:02d}まで前日比+{eff_thr:.1f}%未達"
+              f"（現在{latest_chg:+.1f}%）→ 見送り{cme_note}")
 
     # 観察データ保存 → 最終サマリー表示
     _save_observe_log(candidates, timings, histories)
