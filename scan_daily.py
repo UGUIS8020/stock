@@ -38,8 +38,10 @@ MARKET_LOG_CSV   = str(_BASE_DIR / "out" / "market_log.csv")
 STRATEGY_C_CSV   = str(_BASE_DIR / "out" / "strategy_c_log.csv")
 BACKTEST_LOG_CSV    = str(_BASE_DIR / "out" / "backtest_log.csv")
 CANDIDATES_LOG_CSV  = str(_BASE_DIR / "out" / "candidates_log.csv")
+BANK_RESULTS_CSV    = str(_BASE_DIR / "out" / "bank_results.csv")
 TOP_N            = 30
 SCORE_MIN_A      = 3.0
+MIN_PRICE        = 100
 MIN_VOLUME       = 50_000
 MIN_TURNOVER     = 50_000_000
 
@@ -695,10 +697,29 @@ def main():
     # ratio >= 5.0 は翌朝 judge_entry_a_strong でPASS（勝率45%）のため先に除外
     # これにより翌朝の候補がSTRONG翌日でも有効な銘柄で埋まる
     RATIO_LIMIT_A = 5.0
+    bank_mask = df_a["name"].str.contains("銀行|フィナンシャルグループ", na=False, regex=True)
+    if bank_mask.sum() > 0:
+        print(f"  🏦 銀行系除外: {bank_mask.sum()}件 {df_a[bank_mask]['name'].tolist()}")
+    low_price_mask = df_a["close"] < MIN_PRICE
+    if low_price_mask.sum() > 0:
+        print(f"  💴 低位株除外: {low_price_mask.sum()}件 {df_a[low_price_mask]['name'].tolist()}")
     top_a = df_a[
         (df_a["score"] >= SCORE_MIN_A) &
-        (df_a["ratio"] < RATIO_LIMIT_A)
+        (df_a["ratio"] < RATIO_LIMIT_A) &
+        (~bank_mask) &
+        (~low_price_mask)
     ].head(TOP_N)
+
+    # 戦略F: 銀行候補を別ファイルに保存（翌朝WEAK地合い時に market_watch.py が活用）
+    bank_f = df_a[
+        bank_mask &
+        (df_a["score"] >= SCORE_MIN_A) &
+        (df_a["ratio"] < RATIO_LIMIT_A) &
+        (~low_price_mask)
+    ].copy()
+    bank_f.to_csv(BANK_RESULTS_CSV, index=False, encoding="utf-8-sig")
+    if len(bank_f) > 0:
+        print(f"  🏦 戦略F候補: {len(bank_f)}件保存 → {', '.join(bank_f['name'].tolist())}")
 
     def get_rank(row):
         s = row["score"]

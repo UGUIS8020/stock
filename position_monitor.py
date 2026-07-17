@@ -27,19 +27,6 @@ GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
 FORCE_CLOSE_MIN    = 15 * 60 + 20  # 15:20 前日ポジションを引け成行で強制決済
                                    # ※15:25は東証がオークションモードに切り替わり成行注文不可(11481エラー)
 
-# p_noはsUrlPriceとsUrlRequestで共有シーケンス → last_p_no.txtを使う
-from pathlib import Path as _Path
-_PM_P_NO_FILE = _Path(__file__).parent / "out" / "last_p_no.txt"
-
-def _pm_next_p_no():
-    """daytime.py と共通の last_p_no.txt から p_no を取得する。"""
-    try:
-        n = int(_PM_P_NO_FILE.read_text().strip()) + 1
-    except Exception:
-        n = int(time.time())
-    _PM_P_NO_FILE.write_text(str(n))
-    return str(n)
-
 
 def load_positions():
     db.init_db()
@@ -78,7 +65,7 @@ def fetch_prices(url_price, codes):
                  f".{t.microsecond // 1000:03}")
         params = (
             "{"
-            f'"p_no":"{_pm_next_p_no()}",'
+            f'"p_no":"{tachibana_order._next_p_no()}",'
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(chunk)}",'
@@ -137,7 +124,7 @@ def fetch_api_holdings(url_request):
                 f".{t.microsecond // 1000:03}")
         params = (
             "{"
-            f'"p_no":"{_pm_next_p_no()}",'
+            f'"p_no":"{tachibana_order._next_p_no()}",'
             f'"p_sd_date":"{p_sd}",'
             f'"sCLMID":"{clm_id}",'
             '"sJsonOfmt":"5"'
@@ -239,19 +226,21 @@ def main():
     TODAY       = datetime.now(JST).strftime("%Y-%m-%d")
     gap_checked  = set()   # 当日ギャップチェック済みのcode
     force_closed = False   # 15:25 引け決済実施フラグ
+    ROUTINE_LOG_INTERVAL   = 300   # 通常ステータス（価格・TP/SL・価格取得失敗）は5分に1回だけ出力（ノイズ削減）
+    last_routine_print     = {}    # code -> 直近出力時刻（監視自体は15秒間隔のまま変更なし）
+    last_no_position_print = None  # 「ポジションなし」待機メッセージの直近出力時刻
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
 
         # ── 15:20: 2泊以上経過したポジションを引け成行で強制決済 ──
         # 戦略B最適化(2026-06-23): 2泊保有のため「前日」→「前々日以前」に変更
-        # 当日買い・前日買いは継続保有、前々日以前のみ強制決済
+        # 前日以前に買ったポジションを15:20に強制決済
         if not force_closed and now_min >= FORCE_CLOSE_MIN:
             force_closed = True
-            YESTERDAY = (datetime.now(JST) - timedelta(days=1)).strftime("%Y-%m-%d")
-            prev_positions = [p for p in load_positions() if p["date"] < YESTERDAY]
+            prev_positions = [p for p in load_positions() if p["date"] < TODAY]
             if prev_positions:
-                print(f"\n  ⏰ 15:20 引け決済開始（2泊以上ポジション {len(prev_positions)}件）")
+                print(f"\n  ⏰ 15:20 引け決済開始（前日以前ポジション {len(prev_positions)}件）")
                 updated = []
                 for pos in prev_positions:
                     code  = pos["code"]
@@ -274,6 +263,9 @@ def main():
                         print(f"  ✅ {result['message']}  損益: {chg:+.2f}%（引け決済）")
                     else:
                         print(f"  ❌ 引け決済失敗: {result['message']}")
+                        if "11482" in result["message"]:
+                            db.add_restriction(code, "11482")
+                            print(f"  🚫 {code} {name}: 日計取引制限（11482）→ ブラックリスト登録（30日間）")
                     updated.append(pos)
                 save_all_positions(updated)
 
@@ -288,7 +280,9 @@ def main():
                 print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし・発注締め切り済み → 終了")
                 break
             # それ以前はclosing_watchが買う可能性があるため待機継続
-            print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし → 60秒待機（closing_watch発注待ち）")
+            if last_no_position_print is None or (now - last_no_position_print).total_seconds() >= ROUTINE_LOG_INTERVAL:
+                last_no_position_print = now
+                print(f"  [{now.strftime('%H:%M:%S')}] ポジションなし → 60秒待機（closing_watch発注待ち）")
             time.sleep(60)
             continue
 
@@ -306,7 +300,10 @@ def main():
             data    = prices_data.get(code)
 
             if data is None:
-                print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: 価格取得できず")
+                last_t = last_routine_print.get(code)
+                if last_t is None or (now - last_t).total_seconds() >= ROUTINE_LOG_INTERVAL:
+                    last_routine_print[code] = now
+                    print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: 価格取得できず")
                 continue
 
             current = data["price"]
@@ -363,11 +360,17 @@ def main():
                     print(f"  {emoji} {result['message']}  損益: {chg:+.2f}%")
                 else:
                     print(f"  ❌ 売り失敗: {result['message']}")
+                    if "11482" in result["message"]:
+                        db.add_restriction(code, "11482")
+                        print(f"  🚫 {code} {name}: 日計取引制限（11482）→ ブラックリスト登録（30日間）")
             else:
-                bar = "▲" if chg >= 0 else "▼"
-                print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: "
-                      f"{current}円 {bar}{abs(chg):.2f}%  "
-                      f"TP:{tp_px:.0f} SL:{sl_px:.0f}")
+                last_t = last_routine_print.get(code)
+                if last_t is None or (now - last_t).total_seconds() >= ROUTINE_LOG_INTERVAL:
+                    last_routine_print[code] = now
+                    bar = "▲" if chg >= 0 else "▼"
+                    print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: "
+                          f"{current}円 {bar}{abs(chg):.2f}%  "
+                          f"TP:{tp_px:.0f} SL:{sl_px:.0f}")
 
         if changed:
             save_all_positions(positions)
@@ -376,6 +379,20 @@ def main():
         time.sleep(min(POLL_INTERVAL, max(1, remaining_sec)))
 
     print(f"  📊 position_monitor 終了: {datetime.now(JST).strftime('%H:%M:%S')}")
+
+    # ── S3にDBを即時バックアップ ──
+    # 16:45のscan_daily.py自動実行はJ-Quantsの当日データ配信待ちのためのタイミングで、
+    # バックアップとは無関係。run_daily.pyのターミナルが16:45より前に閉じられると
+    # 本日分の建玉データが一度もS3に上がらず、翌朝のdownload_db.pyで消えてしまうため、
+    # position_monitor終了（ほぼ確実に完走する15:28前後）の直後にも独立してバックアップする。
+    try:
+        import boto3 as _boto3
+        _s3 = _boto3.client("s3")
+        _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+        _s3.upload_file(_db_path, "shibuya8020", "stock-db/stock.db")
+        print(f"  ☁️  S3バックアップ完了（引け後・建玉データ保護）")
+    except Exception as e:
+        print(f"  ⚠️  S3バックアップ失敗（16:45の自動アップロードに期待）: {e}")
 
     # 16:30まで待機してyfinanceで当日シグナルを検証
     now = datetime.now(JST)

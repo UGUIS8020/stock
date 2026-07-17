@@ -9,7 +9,7 @@ daytime.py - 日中シグナル検知（9:00〜14:30）
       → 全期間でマイナス、GAで安定戦略ゼロ件
 
   新: 以下の5条件をすべて満たすときのみ発報（check_signal）
-    1. STRONG地合い（market_log で当日判定）
+    1. STRONG/NORMAL地合い（REQUIRE_STRONG=False: 両地合いで発注）
     2. 寄り付きギャップ -5〜+2%（急落・急騰は除外）
     3. 前日終値プラス（前日も上昇していた銘柄）
     4. MA過熱圏でない（5日MA+3%超 or 25日MA+6%超 は除外）
@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 load_dotenv()
 import db
 import tachibana_order
+import closing_watch
 
 JST      = timezone(timedelta(hours=9))
 TODAY    = datetime.now(JST).strftime("%Y-%m-%d")
@@ -78,7 +79,7 @@ LIMIT_WAIT_SECS       = 30        # 指値約定確認の待機秒数
 REQUIRE_STRONG  = False  # False=STRONG・NORMAL地合いで発注（WEAKはcan_orderで除外）
 GAP_MAX_PCT     = 2.0    # 寄り付きギャップ上限（+2%超のギャップアップは除外）
 GAP_MIN_PCT     = -5.0   # 寄り付きギャップ下限（-5%超の急落も除外）
-PREV_RISE_MIN   = 0.0    # 前日騰落率の下限（前日プラスの銘柄のみ対象）
+PREV_RISE_MIN   = -0.5   # 前日騰落率の下限（OOS検証: -0.5〜0%帯も avg+0.139% wr55.3% と同品質・2026-07-12）
 MOMENTUM_PCT    = 0.3    # 前日比がこれ以上で「上昇中」と判定（発報トリガー）
 
 # ── MA乖離率フィルタ（analyze_a.py Section 11: 過熱圏を除外）──
@@ -181,6 +182,14 @@ def load_candidates():
 
     if df.empty:
         return []
+
+    restricted = db.get_restricted_codes(days=30)
+    if restricted:
+        before = len(df)
+        df = df[~df["code"].astype(str).isin(restricted)]
+        excluded = before - len(df)
+        if excluded > 0:
+            print(f"  🚫 日計取引制限銘柄を除外: {excluded}件 {restricted & set(df['code'].astype(str).tolist()) or restricted}")
 
     print(f"  候補銘柄: {len(df)}件（スキャン日: {latest_date}）")
     return df.to_dict("records")
@@ -447,6 +456,8 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     alerted       = set()    # シグナル表示済み（重複表示防止のみ）
     ordered_today = set(db.get_today_ordered_codes(TODAY))
     signal_count  = 0
+    ROUTINE_LOG_INTERVAL = 300   # 「監視中」の定型メッセージは5分に1回だけ出力（ノイズ削減）
+    last_routine_print   = None
 
     # 曜日別パラメータ上書き（月曜は構造的に弱いため制限付き発注）
     is_monday     = (datetime.now(JST).weekday() == 0)
@@ -498,7 +509,12 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
         print(f"  → {got}/{len(codes)}銘柄の始値gap取得完了"
               f"  (残{len(codes) - got}銘柄は初回観測値で代用)\n")
 
-    watch_end_min = WATCH_END_HOUR * 60 + WATCH_END_MIN
+    watch_end_min   = WATCH_END_HOUR * 60 + WATCH_END_MIN
+    start_min       = WATCH_START_HOUR * 60 + WATCH_START_MIN
+    NOON_RESCAN_MIN = 13 * 60   # 後場再開(12:30)から30分経過した13:00に実測地合いを取り直す
+                                # ※12:00は前場引け(11:30)〜後場再開(12:30)の昼休み中で値が動かないため不適
+    opening_rescanned = False  # 監視開始(9:30)時点の実測補正フラグ
+    noon_rescanned     = False
 
     while True:
         now     = datetime.now(JST)
@@ -509,12 +525,49 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             print(f"\n  ⏰ {WATCH_END_HOUR}:{WATCH_END_MIN:02d} 到達 → 監視終了")
             break
 
-        start_min = WATCH_START_HOUR * 60 + WATCH_START_MIN
+        # 市場開始前は待機（このプロセス自体は9:00頃から起動しているため、
+        # 実測補正スキャンも9:30に到達するまではここで待つ）
         if not start_now and now_min < start_min:
             wait = (start_min - now_min) * 60 - now.second
-            print(f"  開始まで {wait//60}分{wait%60}秒待機中... ({now_str})", end="\r")
-            time.sleep(10)
+            print(f"  開始まで {wait//60}分{wait%60}秒待機中... ({now_str})")
+            time.sleep(30)
             continue
+
+        # 監視開始(9:30)時点の地合い再チェック（朝予測は前夜の海外指標のみのため外れることがある）
+        if not opening_rescanned and url_price:
+            opening_rescanned = True
+            try:
+                print(f"\n  [{now_str}] 🔔 開始時点の地合い再チェック中（全銘柄スキャン）...")
+                ad_ratio, nikkei_change, scanned_cond, _ = closing_watch.scan_dropping_stocks(url_price)
+                if scanned_cond != condition:
+                    print(f"  ⚠️  地合い変化: {condition}（朝予測）→ {scanned_cond}（実測 AD{ad_ratio:.2f}）")
+                    condition       = scanned_cond
+                    gap_max         = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
+                    mon_normal_skip = is_monday and condition == "NORMAL"
+                    print(f"  地合い（開始時補正後）: {condition}  "
+                          f"（{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
+                else:
+                    print(f"  地合い変化なし: {condition}（AD{ad_ratio:.2f}）")
+            except Exception as e:
+                print(f"  ⚠️  開始時点の地合い再チェックに失敗（現在の判定のまま継続）: {e}")
+
+        # 昼(13:00)の地合い再チェック（朝9:30の1回だけだと午後の反転を拾えないため）
+        if not noon_rescanned and now_min >= NOON_RESCAN_MIN and url_price:
+            noon_rescanned = True
+            try:
+                print(f"\n  [{now_str}] 🕐 後場の地合い再チェック中（全銘柄スキャン）...")
+                ad_ratio, nikkei_change, scanned_cond, _ = closing_watch.scan_dropping_stocks(url_price)
+                if scanned_cond != condition:
+                    print(f"  ⚠️  地合い変化: {condition}（直前）→ {scanned_cond}（昼実測 AD{ad_ratio:.2f}）")
+                    condition       = scanned_cond
+                    gap_max         = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
+                    mon_normal_skip = is_monday and condition == "NORMAL"
+                    print(f"  地合い（昼補正後）: {condition}  "
+                          f"（{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
+                else:
+                    print(f"  地合い変化なし: {condition}（AD{ad_ratio:.2f}）")
+            except Exception as e:
+                print(f"  ⚠️  昼の地合い再チェックに失敗（現在の判定のまま継続）: {e}")
 
         quotes = fetch_prices(url_price, codes) if url_price else {}
 
@@ -631,8 +684,10 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                         print(f"     ⛔ 規制銘柄のため以降スキップ")
 
         if not new_signals:
-            active = len(codes) - len(signaled)
-            print(f"  [{now_str}] 監視中: {active}銘柄  発報済み: {len(alerted)}件", end="\r")
+            if last_routine_print is None or (now - last_routine_print).total_seconds() >= ROUTINE_LOG_INTERVAL:
+                last_routine_print = now
+                active = len(codes) - len(signaled)
+                print(f"  [{now_str}] 監視中: {active}銘柄  発報済み: {len(alerted)}件")
 
         time.sleep(POLL_INTERVAL)
 
@@ -666,7 +721,14 @@ def main(start_now=False):
         return
 
     # 地合い取得（market_log → morning_log の順で検索）
+    # ※ market_logは前営業日16:45のscan_daily.pyでしか書かれないため、
+    #   実質ここで得られるのは前夜の海外指標のみで作った「朝予測」であり、
+    #   寄り付き後の実際の値動きは反映されていない（2026-07-14: WEAK予測→実際はSTRONGで機会損失）。
+    # ※ このプロセス自体はscan_morning.pyがmarket_watch.pyと並行して9:00頃に起動するため、
+    #   ここで実測補正すると9:00直後（ノイズが大きい・market_watch.pyとAPI負荷が競合）に
+    #   実行されてしまう。実測補正は watch_loop() 側で9:30到達を待ってから行う。
     condition = db.get_today_condition_db(TODAY)
+    print(f"\n  地合い（朝予測）: {condition}")
 
     if condition == "UNKNOWN":
         print(f"  ⚠️  本日の地合いが取得できません（scan_morning.py を先に実行してください）")

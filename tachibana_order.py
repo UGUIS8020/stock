@@ -36,6 +36,7 @@ LIVE_TRADING = True
 MAX_ORDER_AMOUNT = 500_000   # 50万円
 
 _P_NO_FILE = Path(__file__).parent / "out" / "last_p_no.txt"
+_P_NO_LOCK = _P_NO_FILE.with_suffix(".lock")
 
 
 def _init_p_no():
@@ -50,17 +51,66 @@ def _init_p_no():
 _p_no = _init_p_no()
 
 
-def _next_p_no():
-    global _p_no
+def _acquire_p_no_lock(timeout=2.0, stale_after=5.0):
+    """out/last_p_no.txt.lock の排他生成でプロセス間ロックを取る。
+    market_watch/closing_watch/daytime/position_monitorが同時にp_noを
+    払い出すとTachibana APIがp_no競合(p_errno=6)で弾くため、
+    読み込み→+1→書き込みをアトミックにする。
+    """
+    start = time.time()
+    while True:
+        try:
+            fd = os.open(str(_P_NO_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except (FileExistsError, PermissionError):
+            # PermissionError: Windowsでは削除直後の再作成が一時的に拒否されることがある
+            try:
+                age = time.time() - _P_NO_LOCK.stat().st_mtime
+                if age > stale_after:
+                    # 異常終了したプロセスの残留ロックとみなして解除
+                    _P_NO_LOCK.unlink()
+                    continue
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                pass
+            if time.time() - start > timeout:
+                return False
+            time.sleep(0.02)
+
+
+def _release_p_no_lock():
     try:
-        saved = int(_P_NO_FILE.read_text().strip())
-        _p_no = max(_p_no, saved) + 1
-    except Exception:
-        _p_no += 1
-    try:
-        _P_NO_FILE.write_text(str(_p_no))
-    except Exception:
+        _P_NO_LOCK.unlink()
+    except FileNotFoundError:
         pass
+
+
+def _next_p_no():
+    """複数プロセスから同時に呼ばれてもp_noが重複しないよう、
+    ファイルロックで排他制御してから読み込み→+1→書き込みする。
+    ロックが取れない異常時は、共有カウンタに頼らずミリ秒時刻ベースの
+    値にフォールバックし、重複よりも安全側に倒す。
+    """
+    global _p_no
+    got_lock = _acquire_p_no_lock(timeout=5.0)
+    try:
+        if got_lock:
+            try:
+                saved = int(_P_NO_FILE.read_text().strip())
+                _p_no = max(_p_no, saved) + 1
+            except Exception:
+                _p_no += 1
+            try:
+                _P_NO_FILE.write_text(str(_p_no))
+            except Exception:
+                pass
+        else:
+            _p_no = max(_p_no + 1, int(time.time() * 1000))
+    finally:
+        if got_lock:
+            _release_p_no_lock()
     return str(_p_no)
 
 

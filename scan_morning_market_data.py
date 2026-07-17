@@ -30,6 +30,7 @@ USD_JPY_TICKER = "USDJPY=X"
 COPPER_TICKER = "HG=F"
 CRUDE_TICKER  = "CL=F"
 SEMI_TICKER   = "SOXX"
+RATE_TICKER   = "^TNX"   # 米10年債利回り（銀行株の代表的な連動先）
 
 # ── 日経先物 ───────────────────────────────────────
 NIKKEI_TICKER     = "NKD=F"   # CME日経先物（シカゴ）
@@ -102,6 +103,19 @@ MACRO_SECTORS = [
             ("2914", "日本たばこ産業"),
         ],
     },
+    {
+        "label":       "米金利上昇 → 銀行セクター",
+        "trigger_key": "rate",
+        "threshold":   1.5,   # バックテスト(2024-06〜2026-07, 2455件)で1.0%→1.5%以上が有意に優位
+        "direction":   "up",
+        "stocks": [
+            ("8306", "三菱UFJフィナンシャル・グループ"),
+            ("8316", "三井住友フィナンシャルグループ"),
+            ("8411", "みずほフィナンシャルグループ"),
+            ("8309", "三井住友トラスト・ホールディングス"),
+            ("5832", "ちゅうぎんフィナンシャルグループ"),
+        ],
+    },
 ]
 
 
@@ -172,6 +186,7 @@ def fetch_macro_indicators(usdjpy_current):
         "copper":        前日比(%) or None,
         "crude":         前日比(%) or None,
         "semi":          前日比(%) or None,
+        "rate":          前日比(%) or None,
         "usdjpy_change": 前日比(%) or None,
         "details":       表示用テキスト dict,
       }
@@ -183,6 +198,7 @@ def fetch_macro_indicators(usdjpy_current):
         ("copper", COPPER_TICKER, "銅先物(HG=F)"),
         ("crude",  CRUDE_TICKER,  "原油先物(CL=F)"),
         ("semi",   SEMI_TICKER,   "半導体ETF(SOXX)"),
+        ("rate",   RATE_TICKER,   "米10年債利回り(^TNX)"),
     ]:
         try:
             data = yf.Ticker(ticker).history(period="5d")

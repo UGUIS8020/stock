@@ -1,23 +1,0 @@
-=== 📈 日中シグナル検知（2026-05-29）===
-
-  候補銘柄を読み込み中...
-  候補銘柄: 20件（スキャン日: 2026-05-28）
-  📡 Tachibana API: リアルタイム価格取得モード  [本番]
-
-  監視開始: 9:00 〜 14:30  対象: 20銘柄
-  地合い: STRONG  （発注有効）
-  条件: STRONG地合い × gap-5.0〜+2.0% × 前日プラス × モメンタム+0.3%以上
-  TP: +3%  SL: -5%
-
-  前日OHLCV 読み込み中...
-  読み込み完了: 20銘柄
-
-
-  🔔 [09:32:12] シグナル: 6081 アライドアーキテクツ  adj_score=8.06（w=0.95）
-     前日比: +1.52%  寄付ギャップ: +1.52%  前日騰落: +0.00%
-     現在値: 200円  TP: 206円（+3%）  SL: 190円（-5%）
-  [DEBUG] 発注 code=6081 market_code=00101
-  [DEBUG] buy response keys: ['p_sd_date', 'p_no', 'p_rv_date', 'p_errno', 'p_err', 'sCLMID', 'sResultCode', 'sResultText']  p_errno=0 sResultCode=11008
-  [DEBUG] full response: {'p_sd_date': '2026.05.29-09:32:12.429', 'p_no': '1780014734', 'p_rv_date': '2026.05.29-09:32:12.420', 'p_errno': '0', 'p_err': '', 'sCLMID': 'CLMKabuNewOrder', 'sResultCode': '11008', 'sResultText': '市場に誤りがあります', 'sWarningCode': '', 'sWarningText': '', 'sOrderNumber': '', 'sEigyouDay': '', 'sOrderUkewatasiKingaku': '', 'sOrderTesuryou': '', 'sOrderSyouhizei': '', 'sKinri': '', 'sOrderDate': ''}
-     ❌ 発注失敗: 注文エラー (p_errno=0 sResultCode=11008): 市場に誤りがあります
-  [09:32:27] 監視中: 19銘柄  発報済み: 1件  [09:32:42] 監視中: 19銘柄  発報済み: 1件  [09:32:58] 監視中: 19銘柄  発報済み: 1件  [09:33:13] 監視中: 19銘柄  発報済み: 1件  [09:33:28] 監視中: 19銘柄  発報済み: 1件  [09:33:43] 監視中: 19銘柄  発報済み: 1件  [09:33:59] 監視中: 19銘柄  発報済み: 1件

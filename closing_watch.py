@@ -69,20 +69,9 @@ LIMIT_ORDER     = False  # 成行発注（指値はsResultCode=11010エラー多
 LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
 
-_P_NO_FILE = Path("out/last_p_no.txt")
-
-def _next_p_no():
-    try:
-        n = int(_P_NO_FILE.read_text().strip()) + 1
-    except Exception:
-        n = int(time.time())
-    _P_NO_FILE.write_text(str(n))
-    return n
-
-
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
-    1,000円未満の安い株は100,000円以内で買えるだけ。"""
+    1,000円未満の安い株は30万円以内で買えるだけ。"""
     if price and price < CHEAP_THRESHOLD:
         lots = int(MAX_ORDER_AMOUNT / price / 100)
         return max(lots, 1) * 100
@@ -159,7 +148,7 @@ def _fetch_price_batch(url_price, codes, http):
                  f".{t.microsecond // 1000:03}")
     params = (
         "{"
-        f'"p_no":"{_next_p_no()}",'
+        f'"p_no":"{tachibana_order._next_p_no()}",'
         f'"p_sd_date":"{p_sd_date}",'
         '"sCLMID":"CLMMfdsGetMarketPrice",'
         f'"sTargetIssueCode":"{code_list}",'

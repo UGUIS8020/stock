@@ -29,6 +29,7 @@ import db
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
+from scan_morning_strategy_a_normal import judge_entry_a_normal
 
 sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
@@ -36,6 +37,7 @@ load_dotenv()
 _BASE_DIR            = Path(__file__).parent
 CANDIDATES_LOG_CSV   = str(_BASE_DIR / "out" / "candidates_log.csv")
 MORNING_LOG_CSV      = str(_BASE_DIR / "out" / "morning_log.csv")
+BANK_RESULTS_CSV     = str(_BASE_DIR / "out" / "bank_results.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 OBSERVE_LOG_CSV      = str(_BASE_DIR / "out" / "observe_log.csv")
 JST                = timezone(timedelta(hours=9))
@@ -52,11 +54,23 @@ WATCH_END_MIN      = 30    # 監視終了（9:30）
 TP_PCT = 0.04   # 利確 +4%（変更: 3%→4% / grid_search_a.py OOS Sharpe +0.290 vs 旧3%=+0.162）
 SL_PCT = 0.06   # 損切 -6%（変更: 5%→6% / grid_search_a.py OOS Sharpe +0.290 vs 旧5%=+0.162）
 
+# 戦略F: 銀行専用 TP/SL（WEAK地合い限定・振れ幅が小さいため低めに設定）
+BANK_TP_PCT = 0.02   # 利確 +2%（WEAK×銀行 シミュレーション: 勝率88%・平均+1.67%）
+BANK_SL_PCT = 0.03   # 損切 -3%（銀行の標準偏差2%に合わせ早めに切る）
+
+# NORMAL日ギャップダウン逆張り TP/SL
+# 根拠: analyze_a_normal_report.txt OOS検証 gap-5〜0% score5-7 ratio4-8 → wr65.6% avg+0.372%
+# 早期損切りで期待値を担保する（gap<0なのに下がり続ける場合は即切り）
+NORMAL_GAP_TP_PCT = 0.03   # 利確 +3%
+NORMAL_GAP_SL_PCT = 0.01   # 損切 -1%（タイトSLでリバウンド失敗時の損害を最小化）
+
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
-MAX_POSITIONS = 5
+MAX_POSITIONS   = 5   # 戦略A
+MAX_POSITIONS_F = 3   # 戦略F（銀行）
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A = 10   # 戦略A: scoreで降順
+MAX_WATCH_F =  5   # 戦略F: scoreで降順
 
 # 発注設定
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
@@ -69,7 +83,7 @@ MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額
 
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
-    1,000円未満の安い株は100,000円以内で買えるだけ。"""
+    1,000円未満の安い株は30万円以内で買えるだけ。"""
     if price and price < CHEAP_THRESHOLD:
         lots = int(MAX_ORDER_AMOUNT / price / 100)
         return max(lots, 1) * 100
@@ -112,30 +126,22 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "description":           "PANIC日 → 全見送り",
         }
 
-    # WEAK日のCAUTION → 9:05以降に成行買い
-    # 【根拠】WEAK×CAUTION N=44 avg+0.97%（SL=-5%基準で再評価要）
-    if condition == "WEAK" and judgment == "CAUTION":
-        return {
-            "style":                 "WAIT_CONFIRM",
-            "confirm_threshold_pct": 0.0,
-            "description":           "WEAK日CAUTION → 9:05以降 成行買い（avg+0.97%・N=44）",
-        }
-
+    # WEAK日: 戦略A全停止（OOS検証 2026-07-12: WEAK全体 avg=-0.781% n=7,289件）
+    # 全gapレンジでマイナス（gap<0: avg=-0.607%, gap≥0: avg=-0.951%）
+    # 銀行株（戦略F）は別途 WEAK限定で継続
     if condition == "WEAK":
-        # WEAK日BUY: 寄り付き成行（9:03に発注）
-        # 【根拠】上昇継続50%・反落0件・終日下落0件（12件）
-        # ※ 要再評価: 2026-04-25頃（WEAK日サンプル30件超になったら）
         return {
-            "style":                 "OPEN_MARKET",
-            "ai_trigger_min":        3,   # 9:03 = 寄り付き直後に成行
-            "confirm_threshold_pct": 0.0,
-            "description":           "WEAK日BUY → 寄り付き成行推奨（上昇継続率50%・反落ゼロ）",
+            "style":                 "SKIP",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           "WEAK日 → 戦略A全見送り（OOS avg=-0.781%）",
         }
 
     if condition in ("NORMAL", "STRONG"):
         # 上昇率上限: 出尽くし除外（check_surge.py 2026-07-06分析）
-        # NORMAL: 3%超で勝率14%・avg-3.47% → 除外  STRONG: 5%超のみ除外（3〜5%は+1.38%）
-        surge_limit = 3.0 if condition == "NORMAL" else 5.0
+        # NORMAL: gap+0.5〜+1%はavg=-0.070%（OOS 2026-07-12）→ 0.5%以上除外
+        # STRONG: 5%超のみ除外（3〜5%は+1.38%）
+        surge_limit = 0.5 if condition == "NORMAL" else 5.0
 
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
@@ -149,17 +155,20 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "ai_trigger_min":        trigger,
                 "confirm_threshold_pct": threshold,
                 "surge_limit_pct":       surge_limit,
-                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比+{threshold}%〜+{surge_limit:.0f}%でエントリー",
+                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比+{threshold}%〜+{surge_limit:.1f}%でエントリー",
             }
         else:
-            # NORMAL日BUY → 前日比0.0%以上（プラスかフラット）でエントリー
-            # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43% vs 9:05 avg+0.12%）
+            # NORMAL日BUY:
+            #   gap 0〜+0.5% → 前日比0.0%以上でエントリー（surge_limit=0.5%）
+            #   gap<0 → ギャップダウン逆張りパス（後続ループで個別処理）
+            #     根拠: OOS gap<0 avg+0.327〜+0.671%, gap+0.5〜+1% avg=-0.070%
+            # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43%）
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        7,
                 "confirm_threshold_pct": 0.0,
                 "surge_limit_pct":       surge_limit,
-                "description":           f"NORMAL日BUY → 9:07以降 前日比0.0%〜+{surge_limit:.0f}%でエントリー（OOS勝率65.6%）",
+                "description":           f"NORMAL日BUY → 9:07以降 前日比0.0%〜+{surge_limit:.1f}%でエントリー",
             }
 
     # UNKNOWN など
@@ -277,6 +286,15 @@ def _refresh_condition_905(current_condition, market_info, url_price):
 
     if old_pts == new_pts:
         print(f"  ✅ Layer3スコア変化なし({old_pts}pt) → 地合い変更不要")
+        # Layer3不変でも NORMAL×日経下落 → WEAK格下げチェック
+        if current_condition == "NORMAL" and actual_nk_chg <= -0.3:
+            new_cond = "WEAK"
+            try:
+                db.update_morning_log_condition(TODAY, new_cond, saved_score, actual_nk_chg)
+            except Exception as e:
+                print(f"  ⚠️  morning_log 更新失敗: {e}")
+            print(f"  📉 NORMAL→WEAK格下げ（日経実値{actual_nk_chg:+.2f}% ≦ -0.3%）")
+            return new_cond
         return None
 
     new_score = saved_score - old_pts + new_pts
@@ -287,7 +305,9 @@ def _refresh_condition_905(current_condition, market_info, url_price):
     sp500  = float(market_info.get("sp500_change")  or 0)
     up_count = sum(1 for v in [dow, nasdaq, sp500] if v > 0)
 
-    if new_score <= 3 and actual_nk_chg <= -1.0:
+    # 初期判定（scan_morning.py）と統一: 2026-06-24修正済みの条件に合わせる
+    # 旧: score<=3 AND nk_chg<=-1.0 → 誤PANIC多発（実績8件中1件のみ真のPANIC）
+    if new_score <= 2 and actual_nk_chg <= -2.0:
         new_cond = "PANIC"
     elif new_score >= 8 and up_count >= 2:
         new_cond = "STRONG"
@@ -297,6 +317,12 @@ def _refresh_condition_905(current_condition, market_info, url_price):
         new_cond = "WEAK"
     else:
         new_cond = "PANIC"
+
+    # NORMAL×日経実値下落 → WEAK動的格下げ
+    # OOS根拠: NORMAL日で日経<-0.3% → 騰落比0.35前後・取引avg=-0.2%台（2026-07-12）
+    if new_cond == "NORMAL" and actual_nk_chg <= -0.3:
+        new_cond = "WEAK"
+        print(f"  📉 NORMAL→WEAK格下げ（日経実値{actual_nk_chg:+.2f}% ≦ -0.3%）")
 
     try:
         db.update_morning_log_condition(TODAY, new_cond, new_score, actual_nk_chg)
@@ -458,6 +484,14 @@ def load_candidates():
     targets   = today_df[today_df["judgment"].isin(["BUY", "CAUTION"])].copy()
     original  = len(targets)
 
+    restricted = _db.get_restricted_codes(days=30)
+    if restricted:
+        before = len(targets)
+        targets = targets[~targets["code"].astype(str).isin(restricted)]
+        excluded = before - len(targets)
+        if excluded > 0:
+            print(f"  🚫 日計取引制限銘柄を除外: {excluded}件")
+
     # ── 戦略A: scoreで降順、上限MAX_WATCH_A件（戦略Bはclosing_watchに移管）
     df_a = (targets[targets["strategy"] == "A"]
             .sort_values("score", ascending=False)
@@ -480,8 +514,45 @@ def load_candidates():
             "judgment":          str(row["judgment"]),
             "reason":            str(row["reason"]),
             "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
+            "tp_pct":            TP_PCT,
+            "sl_pct":            SL_PCT,
         })
+
+    # 戦略F: WEAK地合いのみ銀行候補を追加
+    if condition == "WEAK":
+        bank_f = _load_bank_candidates_f()
+        if bank_f:
+            print(f"  🏦 戦略F候補: {len(bank_f)}件追加（WEAK×銀行 TP={BANK_TP_PCT*100:.0f}%/SL={BANK_SL_PCT*100:.0f}%）")
+            candidates.extend(bank_f)
+
     return candidates, condition
+
+
+def _load_bank_candidates_f():
+    """戦略F: bank_results.csv から銀行候補を読み込む。"""
+    try:
+        df = pd.read_csv(BANK_RESULTS_CSV, encoding="utf-8-sig")
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    df = df.nlargest(MAX_WATCH_F, "score")
+    result = []
+    for _, row in df.iterrows():
+        result.append({
+            "code":              str(row["code"]),
+            "name":              str(row["name"]),
+            "strategy":          "F",
+            "score":             float(row["score"]),
+            "ratio":             float(row.get("ratio", 0) or 0),
+            "today_rise":        float(row.get("today_rise", 0) or 0),
+            "judgment":          "BUY",
+            "reason":            "戦略F: WEAK地合い×銀行系",
+            "ai_recommendation": "",
+            "tp_pct":            BANK_TP_PCT,
+            "sl_pct":            BANK_SL_PCT,
+        })
+    return result
 
 
 def load_market_info():
@@ -527,9 +598,12 @@ def confirm_and_order(candidate, price, url_request):
     """AUTO_ORDER=True: 確認なしで自動発注。False: y/n プロンプト表示。"""
     code      = candidate["code"]
     name      = candidate["name"]
+    tp_pct    = candidate.get("tp_pct", TP_PCT)
+    sl_pct    = candidate.get("sl_pct", SL_PCT)
+    strat     = candidate.get("strategy", "A")
     rec_price = price
-    sell_p    = round(price * (1 + TP_PCT)) if price else None
-    stop_p    = round(price * (1 - SL_PCT)) if price else None
+    sell_p    = round(price * (1 + tp_pct)) if price else None
+    stop_p    = round(price * (1 - sl_pct)) if price else None
 
     shares    = calc_shares(rec_price or price)
     estimated = int((rec_price or price or 0) * shares)
@@ -563,7 +637,7 @@ def confirm_and_order(candidate, price, url_request):
             return
         order_type = "指値" if LIMIT_ORDER else "成行"
         print(f"  📤 自動発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
-        _do_order(code, name, shares, rec_price or price, url_request)
+        _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat)
         return
 
     # 手動確認モード
@@ -587,25 +661,28 @@ def confirm_and_order(candidate, price, url_request):
                 return
             order_type = "指値" if LIMIT_ORDER else "成行"
             print(f"  📤 発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
-            _do_order(code, name, shares, rec_price or price, url_request)
+            _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat)
             return
 
 
-def _do_order(code, name, shares, buy_price, url_request):
+def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=None, strategy="A"):
     """発注処理本体（自動・手動共通）。
     LIMIT_ORDER=True: 現在値で指値→LIMIT_WAIT_SECS秒後に未約定なら取消して成行。
     LIMIT_ORDER=False: 成行のみ。
     """
-    mkt_code = db.get_market_code_db(code)
+    mkt_code  = db.get_market_code_db(code)
+    _tp       = tp_pct if tp_pct is not None else TP_PCT
+    _sl       = sl_pct if sl_pct is not None else SL_PCT
+    _strategy = strategy or "A"
 
     if LIMIT_ORDER and buy_price:
         r = tachibana_order.place_buy_limit_with_fallback(
             url_request, code, shares, buy_price, mkt_code,
-            wait_secs=LIMIT_WAIT_SECS, strategy="A")
+            wait_secs=LIMIT_WAIT_SECS, strategy=_strategy)
         if r["success"]:
             print(f"  ✅ {r['message']}")
             tachibana_order.save_position(code, name, r["filled"], r["fill_price"],
-                                          strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
+                                          strategy=_strategy, tp_pct=_tp, sl_pct=_sl)
         else:
             print(f"  ❌ 発注失敗: {r['message']}")
     else:
@@ -614,11 +691,10 @@ def _do_order(code, name, shares, buy_price, url_request):
             print(f"  ✅ {result['message']}")
             buy_px = int(buy_price or 0)
             if buy_px <= 0:
-                # 価格が取れなかった場合でも候補登録価格で保存（0のままだとDBスキップされるため）
                 buy_px = int(result.get("fill_price") or result.get("price") or buy_price or 0)
             if buy_px > 0:
                 tachibana_order.save_position(code, name, shares, buy_px,
-                                              strategy="A", tp_pct=TP_PCT, sl_pct=SL_PCT)
+                                              strategy=_strategy, tp_pct=_tp, sl_pct=_sl)
             else:
                 print(f"  ⚠️  買値が取得できないためDBへの記録をスキップしました（手動で register_positions.py を実行してください）")
         else:
@@ -664,12 +740,12 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         refresh_start   = WATCH_START_HOUR * 60 + CONDITION_REFRESH_MIN
         watch_end       = WATCH_START_HOUR * 60 + WATCH_END_MIN
 
-        # 9:01 地合い再判定（初回のみ）: 全エントリー最早(WEAK BUY 9:03)より前に実施
+        # 9:03 地合い再判定（初回のみ）: 寄り付き初動が落ち着いた直後
         if not condition_refreshed and now_min >= refresh_start:
             condition_refreshed = True
             new_cond = _refresh_condition_905(condition, market_info, url_price)
             if new_cond:
-                print(f"\n  🔄 9:01 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
+                print(f"\n  🔄 9:03 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
                 condition = new_cond
                 timings = {c["code"]: decide_timing(condition, c["judgment"], "", c.get("strategy", "A"))
                            for c in candidates if not ordered[c["code"]]}
@@ -686,8 +762,8 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         # 市場開始前は待機
         if not start_now and now_min < market_start:
             wait_sec = (market_start - now_min) * 60 - now.second
-            print(f"  市場開始まで {wait_sec}秒待機中... ({now.strftime('%H:%M:%S')})", end="\r")
-            time.sleep(5)
+            print(f"  市場開始まで {wait_sec}秒待機中... ({now.strftime('%H:%M:%S')})")
+            time.sleep(30)
             continue
 
         # 価格取得・表示
@@ -805,17 +881,68 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
 
             # OPEN_MARKET: トリガー時刻到達で即発注（変更なし）
             if timing["style"] == "OPEN_MARKET":
-                open_pos = db.load_open_positions(strategy="A")
-                if len(open_pos) >= MAX_POSITIONS:
+                strat_c  = c.get("strategy", "A")
+                max_pos  = MAX_POSITIONS_F if strat_c == "F" else MAX_POSITIONS
+                open_pos = db.load_open_positions(strategy=strat_c)
+                if len(open_pos) >= max_pos:
                     ordered[code] = True
-                    results[code] = f"見送り(上限{MAX_POSITIONS}件)"
-                    print(f"\n  ⚠️ {code} {c['name']}: 戦略A上限({MAX_POSITIONS}件)到達 → 見送り")
+                    results[code] = f"見送り(上限{max_pos}件)"
+                    print(f"\n  ⚠️ {code} {c['name']}: 戦略{strat_c}上限({max_pos}件)到達 → 見送り")
                     continue
                 ordered[code] = True
                 results[code] = "発注"
                 print(f"\n  🟢 {code} {c['name']}: {timing['description']}")
                 confirm_and_order(c, latest_px, url_request)
                 continue
+
+            # STRONG日ギャップダウン逆張りパス
+            # gap<0（寄り付きが前日終値割れ）を強い地合いで拾う
+            # OOS根拠: STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
+            # 通常STRONG TP=4%/SL=-6% をそのまま適用
+            if (condition == "STRONG"
+                    and timing["style"] == "WAIT_CONFIRM"
+                    and not ordered[code]
+                    and latest_chg < 0.0):
+                open_pos = db.load_open_positions(strategy="A")
+                if len(open_pos) >= MAX_POSITIONS:
+                    ordered[code] = True
+                    results[code] = f"見送り(上限{MAX_POSITIONS}件)"
+                    print(f"\n  ⚠️ {code} {c['name']}: 上限到達 → 見送り")
+                    continue
+                ordered[code] = True
+                results[code] = "発注(STRONG逆張り)"
+                print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り"
+                      f" TP={TP_PCT*100:.0f}%/SL={SL_PCT*100:.0f}%")
+                confirm_and_order(c, latest_px, url_request)
+                continue
+
+            # NORMAL日ギャップダウン逆張りパス
+            # gap<0（寄り付きが前日終値割れ）＋score/ratio条件でリバウンド狙い
+            # TP=3%/SL=-1%（タイトSL）で期待値を担保
+            # 根拠: analyze_a_normal_report OOS gap-5〜0% → avg+0.327〜+0.671%（gap>+1%はavg-0.230%）
+            if (condition == "NORMAL"
+                    and timing["style"] == "WAIT_CONFIRM"
+                    and not ordered[code]
+                    and latest_chg < 0.0):
+                score_c      = c.get("score", 0)
+                ratio_c      = c.get("ratio", 0)
+                today_rise_c = c.get("today_rise", 0)
+                judge_g, reason_g = judge_entry_a_normal(score_c, ratio_c, today_rise_c)
+                if judge_g == "BUY":
+                    open_pos = db.load_open_positions(strategy="A")
+                    if len(open_pos) >= MAX_POSITIONS:
+                        ordered[code] = True
+                        results[code] = f"見送り(上限{MAX_POSITIONS}件)"
+                        print(f"\n  ⚠️ {code} {c['name']}: 上限到達 → 見送り")
+                        continue
+                    ordered[code] = True
+                    results[code] = "発注(NORMAL逆張り)"
+                    c_gap = {**c, "tp_pct": NORMAL_GAP_TP_PCT, "sl_pct": NORMAL_GAP_SL_PCT}
+                    print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% NORMAL逆張り"
+                          f" TP={NORMAL_GAP_TP_PCT*100:.0f}%/SL={NORMAL_GAP_SL_PCT*100:.0f}%"
+                          f"（{reason_g}）")
+                    confirm_and_order(c_gap, latest_px, url_request)
+                    continue
 
             # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
             if timing["style"] == "WAIT_CONFIRM":
@@ -844,11 +971,13 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             code = c["code"]
             if ordered[code]:
                 continue
-            open_pos = db.load_open_positions(strategy="A")
-            if len(open_pos) >= MAX_POSITIONS:
+            strat_c  = c.get("strategy", "A")
+            max_pos  = MAX_POSITIONS_F if strat_c == "F" else MAX_POSITIONS
+            open_pos = db.load_open_positions(strategy=strat_c)
+            if len(open_pos) >= max_pos:
                 ordered[code] = True
-                results[code] = f"見送り(上限{MAX_POSITIONS}件)"
-                print(f"\n  ⚠️ {code} {c['name']}: 戦略A上限({MAX_POSITIONS}件)到達 → 見送り")
+                results[code] = f"見送り(上限{max_pos}件)"
+                print(f"\n  ⚠️ {code} {c['name']}: 戦略{strat_c}上限({max_pos}件)到達 → 見送り")
                 continue
             ordered[code] = True
             results[code] = "発注"
@@ -937,8 +1066,10 @@ def _print_final_summary(candidates, results, histories):
         if first_price and last_price:
             print(f"     値動き  : {first_price:,.0f}円 → {last_price:,.0f}円  ({last_chg:+.2f}%)")
         if judgment == "発注" and last_price:
-            print(f"     TP目標  : {round(last_price*(1+TP_PCT)):,.0f}円（+{TP_PCT*100:.0f}%）"
-                  f"  SL: {round(last_price*(1-SL_PCT)):,.0f}円（-{SL_PCT*100:.0f}%）")
+            _tp = c.get("tp_pct", TP_PCT)
+            _sl = c.get("sl_pct", SL_PCT)
+            print(f"     TP目標  : {round(last_price*(1+_tp)):,.0f}円（+{_tp*100:.0f}%）"
+                  f"  SL: {round(last_price*(1-_sl)):,.0f}円（-{_sl*100:.0f}%）")
 
     print(f"{'='*60}\n")
 

@@ -23,6 +23,35 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
 
+
+class _Tee:
+    """標準出力を画面とログファイルの両方へ同時出力する。"""
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
+def _run_with_log(fn, log_path):
+    """fn()実行中の標準出力を画面とlog_pathの両方に書き出す。
+    market_watch.py / closing_watch.py はscan_morning.pyの中で直接関数呼び出しされ
+    （daytime.py/position_monitor.pyのようなsubprocess経由ではないため）、
+    それらの出力が今までファイルに残らず後から確認できない問題があった。
+    """
+    orig_stdout = sys.stdout
+    with open(log_path, "w", encoding="utf-8") as f:
+        sys.stdout = _Tee(orig_stdout, f)
+        try:
+            fn()
+        finally:
+            sys.stdout = orig_stdout
+
 import db as _db
 _db.init_db()
 
@@ -40,7 +69,7 @@ from scan_morning_strategy_a import (
     SURGE_SCORE_MIN, SURGE_RATIO_MIN, is_surge_flag, judge_entry_a,
 )
 from scan_morning_strategy_b import judge_entry_b
-from scan_morning_strategy_d import (
+from scan_morning_macro_scan import (
     scan_strategy_d, calc_stop_loss, calc_score_d,
 )
 
@@ -547,21 +576,24 @@ def main():
 
     _OUT_DIR = _BASE_DIR / "out"
 
-    # ── PANIC以外: position_monitor・daytime を market_watch より先に起動 ──
+    # ── position_monitor: 地合いに関係なく常に起動 ──
+    # 既存ポジションのTP/SL監視・前日ポジションの強制決済が役目なので、
+    # 新規発注をしないPANIC日こそ、保有中ポジションの監視を止めてはいけない。
     # market_watch（ブロッキング）より前に起動することで9:00から並行稼働させる
-    if condition != "PANIC":
-        try:
-            subprocess.Popen(
-                [_sys.executable, "-u", str(_BASE_DIR / "position_monitor.py")],
-                stdout=open(str(_OUT_DIR / "position_monitor.log"), "w", encoding="utf-8"),
-                stderr=open(str(_OUT_DIR / "position_monitor_err.log"), "w", encoding="utf-8"),
-            )
-            print("  📊 position_monitor をバックグラウンドで起動しました（15:28まで監視）")
-            print(f"     ログ: out/position_monitor.log")
-        except Exception as e:
-            print(f"⚠️  position_monitor の起動に失敗しました: {e}")
-            print("   → python position_monitor.py を手動で実行してください")
+    try:
+        subprocess.Popen(
+            [_sys.executable, "-u", str(_BASE_DIR / "position_monitor.py")],
+            stdout=open(str(_OUT_DIR / "position_monitor.log"), "w", encoding="utf-8"),
+            stderr=open(str(_OUT_DIR / "position_monitor_err.log"), "w", encoding="utf-8"),
+        )
+        print("  📊 position_monitor をバックグラウンドで起動しました（15:28まで監視）")
+        print(f"     ログ: out/position_monitor.log")
+    except Exception as e:
+        print(f"⚠️  position_monitor の起動に失敗しました: {e}")
+        print("   → python position_monitor.py を手動で実行してください")
 
+    # ── daytime: PANIC以外のみ起動（新規シグナル検知が役目のため）──
+    if condition != "PANIC":
         try:
             subprocess.Popen(
                 [_sys.executable, "-u", str(_BASE_DIR / "daytime.py")],
@@ -578,7 +610,8 @@ def main():
     if has_buy and condition != "PANIC":
         try:
             import market_watch
-            market_watch.main()
+            print(f"  ログ: out/market_watch_live.txt")
+            _run_with_log(market_watch.main, str(_OUT_DIR / "market_watch_live.txt"))
         except Exception as e:
             print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
             print("   → python market_watch.py を手動で実行してください")
@@ -587,7 +620,8 @@ def main():
     if condition != "PANIC":
         try:
             import closing_watch
-            closing_watch.main()
+            print(f"  ログ: out/closing_watch_live.txt")
+            _run_with_log(closing_watch.main, str(_OUT_DIR / "closing_watch_live.txt"))
         except Exception as e:
             print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
             print("   → python closing_watch.py を手動で実行してください")

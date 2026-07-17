@@ -26,17 +26,17 @@ def judge_entry_b(row, condition):
     if condition == "WEAK":
         return "PASS", f"地合いWEAK + 逆張り非推奨 - WEAK日avg-1.26%（740件）"
 
-    # NORMAL日 × RBスコア3以上 → BUY
-    # evolve.py GA(20000人×100世代, 2026-05-26): TP+1.9%/SL-5.6% OOS WR67%・avg+0.276%
-    if condition == "NORMAL" and rb_score >= 3:
-        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
+    # NORMAL日 × RBスコア4以上 → BUY（closing_watch.py RB_MIN=4 と統一）
+    # rb=3のみ: OOS avg≈-0.406%（n=50件）→ 除外が正しい（2026-07-12修正）
+    if condition == "NORMAL" and rb_score >= 4:
+        return "BUY", f"地合いNORMAL + リバウンド狙い({rb_score}点) - OOS WR53%・avg+0.297%（TP+5%/SL-4%） / {rb_reason}"
 
     # STRONG日 × RB4以上 → BUY
     if condition == "STRONG" and rb_score >= 4:
-        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR67%・avg+0.276%（TP+1.9%/SL-5.6%推奨） / {rb_reason}"
+        return "BUY", f"地合いSTRONG + リバウンド狙い({rb_score}点) - OOS WR55%・avg+0.533%（TP+5%/SL-4%） / {rb_reason}"
 
-    # STRONG日 × RB3 → CAUTION
+    # STRONG日 × RB3 → CAUTION（closing_watch.py では発注されない）
     if condition == "STRONG" and rb_score == 3:
-        return "CAUTION", f"地合いSTRONG + リバウンド候補({rb_score}点) - RB3はやや低め・様子見 / {rb_reason}"
+        return "CAUTION", f"地合いSTRONG + リバウンド候補({rb_score}点) - RB3はやや低め・closing_watchでは見送り / {rb_reason}"
 
     return "PASS", f"リバウンドスコア低({rb_score}点) - 見送り"

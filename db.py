@@ -179,6 +179,12 @@ def init_db():
             PRIMARY KEY (date, code)
         );
         CREATE INDEX IF NOT EXISTS idx_ds_date ON daytime_signals(date);
+
+        CREATE TABLE IF NOT EXISTS restriction_list (
+            code             TEXT PRIMARY KEY,
+            restricted_date  TEXT NOT NULL,
+            reason           TEXT
+        );
     """)
     conn.commit()
     conn.close()
@@ -812,6 +818,31 @@ def save_daytime_signal(row):
     """, row)
     conn.commit()
     conn.close()
+
+
+def add_restriction(code, reason="11482"):
+    """日計取引制限が発生した銘柄をrestriction_listに登録する。"""
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO restriction_list (code, restricted_date, reason) VALUES (?, ?, ?)",
+        (str(code), today, reason)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_restricted_codes(days=30):
+    """直近 days 日以内に日計取引制限が発生した銘柄コードのセットを返す。"""
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone(timedelta(hours=9))) - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT code FROM restriction_list WHERE restricted_date >= ?", (cutoff,)
+    ).fetchall()
+    conn.close()
+    return {r[0] for r in rows}
 
 
 def get_daytime_signals(date=None):
