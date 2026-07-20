@@ -51,8 +51,9 @@ CONDITION_REFRESH_MIN = 3  # 地合い再判定タイミング（9:03）: 寄り
 WATCH_END_MIN      = 30    # 監視終了（9:30）
 
 # TP/SL設定
-TP_PCT = 0.04   # 利確 +4%（変更: 3%→4% / grid_search_a.py OOS Sharpe +0.290 vs 旧3%=+0.162）
-SL_PCT = 0.06   # 損切 -6%（変更: 5%→6% / grid_search_a.py OOS Sharpe +0.290 vs 旧5%=+0.162）
+TP_PCT = 0.06   # 利確 +6%（変更: 4%→6% / evolve.py GA 2026-07-18: A単独型STRONG限定 N=1528 WR=64.9% avg+0.659%
+                #   10,000人×150世代・5,000人×50世代の2回の実行で一貫してTP+5.5〜+8.9%が優勢だったため採用）
+SL_PCT = 0.06   # 損切 -6%（変更なし / 同GA結果でもSL-5〜-7%が中心で現行と大きくは乖離せず）
 
 # 戦略F: 銀行専用 TP/SL（WEAK地合い限定・振れ幅が小さいため低めに設定）
 BANK_TP_PCT = 0.02   # 利確 +2%（WEAK×銀行 シミュレーション: 勝率88%・平均+1.67%）
@@ -594,7 +595,7 @@ def ask_claude_entry(candidate, price_history, condition, market_info, timing=No
     """互換性のためのスタブ（AI判断は無効化済み）"""
     raise NotImplementedError("AI判断は無効化されています")
 
-def confirm_and_order(candidate, price, url_request):
+def confirm_and_order(candidate, price, url_request, condition=None, entry_change_pct=None):
     """AUTO_ORDER=True: 確認なしで自動発注。False: y/n プロンプト表示。"""
     code      = candidate["code"]
     name      = candidate["name"]
@@ -637,7 +638,8 @@ def confirm_and_order(candidate, price, url_request):
             return
         order_type = "指値" if LIMIT_ORDER else "成行"
         print(f"  📤 自動発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
-        _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat)
+        _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat,
+                  condition=condition, entry_change_pct=entry_change_pct)
         return
 
     # 手動確認モード
@@ -661,11 +663,13 @@ def confirm_and_order(candidate, price, url_request):
                 return
             order_type = "指値" if LIMIT_ORDER else "成行"
             print(f"  📤 発注中... {code} {shares}株 {order_type}買い @ {rec_price or price:.0f}円")
-            _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat)
+            _do_order(code, name, shares, rec_price or price, url_request, tp_pct=tp_pct, sl_pct=sl_pct, strategy=strat,
+                      condition=condition, entry_change_pct=entry_change_pct)
             return
 
 
-def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=None, strategy="A"):
+def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=None, strategy="A",
+               condition=None, entry_change_pct=None):
     """発注処理本体（自動・手動共通）。
     LIMIT_ORDER=True: 現在値で指値→LIMIT_WAIT_SECS秒後に未約定なら取消して成行。
     LIMIT_ORDER=False: 成行のみ。
@@ -675,6 +679,14 @@ def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=No
     _sl       = sl_pct if sl_pct is not None else SL_PCT
     _strategy = strategy or "A"
 
+    # 同一銘柄の重複発注防止（closing_watch.py/daytime.pyにはあるが従来market_watch.pyには無かったチェック）。
+    # watch_loop内のordered辞書はプロセス単位のメモリ状態のため、
+    # 何らかの理由でmarket_watch.pyが同日中に再実行されると、既に買った銘柄をまた買ってしまう
+    # （2026-07-15: 463Aが想定300株の2倍600株買われた事象の原因と推定）。
+    if str(code) in db.get_today_ordered_codes(TODAY):
+        print(f"  ⏭️  [{code}] 本日すでに発注済み - スキップ")
+        return
+
     if LIMIT_ORDER and buy_price:
         r = tachibana_order.place_buy_limit_with_fallback(
             url_request, code, shares, buy_price, mkt_code,
@@ -682,7 +694,8 @@ def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=No
         if r["success"]:
             print(f"  ✅ {r['message']}")
             tachibana_order.save_position(code, name, r["filled"], r["fill_price"],
-                                          strategy=_strategy, tp_pct=_tp, sl_pct=_sl)
+                                          strategy=_strategy, tp_pct=_tp, sl_pct=_sl,
+                                          condition=condition, entry_change_pct=entry_change_pct)
         else:
             print(f"  ❌ 発注失敗: {r['message']}")
     else:
@@ -694,7 +707,8 @@ def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=No
                 buy_px = int(result.get("fill_price") or result.get("price") or buy_price or 0)
             if buy_px > 0:
                 tachibana_order.save_position(code, name, shares, buy_px,
-                                              strategy=_strategy, tp_pct=_tp, sl_pct=_sl)
+                                              strategy=_strategy, tp_pct=_tp, sl_pct=_sl,
+                                              condition=condition, entry_change_pct=entry_change_pct)
             else:
                 print(f"  ⚠️  買値が取得できないためDBへの記録をスキップしました（手動で register_positions.py を実行してください）")
         else:
@@ -892,7 +906,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 ordered[code] = True
                 results[code] = "発注"
                 print(f"\n  🟢 {code} {c['name']}: {timing['description']}")
-                confirm_and_order(c, latest_px, url_request)
+                confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
             # STRONG日ギャップダウン逆張りパス
@@ -913,7 +927,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 results[code] = "発注(STRONG逆張り)"
                 print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り"
                       f" TP={TP_PCT*100:.0f}%/SL={SL_PCT*100:.0f}%")
-                confirm_and_order(c, latest_px, url_request)
+                confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
             # NORMAL日ギャップダウン逆張りパス
@@ -941,7 +955,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                     print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% NORMAL逆張り"
                           f" TP={NORMAL_GAP_TP_PCT*100:.0f}%/SL={NORMAL_GAP_SL_PCT*100:.0f}%"
                           f"（{reason_g}）")
-                    confirm_and_order(c_gap, latest_px, url_request)
+                    confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                     continue
 
             # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
@@ -983,7 +997,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             results[code] = "発注"
             print(f"\n  🟢 {code} {c['name']}: 前日比{latest_chg:+.1f}% ≥ 閾値{threshold:+.1f}%"
                   f" → 発注（上昇率優先）")
-            confirm_and_order(c, latest_px, url_request)
+            confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
 
         time.sleep(POLL_INTERVAL_SEC)
 

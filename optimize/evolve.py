@@ -225,7 +225,10 @@ def evaluate_one(ind, npy):
     mean, std = rets.mean(), rets.std()
     if std < 1e-9:
         return -99.0
-    return float(mean / std * np.sqrt(252))
+    sharpe = mean / std * np.sqrt(252)
+    sharpe = min(sharpe, 5.0)   # evolve_b.pyと同じキャップ（極小サンプルの暴走防止）
+    penalty = min(1.0, len(idx) / 100.0)  # サンプル数ペナルティ（evolve_b.pyと同一方式）
+    return float(sharpe * penalty)
 
 
 def evaluate_pop(pop, npy):
