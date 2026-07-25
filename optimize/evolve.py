@@ -28,7 +28,7 @@ evolve.py - 遺伝的アルゴリズムによる統合戦略最適化
    50,000人 × 100世代 →  5〜10時間
    ※複数プロセス同時実行すると共倒れするので1プロセスだけ実行すること
 
-【染色体（1人の戦略）14遺伝子】
+【染色体（1人の戦略）15遺伝子】
     gene[0]  score_min         : A系スコア下限（0〜10）
     gene[1]  ratio_min         : 出来高比率下限（0〜10倍）
     gene[2]  ratio_max         : 出来高比率上限（3〜50倍）
@@ -43,6 +43,11 @@ evolve.py - 遺伝的アルゴリズムによる統合戦略最適化
     gene[11] lower_shadow_min  : 下ヒゲ比率下限（0〜0.7）
     gene[12] vol_decay_req     : 売り枯れ必須（0=不問、1=必須）
     gene[13] consec_drop_min   : 連続下落日数下限（0〜5）
+    gene[14] score_max         : スコア上限（3〜10）★2026-07-24追加
+                                  backtest_log.csv（ナイーブ始値終値）ではNORMAL日score>=6.5が
+                                  逆効果に見えたが、TP/SLシミュレーション込みの実トレードでは
+                                  score>=6.5の39件が平均+0.715%と逆の結果になったため、
+                                  正しくTP/SLを考慮したこちらのデータで改めて検証する。
 
 【出力ファイル（stock/out/ 以下に生成）】
     out/evolve_best.csv     - 上位戦略一覧（アウトオブサンプル検証済み）
@@ -78,9 +83,9 @@ CROSS_RATE   = 0.80   # 交叉率（80%の確率で親の遺伝子を組み合�
 MUTATE_RATE  = 0.15   # 突然変異率（各遺伝子が15%の確率で変化）
 MUTATE_SIGMA = 0.15   # 突然変異の大きさ（遺伝子範囲の15%分ランダムに動く）
 
-#                   [score, r_min, r_max, rise_lo, rise_hi, rb,  gap,  tp,   sl,   cond, topn, ls,  vd,  cd  ]
-GENE_MIN = np.array([ 0.0,  0.0,  3.0,  -15.0,   -5.0,   0.0, -5.0,  1.0, -7.0,  0.0,  0.0, 0.0, 0.0, 0.0])
-GENE_MAX = np.array([10.0, 10.0, 50.0,    5.0,   10.0,   8.0, 10.0, 10.0, -0.5,  3.0,  3.0, 0.7, 1.0, 5.0])
+#                   [score, r_min, r_max, rise_lo, rise_hi, rb,  gap,  tp,   sl,   cond, topn, ls,  vd,  cd,  score_max]
+GENE_MIN = np.array([ 0.0,  0.0,  3.0,  -15.0,   -5.0,   0.0, -5.0,  1.0, -7.0,  0.0,  0.0, 0.0, 0.0, 0.0,  3.0])
+GENE_MAX = np.array([10.0, 10.0, 50.0,    5.0,   10.0,   8.0, 10.0, 10.0, -0.5,  3.0,  3.0, 0.7, 1.0, 5.0, 10.0])
 N_GENES  = len(GENE_MIN)
 
 _CAL_SL  = np.array([-0.5, -1.0, -2.0, -3.0, -5.0, -7.0])
@@ -163,8 +168,12 @@ def decode(ind):
     ls_min     = round(float(np.clip(ind[11], GENE_MIN[11], GENE_MAX[11])), 2)
     vd_req     = int(round(float(np.clip(ind[12], 0, 1))))
     cd_min     = int(round(float(np.clip(ind[13], GENE_MIN[13], GENE_MAX[13]))))
+    score_max  = float(np.clip(ind[14], GENE_MIN[14], GENE_MAX[14]))
+    if score_max <= score_min:
+        score_max = score_min + 0.5
     return {
-        "score_min": score_min, "ratio_min": ratio_min, "ratio_max": ratio_max,
+        "score_min": score_min, "score_max": score_max,
+        "ratio_min": ratio_min, "ratio_max": ratio_max,
         "rise_lo":   rise_lo,   "rise_hi":   rise_hi,
         "rb_min":    rb_min,    "gap_max":   gap_max,
         "tp": tp, "sl": sl,
@@ -198,6 +207,7 @@ def evaluate_one(ind, npy):
     p = decode(ind)
     mask = (
         (npy["score"]      >= p["score_min"])  &
+        (npy["score"]      <  p["score_max"])  &
         (npy["ratio"]      >= p["ratio_min"])  &
         (npy["ratio"]      <  p["ratio_max"])  &
         (npy["rise"]       >= p["rise_lo"])    &
@@ -293,6 +303,7 @@ def out_of_sample_check(pop, fitness, npy_out, top_k=200):
 
         mask = (
             (npy_out["score"]      >= p["score_min"])  &
+            (npy_out["score"]      <  p["score_max"])  &
             (npy_out["ratio"]      >= p["ratio_min"])  &
             (npy_out["ratio"]      <  p["ratio_max"])  &
             (npy_out["rise"]       >= p["rise_lo"])    &
@@ -333,6 +344,7 @@ def out_of_sample_check(pop, fitness, npy_out, top_k=200):
         results.append({
             "type":       stype,
             "score_min":  round(p["score_min"], 1),
+            "score_max":  round(p["score_max"], 1),
             "ratio_min":  round(p["ratio_min"], 1),
             "ratio_max":  round(p["ratio_max"], 1),
             "rise_lo":    round(p["rise_lo"],   1),
@@ -422,14 +434,14 @@ def main():
     lines.append(f"  データ: {df['trade_date'].min()} 〜 {df['trade_date'].max()}  ({len(df):,}件)")
     lines.append("=" * 70)
     lines.append(f"\n【アウトオブサンプル上位20戦略】（★=安定）")
-    lines.append(f"  {'type':10} {'score':>5} {'ratio':>9} {'rise':>12} {'rb':>4} "
+    lines.append(f"  {'type':10} {'score':>10} {'ratio':>9} {'rise':>12} {'rb':>4} "
                  f"{'TP':>5} {'SL':>5} {'地合い':>12} | "
                  f"{'in_sh':>6} {'out_sh':>6} {'N':>5} {'WR':>6} {'avg%':>7} {'★'}")
-    lines.append("  " + "─" * 105)
+    lines.append("  " + "─" * 110)
 
     for r in best_results[:20]:
         lines.append(
-            f"  {r['type']:10} {r['score_min']:>5.1f} "
+            f"  {r['type']:10} {r['score_min']:>4.1f}〜{r['score_max']:>4.1f} "
             f"{r['ratio_min']:>4.1f}〜{r['ratio_max']:>4.1f} "
             f"{r['rise_lo']:>+5.1f}〜{r['rise_hi']:>+5.1f}% "
             f"{r['rb_min']:>4.0f} "
@@ -451,7 +463,7 @@ def main():
         lines.append(f"\n【最優秀戦略】")
         r = stable[0]
         lines.append(f"  タイプ  : {r['type']}")
-        lines.append(f"  スコア  : {r['score_min']}以上")
+        lines.append(f"  スコア  : {r['score_min']}〜{r['score_max']}")
         lines.append(f"  出来高比: {r['ratio_min']}〜{r['ratio_max']}倍")
         lines.append(f"  前日騰落: {r['rise_lo']:+}%〜{r['rise_hi']:+}%")
         lines.append(f"  RBスコア: {r['rb_min']}以上")

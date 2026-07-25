@@ -30,6 +30,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
 from scan_morning_strategy_a_normal import judge_entry_a_normal
+from scan_morning_strategy_a import judge_entry_a
 
 sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
@@ -64,6 +65,13 @@ BANK_SL_PCT = 0.03   # 損切 -3%（銀行の標準偏差2%に合わせ早めに
 # 早期損切りで期待値を担保する（gap<0なのに下がり続ける場合は即切り）
 NORMAL_GAP_TP_PCT = 0.03   # 利確 +3%
 NORMAL_GAP_SL_PCT = 0.01   # 損切 -1%（タイトSLでリバウンド失敗時の損害を最小化）
+
+# STRONG日ギャップダウン逆張り TP/SL（順張りTP_PCTとは独立: 2026-07-25 分離）
+# 根拠: analyze_a.py OOS検証 STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
+# 旧: 順張りTP_PCTを流用していたため、2026-07-21のTP_PCT 4%→6%変更に巻き込まれ
+#     STRONG逆張り本来の根拠(TP4%)から乖離していた（force_close偏重の原因）
+STRONG_GAP_TP_PCT = 0.04   # 利確 +4%
+STRONG_GAP_SL_PCT = 0.06   # 損切 -6%
 
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
 MAX_POSITIONS   = 5   # 戦略A
@@ -483,6 +491,24 @@ def load_candidates():
 
     condition = today_df["condition"].iloc[0] if not today_df.empty else "UNKNOWN"
     targets   = today_df[today_df["judgment"].isin(["BUY", "CAUTION"])].copy()
+    targets["pending_reeval"] = False
+
+    # 朝の予測がWEAKだった場合、実際の地合いはNORMAL/STRONGだった可能性がある
+    # （daytime.py/closing_watch.py の実測補正で頻繁に上方修正されている実績あり）。
+    # WEAK判定のスコア閾値(strategy_a_thr、通常8.0)でPASSになった銘柄のうち、
+    # NORMAL日の最低ライン(score>=5.0)はクリアしているものを保留候補として拾っておき、
+    # 9:03の実測地合い再判定時に条件が上方修正されたら再判定する。
+    if condition == "WEAK":
+        pending = today_df[
+            (today_df["judgment"] == "PASS") &
+            (today_df["strategy"] == "A") &
+            (today_df["score"] >= 5.0)
+        ].copy()
+        if not pending.empty:
+            pending["pending_reeval"] = True
+            targets = pd.concat([targets, pending], ignore_index=True)
+            print(f"  🔔 WEAK日PASS銘柄のうち{len(pending)}件を保留（9:03の実測補正で条件緩和した場合に再判定）")
+
     original  = len(targets)
 
     restricted = _db.get_restricted_codes(days=30)
@@ -515,6 +541,7 @@ def load_candidates():
             "judgment":          str(row["judgment"]),
             "reason":            str(row["reason"]),
             "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
+            "pending_reeval":    bool(row.get("pending_reeval", False)),
             "tp_pct":            TP_PCT,
             "sl_pct":            SL_PCT,
         })
@@ -761,6 +788,20 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if new_cond:
                 print(f"\n  🔄 9:03 地合い再判定: {condition} → {new_cond}  ※タイミング戦略を更新")
                 condition = new_cond
+
+                # 朝WEAKでPASSだった保留銘柄を、実測地合いで再判定する
+                strategy_a_thr = float(market_info.get("strategy_a_thr") or 8.0)
+                for c in candidates:
+                    if not c.get("pending_reeval") or ordered[c["code"]]:
+                        continue
+                    new_judgment, new_reason = judge_entry_a(
+                        {"score": c["score"], "ratio": c["ratio"], "today_rise": c["today_rise"]},
+                        condition, strategy_a_thr)
+                    if new_judgment != c["judgment"]:
+                        print(f"     🔁 {c['code']} {c['name']}: 保留 → {new_judgment}（{new_reason}）")
+                    c["judgment"] = new_judgment
+                    c["reason"]   = new_reason
+
                 timings = {c["code"]: decide_timing(condition, c["judgment"], "", c.get("strategy", "A"))
                            for c in candidates if not ordered[c["code"]]}
                 try:
@@ -863,11 +904,11 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if ordered[code]:
                 continue
 
-            # SKIP: PANIC日など全見送り
+            # SKIP: PANIC日・WEAK日など全見送り
             if timing["style"] == "SKIP":
                 ordered[code]  = True
-                results[code]  = "見送り(PANIC)"
-                print(f"\n  ⏭️  {code} {c['name']}: PANIC日 → 見送り")
+                results[code]  = f"見送り({condition})"
+                print(f"\n  ⏭️  {code} {c['name']}: {timing['description']}")
                 continue
 
             # OBSERVE: データ蓄積のみ（発注しない）
@@ -912,7 +953,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             # STRONG日ギャップダウン逆張りパス
             # gap<0（寄り付きが前日終値割れ）を強い地合いで拾う
             # OOS根拠: STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
-            # 通常STRONG TP=4%/SL=-6% をそのまま適用
+            # 専用TP/SL（STRONG_GAP_TP_PCT/SL_PCT）を適用。順張りTP_PCTとは独立（2026-07-25分離）
             if (condition == "STRONG"
                     and timing["style"] == "WAIT_CONFIRM"
                     and not ordered[code]
@@ -925,9 +966,10 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                     continue
                 ordered[code] = True
                 results[code] = "発注(STRONG逆張り)"
+                c_gap = {**c, "tp_pct": STRONG_GAP_TP_PCT, "sl_pct": STRONG_GAP_SL_PCT}
                 print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り"
-                      f" TP={TP_PCT*100:.0f}%/SL={SL_PCT*100:.0f}%")
-                confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
+                      f" TP={STRONG_GAP_TP_PCT*100:.0f}%/SL={STRONG_GAP_SL_PCT*100:.0f}%")
+                confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
             # NORMAL日ギャップダウン逆張りパス

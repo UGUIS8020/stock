@@ -9,7 +9,7 @@ daytime.py - 日中シグナル検知（9:00〜14:30）
       → 全期間でマイナス、GAで安定戦略ゼロ件
 
   新: 以下の5条件をすべて満たすときのみ発報（check_signal）
-    1. STRONG/NORMAL地合い（REQUIRE_STRONG=False: 両地合いで発注）
+    1. STRONG地合いのみ発注（REQUIRE_STRONG=True: 2026-07-24〜 NORMALは監視のみ）
     2. 寄り付きギャップ -5〜+2%（急落・急騰は除外）
     3. 前日終値プラス（前日も上昇していた銘柄）
     4. MA過熱圏でない（5日MA+3%超 or 25日MA+6%超 は除外）
@@ -76,7 +76,12 @@ LIMIT_ORDER           = False     # 成行発注（指値は受付エラー多�
 LIMIT_WAIT_SECS       = 30        # 指値約定確認の待機秒数
 
 # ── シグナル条件（analyze_a.py 統計分析結果に基づく）──
-REQUIRE_STRONG  = False  # False=STRONG・NORMAL地合いで発注（WEAKはcan_orderで除外）
+# 2026-07-24: evolve_d.py GA検証で上位戦略が軒並みSTRONG限定だった一方、
+#   実際のライブ発注はほぼ全てNORMAL地合いに偏っており（18件中16件）、
+#   NORMAL側はforce_close負けが大半（当日高値でもTP+3%に一度も届かず）だったため、
+#   STRONG限定に変更（NORMALは監視のみで発注しない）
+REQUIRE_STRONG  = True   # True=STRONG地合いのみ発注（NORMAL/WEAKはcan_orderで除外・監視は継続）
+ALLOWED_ORDER_CONDITIONS = ("STRONG",) if REQUIRE_STRONG else ("STRONG", "NORMAL")
 GAP_MAX_PCT     = 2.0    # 寄り付きギャップ上限（+2%超のギャップアップは除外）
 GAP_MIN_PCT     = -5.0   # 寄り付きギャップ下限（-5%超の急落も除外）
 PREV_RISE_MIN   = -0.5   # 前日騰落率の下限（OOS検証: -0.5〜0%帯も avg+0.139% wr55.3% と同品質・2026-07-12）
@@ -479,7 +484,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
 
     print(f"\n  監視開始: {WATCH_START_HOUR}:{WATCH_START_MIN:02d} 〜 "
           f"{WATCH_END_HOUR}:{WATCH_END_MIN:02d}  対象: {len(codes)}銘柄")
-    print(f"  地合い: {condition}  （{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
+    print(f"  地合い: {condition}  （{'発注有効' if condition in ALLOWED_ORDER_CONDITIONS else '監視のみ（NORMAL/WEAK/PANIC）' if REQUIRE_STRONG else '監視のみ（WEAK/PANIC）'}）")
     if mon_normal_skip:
         print(f"  ⚠️  月曜×NORMAL: 発注見送り（OOS Sharpe=-2.795, WR=39.2%）")
     elif is_monday:
@@ -545,7 +550,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                     gap_max         = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
                     mon_normal_skip = is_monday and condition == "NORMAL"
                     print(f"  地合い（開始時補正後）: {condition}  "
-                          f"（{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
+                          f"（{'発注有効' if condition in ALLOWED_ORDER_CONDITIONS else '監視のみ（NORMAL/WEAK/PANIC）' if REQUIRE_STRONG else '監視のみ（WEAK/PANIC）'}）")
                 else:
                     print(f"  地合い変化なし: {condition}（AD{ad_ratio:.2f}）")
             except Exception as e:
@@ -563,7 +568,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                     gap_max         = 0.0 if condition == "NORMAL" else GAP_MAX_PCT
                     mon_normal_skip = is_monday and condition == "NORMAL"
                     print(f"  地合い（昼補正後）: {condition}  "
-                          f"（{'発注有効' if condition in ('STRONG', 'NORMAL') else '監視のみ（WEAK/PANIC）'}）")
+                          f"（{'発注有効' if condition in ALLOWED_ORDER_CONDITIONS else '監視のみ（NORMAL/WEAK/PANIC）' if REQUIRE_STRONG else '監視のみ（WEAK/PANIC）'}）")
                 else:
                     print(f"  地合い変化なし: {condition}（AD{ad_ratio:.2f}）")
             except Exception as e:
@@ -606,7 +611,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
         new_signals.sort(key=lambda x: -x[3])
 
         can_order = (DAYTIME_TRADING and
-                     condition in ("STRONG", "NORMAL") and
+                     condition in ALLOWED_ORDER_CONDITIONS and
                      not mon_normal_skip and
                      bool(url_request))
 

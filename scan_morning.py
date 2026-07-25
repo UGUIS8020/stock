@@ -605,9 +605,19 @@ def main():
         except Exception as e:
             print(f"⚠️  daytime の起動に失敗しました: {e}")
 
-    # ── 戦略A：BUY/CAUTION 候補がある場合のみ寄り付き監視・発注 ──
+    # ── 戦略A：起動判定 ──
+    # 朝の判定がWEAKの場合、BUY/CAUTIONが0件でも起動する。
+    # WEAK日はPASS判定のスコア閾値(strategy_a_thr)が高く設定されているだけで、
+    # 9:03の実測地合い補正でNORMAL/STRONGに上方修正されるケースが多いため
+    # （market_watch.py の load_candidates が保留銘柄として拾い、9:03に再判定する）。
+    # BUY/CAUTIONが既にある、またはWEAK日でスコア5.0以上のA候補がいれば起動する。
     has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
-    if has_buy and condition != "PANIC":
+    has_pending_weak = (
+        condition == "WEAK" and
+        any(r["judgment"] == "PASS" and r.get("strategy") == "A" and float(r.get("score") or 0) >= 5.0
+            for r in candidate_rows)
+    )
+    if (has_buy or has_pending_weak) and condition != "PANIC":
         try:
             import market_watch
             print(f"  ログ: out/market_watch_live.txt")
