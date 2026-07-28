@@ -233,14 +233,21 @@ def main():
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
 
-        # ── 15:20: 2泊以上経過したポジションを引け成行で強制決済 ──
-        # 戦略B最適化(2026-06-23): 2泊保有のため「前日」→「前々日以前」に変更
-        # 前日以前に買ったポジションを15:20に強制決済
+        # ── 15:20: 引け成行で強制決済 ──
+        # ①前日以前に買ったポジション（戦略B最適化2026-06-23: 2泊保有のため「前日」→「前々日以前」に変更）
+        # ②当日買った戦略A/Dのポジション（2026-07-28追加）
+        #   戦略A/Dは simulate_precise.py のバックテストが「買った当日1日分の値動きのみ」で
+        #   TP/SLを検証しており、翌日以降への持ち越しはバックテスト対象外（想定外のオーバーナイトリスク）。
+        #   従来はTODAY分が対象外で、TP/SL未達のまま翌営業日の本ブロックまで無自覚に持ち越されていた。
+        #   戦略B（引け前逆張り）は2泊保有が設計通りのため対象外のまま。
         if not force_closed and now_min >= FORCE_CLOSE_MIN:
             force_closed = True
-            prev_positions = [p for p in load_positions() if p["date"] < TODAY]
+            prev_positions = [
+                p for p in load_positions()
+                if p["date"] < TODAY or (p["date"] == TODAY and p.get("strategy") in ("A", "D"))
+            ]
             if prev_positions:
-                print(f"\n  ⏰ 15:20 引け決済開始（前日以前ポジション {len(prev_positions)}件）")
+                print(f"\n  ⏰ 15:20 引け決済開始（{len(prev_positions)}件）")
                 updated = []
                 for pos in prev_positions:
                     code  = pos["code"]
@@ -248,7 +255,8 @@ def main():
                     shares = int(pos["shares"])
                     acct = pos.get("account_type") or "genbutsu"
                     zc   = pos.get("zyoutoeki_c") or None
-                    print(f"  📤 引け成行売り: [{code}] {name} {shares}株 [{acct}]")
+                    tag  = "当日分" if pos["date"] == TODAY else "前日以前"
+                    print(f"  📤 引け成行売り: [{code}] {name} {shares}株 [{acct}]（{tag}）")
                     mkt_code = db.get_market_code_db(code)
                     result = tachibana_order.place_sell_order(url_request, code, shares, market_code=mkt_code, account_type=acct, zyoutoeki_c=zc)
                     if result["success"]:

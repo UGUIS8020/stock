@@ -29,7 +29,6 @@ import db
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
-from scan_morning_strategy_a_normal import judge_entry_a_normal
 from scan_morning_strategy_a import judge_entry_a
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -60,11 +59,8 @@ SL_PCT = 0.06   # 損切 -6%（変更なし / 同GA結果でもSL-5〜-7%が中�
 BANK_TP_PCT = 0.02   # 利確 +2%（WEAK×銀行 シミュレーション: 勝率88%・平均+1.67%）
 BANK_SL_PCT = 0.03   # 損切 -3%（銀行の標準偏差2%に合わせ早めに切る）
 
-# NORMAL日ギャップダウン逆張り TP/SL
-# 根拠: analyze_a_normal_report.txt OOS検証 gap-5〜0% score5-7 ratio4-8 → wr65.6% avg+0.372%
-# 早期損切りで期待値を担保する（gap<0なのに下がり続ける場合は即切り）
-NORMAL_GAP_TP_PCT = 0.03   # 利確 +3%
-NORMAL_GAP_SL_PCT = 0.01   # 損切 -1%（タイトSLでリバウンド失敗時の損害を最小化）
+# NORMAL日ギャップダウン逆張りパス（TP3%/SL-1%）は2026-07-25に撤廃
+# （ライブ勝率77.8%→0%の悪化を受け、7/12以前のシンプルなWAIT_CONFIRM判定に統一）
 
 # STRONG日ギャップダウン逆張り TP/SL（順張りTP_PCTとは独立: 2026-07-25 分離）
 # 根拠: analyze_a.py OOS検証 STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
@@ -147,37 +143,37 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
         }
 
     if condition in ("NORMAL", "STRONG"):
-        # 上昇率上限: 出尽くし除外（check_surge.py 2026-07-06分析）
-        # NORMAL: gap+0.5〜+1%はavg=-0.070%（OOS 2026-07-12）→ 0.5%以上除外
-        # STRONG: 5%超のみ除外（3〜5%は+1.38%）
-        surge_limit = 0.5 if condition == "NORMAL" else 5.0
+        # 上昇率上限（出尽くし除外）はSTRONGのみ。STRONG: 5%超のみ除外（3〜5%は+1.38%）
+        # NORMALのsurge_limit・gap<0逆張り分岐は2026-07-12に追加したが、
+        # 7/13以降ライブで勝率77.8%→0%に悪化（n=9→2, force_close偏重）したため
+        # 2026-07-25に撤廃し、7/12以前のシンプルな判定（0%以上で待つだけ）に復帰
+        surge_limit = 5.0 if condition == "STRONG" else None
 
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
             #   → 9:03（地合い再判定と同タイミング / analyze_entry_timing: STRONG×9:03 avg+1.41%）
             # NORMAL日CAUTIONは0.5%上昇確認
             #   → 9:07（analyze_entry_timing: NORMAL×9:07が最良 avg+0.43%）
-            threshold = 0.3 if condition == "STRONG" else 0.5
-            trigger   = CONDITION_REFRESH_MIN if condition == "STRONG" else 7
+            threshold  = 0.3 if condition == "STRONG" else 0.5
+            trigger    = CONDITION_REFRESH_MIN if condition == "STRONG" else 7
+            range_desc = f"+{threshold}%〜+{surge_limit:.1f}%" if surge_limit is not None else f"+{threshold}%以上"
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        trigger,
                 "confirm_threshold_pct": threshold,
                 "surge_limit_pct":       surge_limit,
-                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比+{threshold}%〜+{surge_limit:.1f}%でエントリー",
+                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比{range_desc}でエントリー",
             }
         else:
-            # NORMAL日BUY:
-            #   gap 0〜+0.5% → 前日比0.0%以上でエントリー（surge_limit=0.5%）
-            #   gap<0 → ギャップダウン逆張りパス（後続ループで個別処理）
-            #     根拠: OOS gap<0 avg+0.327〜+0.671%, gap+0.5〜+1% avg=-0.070%
+            # NORMAL日BUY: 前日比0.0%以上でエントリー（gap不問・上限なし）
             # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43%）
+            range_desc = f"0.0%〜+{surge_limit:.1f}%" if surge_limit is not None else "0.0%以上"
             return {
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        7,
                 "confirm_threshold_pct": 0.0,
                 "surge_limit_pct":       surge_limit,
-                "description":           f"NORMAL日BUY → 9:07以降 前日比0.0%〜+{surge_limit:.1f}%でエントリー",
+                "description":           f"NORMAL日BUY → 9:07以降 前日比{range_desc}でエントリー",
             }
 
     # UNKNOWN など
@@ -971,34 +967,6 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                       f" TP={STRONG_GAP_TP_PCT*100:.0f}%/SL={STRONG_GAP_SL_PCT*100:.0f}%")
                 confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
-
-            # NORMAL日ギャップダウン逆張りパス
-            # gap<0（寄り付きが前日終値割れ）＋score/ratio条件でリバウンド狙い
-            # TP=3%/SL=-1%（タイトSL）で期待値を担保
-            # 根拠: analyze_a_normal_report OOS gap-5〜0% → avg+0.327〜+0.671%（gap>+1%はavg-0.230%）
-            if (condition == "NORMAL"
-                    and timing["style"] == "WAIT_CONFIRM"
-                    and not ordered[code]
-                    and latest_chg < 0.0):
-                score_c      = c.get("score", 0)
-                ratio_c      = c.get("ratio", 0)
-                today_rise_c = c.get("today_rise", 0)
-                judge_g, reason_g = judge_entry_a_normal(score_c, ratio_c, today_rise_c)
-                if judge_g == "BUY":
-                    open_pos = db.load_open_positions(strategy="A")
-                    if len(open_pos) >= MAX_POSITIONS:
-                        ordered[code] = True
-                        results[code] = f"見送り(上限{MAX_POSITIONS}件)"
-                        print(f"\n  ⚠️ {code} {c['name']}: 上限到達 → 見送り")
-                        continue
-                    ordered[code] = True
-                    results[code] = "発注(NORMAL逆張り)"
-                    c_gap = {**c, "tp_pct": NORMAL_GAP_TP_PCT, "sl_pct": NORMAL_GAP_SL_PCT}
-                    print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% NORMAL逆張り"
-                          f" TP={NORMAL_GAP_TP_PCT*100:.0f}%/SL={NORMAL_GAP_SL_PCT*100:.0f}%"
-                          f"（{reason_g}）")
-                    confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
-                    continue
 
             # WAIT_CONFIRM: 閾値超えの候補を蓄積（B案: 即発注しない）
             if timing["style"] == "WAIT_CONFIRM":
