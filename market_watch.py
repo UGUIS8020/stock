@@ -143,11 +143,14 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
         }
 
     if condition in ("NORMAL", "STRONG"):
-        # 上昇率上限（出尽くし除外）はSTRONGのみ。STRONG: 5%超のみ除外（3〜5%は+1.38%）
-        # NORMALのsurge_limit・gap<0逆張り分岐は2026-07-12に追加したが、
-        # 7/13以降ライブで勝率77.8%→0%に悪化（n=9→2, force_close偏重）したため
-        # 2026-07-25に撤廃し、7/12以前のシンプルな判定（0%以上で待つだけ）に復帰
-        surge_limit = 5.0 if condition == "STRONG" else None
+        # 上昇率上限（出尽くし除外）。STRONG: 5%超のみ除外（3〜5%は+1.38%）
+        # NORMAL: 0.5%超で除外（check_surge.py 2026-07-06分析、2026-07-12導入）
+        # 2026-07-25に一度撤廃したが、その根拠（7/13以降の2件のNORMAL負けトレード）は
+        # 実際にはgap<0逆張りパス経由でsurge_limitとは無関係だったと判明。
+        # sim_precise_trades.csv 30,473件のTP/SL込み精密シミュレーションで
+        # gap帯別に検証した結果、上限が緩いほど一貫して悪化（無制限avg-0.159% → 0.5%上限avg-0.032%）
+        # と確認できたため、2026-07-28に0.5%上限を再導入
+        surge_limit = 0.5 if condition == "NORMAL" else 5.0
 
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
@@ -165,7 +168,7 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比{range_desc}でエントリー",
             }
         else:
-            # NORMAL日BUY: 前日比0.0%以上でエントリー（gap不問・上限なし）
+            # NORMAL日BUY: 前日比0.0%以上〜0.5%未満でエントリー（0.5%超は出尽くし除外）
             # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43%）
             range_desc = f"0.0%〜+{surge_limit:.1f}%" if surge_limit is not None else "0.0%以上"
             return {
