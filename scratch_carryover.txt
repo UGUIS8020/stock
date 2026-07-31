@@ -1,0 +1,6 @@
+      date code   name strategy  shares  buy_price  sell_price  pnl_pct exit_reason
+2026-07-29 4063   4063        B     100     5685.0      5769.0     1.48 force_close
+2026-07-29 2693    ＹＫＴ        B     300      299.0       299.0     0.00 force_close
+2026-07-29 6707   6707        B     100     7912.0      7872.0    -0.51 force_close
+2026-07-29 2334   2334        B     200      459.0       447.0    -2.61 force_close
+2026-07-29 4047 関東電化工業        B     100     2413.0      2534.0     5.01          TP

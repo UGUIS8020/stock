@@ -55,12 +55,21 @@ DROP_LO      = -5.0   # 下落下限（GA最適化2026-05-26 20000人・OOS Shar
 DROP_HI      = -3.1   # 下落上限（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
 RB_MIN       = 4      # RBスコア最小値（GA最適化2026-05-26 20000人・OOS Sharpe=+3.502）
 CD_MIN       = 3      # 連続下落日数最小値（cd≥3: 前々日も下落していること）
+
+# 超過下落フィルター（2026-08-01追加）
+# 根拠: sim_precise_trades.csv 15,304件をrb_score>=4・consec_drop>=3・today_rise<0で検証したところ、
+#   「その日の下落幅」-「市場全体の平均リターン」（超過下落幅）が-8%を下回るゾーンだけ
+#   勝率41.7%・平均pnl-0.226%と明確に悪化（それ以外は-8%〜0%でなだらかにWR47〜51%）。
+#   個別の悪材料で市場より突出して売られた銘柄は、市場に連動しただけの下落銘柄より反発しにくい。
+# 除外ラインは-5%（母数の88.7%を維持しつつ明確な崖を除外）。7/30の実トレード5件では
+# 超過下落幅-2.8%〜-3.8%と全てこのライン内で、遡って適用しても結果は変わらないことを確認済み。
+EXCESS_DECLINE_MIN = -5.0
 MIN_VOLUME          = 50_000
 MAX_POSITIONS_PER_DAY = 5      # 1日の最大自動発注件数（安全装置）
 
-DEFAULT_SHARES   = 300
+DEFAULT_SHARES   = 200      # 2026-08-01: 段階的に引き上げ 100→200
 CHEAP_THRESHOLD  = 1_000
-MAX_ORDER_AMOUNT = 300_000
+MAX_ORDER_AMOUNT = 200_000  # 2026-08-01: 段階的に引き上げ 10万→20万円
 
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
 SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
@@ -231,7 +240,7 @@ def scan_dropping_stocks(url_price):
     """
     全銘柄を Tachibana API でスキャンし、
     ・市場全体の AD比率 + 日経騰落率（地合い計算用）
-    ・-5.0〜-6.3% 下落中の銘柄リスト
+    ・-5.0〜-6.3% 下落中の銘柄リスト（市場平均比の超過下落幅がEXCESS_DECLINE_MIN以上のもののみ）
     を返す。戻り値: (ad_ratio, nikkei_change, scanned_cond, dropping)
     """
     http    = urllib3.PoolManager()
@@ -250,6 +259,8 @@ def scan_dropping_stocks(url_price):
         print(f"  日経225: 取得失敗（AD比率のみで判定）", flush=True)
 
     up_count = down_count = 0
+    chg_sum  = 0.0
+    chg_n    = 0
     dropping = []
 
     for i in range(0, total, batch):
@@ -268,6 +279,8 @@ def scan_dropping_stocks(url_price):
                 up_count += 1
             else:
                 down_count += 1
+            chg_sum += chg
+            chg_n   += 1
 
             if DROP_LO <= chg <= DROP_HI and vol >= MIN_VOLUME:
                 dropping.append({
@@ -286,6 +299,17 @@ def scan_dropping_stocks(url_price):
     tot          = up_count + down_count
     ad_ratio     = up_count / tot if tot > 0 else 0.5
     scanned_cond = _classify_condition(ad_ratio, nikkei_change)
+    market_avg_ret = chg_sum / chg_n if chg_n > 0 else 0.0
+
+    # 超過下落フィルター: 市場平均より突出して下落した銘柄（個別要因の急落）を除外
+    before_excess = len(dropping)
+    for c in dropping:
+        c["excess_decline"] = round(c["change_pct"] - market_avg_ret, 2)
+    dropping = [c for c in dropping if c["excess_decline"] >= EXCESS_DECLINE_MIN]
+    excess_excluded = before_excess - len(dropping)
+    if excess_excluded > 0:
+        print(f"  超過下落フィルター（市場平均{market_avg_ret:+.2f}%比 <{EXCESS_DECLINE_MIN}%）: "
+              f"{excess_excluded}件除外", flush=True)
 
     nikkei_str = f"  日経{nikkei_change:+.2f}%" if nikkei_change is not None else ""
     print(f"  スキャン完了: 上昇{up_count:,}件 / 下落{down_count:,}件  AD比率{ad_ratio:.2f}{nikkei_str} → {scanned_cond}")

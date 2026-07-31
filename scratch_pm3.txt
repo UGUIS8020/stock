@@ -1,0 +1,6 @@
+      date code name strategy  shares  buy_price  sell_price  pnl_pct  entry_change_pct status
+2026-07-30 3436 3436        B     100     2843.5      3322.0    16.83             -3.56 closed
+2026-07-30 4043 4043        B     100     3789.0      3791.0     0.05             -3.12 closed
+2026-07-30 4970 4970        B     100    11580.0     13130.0    13.39             -4.14 closed
+2026-07-30 6387 6387        B     100     7300.0      8290.0    13.56             -4.07 closed
+2026-07-30 6976 6976        B     100     8639.0         NaN      NaN             -4.06   open

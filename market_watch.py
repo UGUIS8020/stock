@@ -81,14 +81,14 @@ MAX_WATCH_F =  5   # 戦略F: scoreで降順
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
 LIMIT_ORDER      = False    # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
 LIMIT_WAIT_SECS  = 30       # 指値約定確認の待機秒数
-DEFAULT_SHARES   = 300      # 高値株のデフォルト株数
+DEFAULT_SHARES   = 200      # 高値株のデフォルト株数（2026-08-01: 段階的に引き上げ 100→200）
 CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
-MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額
+MAX_ORDER_AMOUNT = 200_000  # 安い株の1発注上限額（2026-08-01: 段階的に引き上げ 10万→20万円）
 
 
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
-    1,000円未満の安い株は30万円以内で買えるだけ。"""
+    1,000円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
     if price and price < CHEAP_THRESHOLD:
         lots = int(MAX_ORDER_AMOUNT / price / 100)
         return max(lots, 1) * 100
@@ -155,17 +155,25 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
         if judgment == "CAUTION":
             # STRONG日は全銘柄CAUTION（BUYなし）。0.3%で取りこぼしを防ぐ
             #   → 9:03（地合い再判定と同タイミング / analyze_entry_timing: STRONG×9:03 avg+1.41%）
-            # NORMAL日CAUTIONは0.5%上昇確認
-            #   → 9:07（analyze_entry_timing: NORMAL×9:07が最良 avg+0.43%）
-            threshold  = 0.3 if condition == "STRONG" else 0.5
-            trigger    = CONDITION_REFRESH_MIN if condition == "STRONG" else 7
-            range_desc = f"+{threshold}%〜+{surge_limit:.1f}%" if surge_limit is not None else f"+{threshold}%以上"
+            if condition == "STRONG":
+                threshold = 0.3
+                trigger   = CONDITION_REFRESH_MIN
+                range_desc = f"+{threshold}%〜+{surge_limit:.1f}%"
+                return {
+                    "style":                 "WAIT_CONFIRM",
+                    "ai_trigger_min":        trigger,
+                    "confirm_threshold_pct": threshold,
+                    "surge_limit_pct":       surge_limit,
+                    "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比{range_desc}でエントリー",
+                }
+            # NORMAL日CAUTIONは見送り（2026-07-29: 従来threshold=0.5%とsurge_limit=0.5%が
+            # 完全に一致しており、エントリー条件と出尽くし除外条件が同時に成立して
+            # 実質的に一度も発注されない死んだコードパスだったため、明示的なSKIPに変更）
             return {
-                "style":                 "WAIT_CONFIRM",
-                "ai_trigger_min":        trigger,
-                "confirm_threshold_pct": threshold,
-                "surge_limit_pct":       surge_limit,
-                "description":           f"{condition}日CAUTION → 9:{trigger:02d}以降 前日比{range_desc}でエントリー",
+                "style":                 "SKIP",
+                "ai_trigger_min":        None,
+                "confirm_threshold_pct": None,
+                "description":           "NORMAL日CAUTION → 見送り（BUY判定のみ発注対象）",
             }
         else:
             # NORMAL日BUY: 前日比0.0%以上〜0.5%未満でエントリー（0.5%超は出尽くし除外）
@@ -975,7 +983,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if timing["style"] == "WAIT_CONFIRM":
                 surge_limit = timing.get("surge_limit_pct")
 
-                # 上昇率上限チェック: 出尽くし除外（NORMAL≥3% / STRONG≥5%）
+                # 上昇率上限チェック: 出尽くし除外（NORMAL≥0.5% / STRONG≥5%）
                 if surge_limit is not None and latest_chg >= surge_limit:
                     if not ordered[code]:
                         ordered[code] = True

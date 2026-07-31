@@ -67,8 +67,8 @@ SL_PCT = 0.05   # -5%（analyze_a TP/SL最適化結果: Sharpe=6.558, WR=68.5%�
 
 # ── 発注設定 ──────────────────────────────────────
 DAYTIME_TRADING       = True      # False にすると監視のみ（発注なし）
-MAX_ORDER_AMOUNT      = 300_000   # 安い株の1発注上限額（30万円）
-DEFAULT_SHARES        = 300       # 高値株のデフォルト株数
+MAX_ORDER_AMOUNT      = 200_000   # 安い株の1発注上限額（2026-08-01: 段階的に引き上げ 10万→20万円）
+DEFAULT_SHARES        = 200       # 高値株のデフォルト株数（2026-08-01: 段階的に引き上げ 100→200）
 CHEAP_THRESHOLD       = 1_000     # この価格未満は金額ベースで株数計算
 MAX_DAYTIME_POSITIONS = 10        # 日中最大ポジション数（戦略A とは別カウント）
 MIN_VOLUME            = 50_000    # 前日出来高フィルター（5万株未満は除外）
