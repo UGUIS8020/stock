@@ -24,6 +24,15 @@ CONDITION_BADGE = {
 app.jinja_env.globals["CONDITION_BADGE_MAP"] = CONDITION_BADGE
 
 
+def format_yen(value):
+    """符号付き・3桁カンマ区切りの円表示（例: -12345 -> '-12,345円'）"""
+    sign = "-" if value < 0 else "+"
+    return f"{sign}{abs(value):,}円"
+
+
+app.jinja_env.filters["yen"] = format_yen
+
+
 def get_conn():
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -102,20 +111,29 @@ def get_today_candidates(conn):
 
 def get_trade_history(conn):
     rows = conn.execute(
-        """SELECT date, code, name, pnl_pct, sell_time, exit_reason, strategy
+        """SELECT date, code, name, shares, buy_price, sell_price, pnl_pct,
+                  sell_time, exit_reason, strategy
            FROM positions WHERE status = 'closed'
            ORDER BY date, sell_time"""
     ).fetchall()
 
+    # 損益%は取引ごとの個別リターンであり、単純合計（例: 115件×平均+0.67%→+76%）は
+    # 複利でも投資額加味でもないため実際の資産増加を意味しない。
+    # 実額(円)ベースの損益こそが実際に増減した金額であり、これを主指標として累積する。
     trades = [dict(r) for r in rows]
-    cumulative = 0.0
+    cumulative_yen = 0
     wins = 0
     points = []
     for t in trades:
         pnl = t["pnl_pct"] or 0.0
-        cumulative += pnl
-        t["cumulative_pct"] = round(cumulative, 2)
-        points.append(t["cumulative_pct"])
+        if t["sell_price"] is not None:
+            yen = (t["sell_price"] - t["buy_price"]) * t["shares"]
+        else:
+            yen = 0
+        cumulative_yen += yen
+        t["yen_pnl"] = round(yen)
+        t["cumulative_yen"] = round(cumulative_yen)
+        points.append(t["cumulative_yen"])
         if pnl > 0:
             wins += 1
 
@@ -124,13 +142,13 @@ def get_trade_history(conn):
         "trades": list(reversed(trades)),
         "points": points,
         "win_rate": win_rate,
-        "total_pct": round(cumulative, 2),
+        "total_yen": round(cumulative_yen),
         "count": len(trades),
     }
 
 
 def build_sparkline(points, width=640, height=180, pad=28):
-    """累積損益%の推移を表す折れ線SVGを組み立てる（外部JSライブラリ不使用）。"""
+    """累積実現損益(円)の推移を表す折れ線SVGを組み立てる（外部JSライブラリ不使用）。"""
     if not points:
         return None
 
