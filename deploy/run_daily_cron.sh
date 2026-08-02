@@ -18,9 +18,12 @@ import sys
 import jpholiday
 from datetime import date
 today = date.today()
-sys.exit(0 if (today.weekday() < 5 and not jpholiday.is_holiday(today)) else 1)
+# jpholidayは国民の祝日のみ判定するため、東証の年末年始休場(祝日ではない慣例休場)は別途除外する
+tse_year_end_new_year = (today.month == 12 and today.day == 31) or (today.month == 1 and today.day in (2, 3))
+is_trading_day = today.weekday() < 5 and not jpholiday.is_holiday(today) and not tse_year_end_new_year
+sys.exit(0 if is_trading_day else 1)
 "; then
-    echo "$(date '+%F %T'): 休日のためrun_daily.pyをスキップ"
+    echo "$(date '+%F %T'): 休日（祝日 or 年末年始休場）のためrun_daily.pyをスキップ"
     exit 0
 fi
 
