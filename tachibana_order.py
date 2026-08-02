@@ -30,7 +30,8 @@ def _load_zyoutoeki_c():
 ZYOUTOEKI_C = _load_zyoutoeki_c()
 
 # ── 安全装置 ────────────────────────────────────────────
-LIVE_TRADING = True
+# .envのLIVE_TRADINGで環境ごとに切り替え可能（未設定時は従来通りTrue）
+LIVE_TRADING = os.getenv("LIVE_TRADING", "true").strip().lower() in ("1", "true", "yes")
 
 # 1発注あたりの上限金額（安全装置）
 MAX_ORDER_AMOUNT = 500_000   # 50万円
