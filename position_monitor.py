@@ -393,14 +393,18 @@ def main():
     # バックアップとは無関係。run_daily.pyのターミナルが16:45より前に閉じられると
     # 本日分の建玉データが一度もS3に上がらず、翌朝のdownload_db.pyで消えてしまうため、
     # position_monitor終了（ほぼ確実に完走する15:28前後）の直後にも独立してバックアップする。
-    try:
-        import boto3 as _boto3
-        _s3 = _boto3.client("s3")
-        _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
-        _s3.upload_file(_db_path, os.getenv("S3_BUCKET", "shibuya8020"), "stock-db/stock.db")
-        print(f"  ☁️  S3バックアップ完了（引け後・建玉データ保護）")
-    except Exception as e:
-        print(f"  ⚠️  S3バックアップ失敗（16:45の自動アップロードに期待）: {e}")
+    # モックモード（LIVE_TRADING=False）ではモックポジションで共有S3のDBを汚染しないようアップロードしない。
+    if not tachibana_order.LIVE_TRADING:
+        print(f"  🔧 [モックモード] S3バックアップはスキップします（LIVE_TRADING=False）")
+    else:
+        try:
+            import boto3 as _boto3
+            _s3 = _boto3.client("s3")
+            _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+            _s3.upload_file(_db_path, os.getenv("S3_BUCKET", "shibuya8020"), "stock-db/stock.db")
+            print(f"  ☁️  S3バックアップ完了（引け後・建玉データ保護）")
+        except Exception as e:
+            print(f"  ⚠️  S3バックアップ失敗（16:45の自動アップロードに期待）: {e}")
 
     # 16:30まで待機してyfinanceで当日シグナルを検証
     now = datetime.now(JST)
