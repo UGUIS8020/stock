@@ -29,6 +29,7 @@ cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
 import db as _db
 _db.init_db()
 
+import tachibana_order
 from scan_morning_strategy_c import scan_strategy_c, verify_strategy_c
 
 _BASE_DIR = Path(__file__).parent
@@ -783,16 +784,20 @@ def main():
     print(f"\n✅ 完了")
 
     # ── S3にDBを自動アップロード ──
-    import boto3 as _boto3
-    s3_bucket = os.getenv("S3_BUCKET", "shibuya8020")
-    s3_key    = "stock-db/stock.db"
-    db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
-    try:
-        _s3 = _boto3.client("s3")
-        _s3.upload_file(db_path, s3_bucket, s3_key)
-        print(f"☁️  S3アップロード完了（s3://{s3_bucket}/{s3_key}）")
-    except Exception as e:
-        print(f"⚠️  S3アップロードエラー: {e}")
+    # モックモード（LIVE_TRADING=False）ではモックポジションで共有S3のDBを汚染しないようアップロードしない。
+    if not tachibana_order.LIVE_TRADING:
+        print(f"🔧 [モックモード] S3アップロードはスキップします（LIVE_TRADING=False）")
+    else:
+        import boto3 as _boto3
+        s3_bucket = os.getenv("S3_BUCKET", "shibuya8020")
+        s3_key    = "stock-db/stock.db"
+        db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+        try:
+            _s3 = _boto3.client("s3")
+            _s3.upload_file(db_path, s3_bucket, s3_key)
+            print(f"☁️  S3アップロード完了（s3://{s3_bucket}/{s3_key}）")
+        except Exception as e:
+            print(f"⚠️  S3アップロードエラー: {e}")
 
 
 if __name__ == "__main__":
