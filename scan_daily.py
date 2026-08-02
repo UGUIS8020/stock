@@ -784,7 +784,7 @@ def main():
 
     # ── S3にDBを自動アップロード ──
     import boto3 as _boto3
-    s3_bucket = "shibuya8020"
+    s3_bucket = os.getenv("S3_BUCKET", "shibuya8020")
     s3_key    = "stock-db/stock.db"
     db_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
     try:

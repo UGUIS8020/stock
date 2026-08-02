@@ -397,7 +397,7 @@ def main():
         import boto3 as _boto3
         _s3 = _boto3.client("s3")
         _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
-        _s3.upload_file(_db_path, "shibuya8020", "stock-db/stock.db")
+        _s3.upload_file(_db_path, os.getenv("S3_BUCKET", "shibuya8020"), "stock-db/stock.db")
         print(f"  ☁️  S3バックアップ完了（引け後・建玉データ保護）")
     except Exception as e:
         print(f"  ⚠️  S3バックアップ失敗（16:45の自動アップロードに期待）: {e}")

@@ -36,6 +36,9 @@ import os
 import sys
 import argparse
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -522,7 +525,7 @@ def _upload_to_s3(*file_paths):
     try:
         import boto3
         s3 = boto3.client("s3")
-        bucket = "shibuya8020"
+        bucket = os.getenv("S3_BUCKET", "shibuya8020")
         for path in file_paths:
             if not os.path.exists(path):
                 continue

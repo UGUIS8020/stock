@@ -15,10 +15,12 @@ import sys
 import os
 import argparse
 from pathlib import Path
+from dotenv import load_dotenv
 
 sys.stdout.reconfigure(encoding="utf-8")
+load_dotenv()
 
-S3_BUCKET      = "shibuya8020"
+S3_BUCKET      = os.getenv("S3_BUCKET", "shibuya8020")
 S3_DB_KEY      = "stock-db/stock.db"
 S3_OPT_PREFIX  = "stock-optimize/"
 
