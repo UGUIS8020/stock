@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stock 監視ダッシュボード</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="page">
+  <header class="page-header">
+    <h1>stock 監視ダッシュボード</h1>
+    <div class="muted small">最終描画: {{ generated_at }}</div>
+  </header>
+
+  {% if db_missing %}
+  <section class="card">
+    <p class="badge critical">DBが見つかりません</p>
+    <p>data/stock.db がまだ存在しません。fetch_db.py が一度も成功していない可能性があります。</p>
+  </section>
+  {% else %}
+
+  <!-- 稼働状況ヘルスストリップ -->
+  <section class="health-strip card">
+    <div class="health-item">
+      <span class="label">DB最終更新</span>
+      <span class="value">{{ health.age_min }}分前</span>
+      <span class="muted small">({{ health.mtime }})</span>
+    </div>
+    <div class="health-item">
+      <span class="label">地合い（{{ health.latest_market_date or "―" }}）</span>
+      <span class="badge {{ health.badge }}">{{ health.latest_condition or "不明" }}</span>
+    </div>
+    <div class="health-item">
+      <span class="label">本日のcandidates_log</span>
+      {% if health.is_today_candidates %}
+        <span class="badge good">更新あり</span>
+      {% else %}
+        <span class="badge warning">未更新</span>
+      {% endif %}
+    </div>
+    <div class="health-item">
+      <span class="label">本日のmarket_log</span>
+      {% if health.is_today_market_log %}
+        <span class="badge good">更新あり</span>
+      {% else %}
+        <span class="badge warning">未更新</span>
+      {% endif %}
+    </div>
+  </section>
+
+  <!-- スタットタイル -->
+  <section class="stat-row">
+    <div class="stat-tile card">
+      <div class="label">保有ポジション数</div>
+      <div class="value">{{ positions|length }}</div>
+    </div>
+    <div class="stat-tile card">
+      <div class="label">累積損益（全期間）</div>
+      <div class="value {{ 'delta-good' if history.total_pct >= 0 else 'delta-bad' }}">
+        {{ "%+.2f"|format(history.total_pct) }}%
+      </div>
+    </div>
+    <div class="stat-tile card">
+      <div class="label">勝率</div>
+      <div class="value">{{ history.win_rate if history.win_rate is not none else "―" }}{{ "%" if history.win_rate is not none }}</div>
+    </div>
+    <div class="stat-tile card">
+      <div class="label">決済済み取引数</div>
+      <div class="value">{{ history.count }}</div>
+    </div>
+  </section>
+
+  <!-- 保有ポジション -->
+  <section class="card">
+    <h2>保有ポジション</h2>
+    {% if positions %}
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>コード</th><th>銘柄名</th><th>戦略</th><th>株数</th>
+          <th>買値</th><th>TP</th><th>SL</th>
+          <th>参考現在値</th><th>含み損益</th><th>建玉時刻</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in positions %}
+        <tr>
+          <td>{{ p.code }}</td>
+          <td>{{ p.name }}</td>
+          <td>{{ p.strategy }}</td>
+          <td class="num">{{ p.shares }}</td>
+          <td class="num">{{ "%.0f"|format(p.buy_price) }}</td>
+          <td class="num">{{ "%.0f"|format(p.tp_price) }}</td>
+          <td class="num">{{ "%.0f"|format(p.sl_price) }}</td>
+          <td class="num">
+            {% if p.ref_price %}{{ "%.0f"|format(p.ref_price) }}<span class="muted small">（{{ p.ref_time }}時点・遅延あり）</span>{% else %}―{% endif %}
+          </td>
+          <td class="num {{ 'delta-good' if p.pnl_pct and p.pnl_pct >= 0 else 'delta-bad' if p.pnl_pct else '' }}">
+            {% if p.pnl_pct is not none %}{{ "%+.2f"|format(p.pnl_pct) }}%{% else %}―{% endif %}
+          </td>
+          <td>{{ p.buy_time }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted">保有中のポジションはありません。</p>
+    {% endif %}
+  </section>
+
+  <!-- 本日の候補銘柄 -->
+  <section class="card">
+    <h2>本日の候補銘柄・地合い判定{% if candidates_date %}（{{ candidates_date }}）{% endif %}</h2>
+    {% if candidates %}
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>戦略</th><th>コード</th><th>銘柄名</th><th>地合い</th>
+          <th>判定</th><th>スコア</th><th>ratio</th><th>理由</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in candidates %}
+        <tr>
+          <td>{{ c.strategy }}</td>
+          <td>{{ c.code }}</td>
+          <td>{{ c.name }}</td>
+          <td><span class="badge {{ CONDITION_BADGE_MAP[c.condition] if c.condition in CONDITION_BADGE_MAP else 'info' }}">{{ c.condition }}</span></td>
+          <td>
+            {% if c.judgment == 'BUY' %}<span class="badge good">BUY</span>
+            {% elif c.judgment == 'CAUTION' %}<span class="badge warning">CAUTION</span>
+            {% else %}{{ c.judgment }}{% endif %}
+          </td>
+          <td class="num">{{ "%.1f"|format(c.score) if c.score is not none else "―" }}</td>
+          <td class="num">{{ "%.2f"|format(c.ratio) if c.ratio is not none else "―" }}</td>
+          <td class="muted small">{{ c.reason or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted">本日の候補データはまだありません。</p>
+    {% endif %}
+  </section>
+
+  <!-- 取引履歴・損益推移 -->
+  <section class="card">
+    <h2>取引履歴・累積損益推移</h2>
+    {% if chart %}
+    <div class="viz-root">
+      <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" class="sparkline" role="img"
+           aria-label="累積損益推移。最終値 {{ '%+.2f'|format(chart.last_value) }}%">
+        <line x1="0" y1="{{ chart.zero_y }}" x2="{{ chart.width }}" y2="{{ chart.zero_y }}" class="zero-line" />
+        <path d="{{ chart.path_d }}" class="spark-line" fill="none" />
+        {% for d in chart.dots %}
+        <circle cx="{{ d.x }}" cy="{{ d.y }}" r="4" class="spark-dot"
+                data-value="{{ '%+.2f'|format(d.value) }}%" />
+        {% endfor %}
+        <circle cx="{{ chart.last_x }}" cy="{{ chart.last_y }}" r="5" class="spark-end" />
+        <text x="{{ chart.last_x - 6 }}" y="{{ chart.last_y - 12 if chart.last_value >= 0 else chart.last_y + 20 }}"
+              class="spark-end-label" text-anchor="end">{{ "%+.2f"|format(chart.last_value) }}%</text>
+      </svg>
+      <div class="spark-tooltip" id="spark-tooltip" hidden></div>
+      <div class="muted small">高値 {{ "%+.2f"|format(chart.hi) }}% ／ 安値 {{ "%+.2f"|format(chart.lo) }}%（点にマウスを合わせると値を表示）</div>
+    </div>
+    {% else %}
+    <p class="muted">決済済みの取引がまだありません。</p>
+    {% endif %}
+
+    {% if history.trades %}
+    <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>日付</th><th>コード</th><th>銘柄名</th><th>戦略</th>
+          <th>決済時刻</th><th>損益</th><th>累積損益</th><th>決済理由</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in history.trades %}
+        <tr>
+          <td>{{ t.date }}</td>
+          <td>{{ t.code }}</td>
+          <td>{{ t.name }}</td>
+          <td>{{ t.strategy }}</td>
+          <td>{{ t.sell_time }}</td>
+          <td class="num {{ 'delta-good' if t.pnl_pct and t.pnl_pct >= 0 else 'delta-bad' if t.pnl_pct else '' }}">
+            {% if t.pnl_pct is not none %}{{ "%+.2f"|format(t.pnl_pct) }}%{% else %}―{% endif %}
+          </td>
+          <td class="num">{{ "%+.2f"|format(t.cumulative_pct) }}%</td>
+          <td class="muted small">{{ t.exit_reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
+  </section>
+
+  {% endif %}
+</div>
+<script src="{{ url_for('static', filename='chart.js') }}"></script>
+</body>
+</html>
