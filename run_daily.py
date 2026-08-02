@@ -43,6 +43,23 @@ def get_prev_business_day():
     return prev.strftime("%Y%m%d")
 
 
+def is_trading_day(d=None):
+    """土日・祝日・東証の年末年始休場（12/31・1/2・1/3、祝日ではない取引所慣例）を除く営業日か判定する。
+    jpholidayは国民の祝日のみ判定するため、年末年始休場は別途明示的に除外する。"""
+    d = d or datetime.now(JST).date()
+    if d.weekday() >= 5:
+        return False
+    if (d.month == 12 and d.day == 31) or (d.month == 1 and d.day in (2, 3)):
+        return False
+    try:
+        import jpholiday
+        if jpholiday.is_holiday(d):
+            return False
+    except ImportError:
+        pass
+    return True
+
+
 def run_step(label, cmd, cwd):
     """サブプロセスを実行してリターンコードを返す。Ctrl+C は graceful に処理。"""
     print(f"\n{'='*60}")
@@ -69,6 +86,10 @@ def main():
     print(f"{'='*60}")
     print(f"  run_daily.py 起動（{today}）")
     print(f"{'='*60}")
+
+    if not is_trading_day():
+        print(f"\n  ⏸️  本日（{today}）は休日（土日・祝日・年末年始休場）のため実行しません")
+        return
 
     # ── Step 1: S3から最新DBをダウンロード ───────────────
     rc = run_step("【Step 1/4】download_db.py（S3から最新DBをダウンロード）",
