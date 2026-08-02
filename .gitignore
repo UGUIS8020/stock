@@ -6,6 +6,9 @@ venv
 # ダッシュボード(S3から定期取得するローカルコピー・git管理不要)
 dashboard/data/
 
+# EC2 cron実行ログ
+logs/
+
 # 大容量・生成ファイル（GitHubにコミット不要）
 out/stock.db
 *.db
