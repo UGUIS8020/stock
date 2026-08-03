@@ -14,11 +14,14 @@ Stage 2（daytime.py起動時・市場開始直後）で別途確認する。
 しきい値はdaytime.pyの既存定数をそのまま参照し、値を重複定義しない。
 """
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 import db
 from daytime import MA5_DEV_MAX, MA25_DEV_MAX, MIN_VOLUME, PREV_RISE_MIN
+
+JST = timezone(timedelta(hours=9))
 
 
 def scan_d_prefilter(as_of_date=None):
@@ -66,7 +69,9 @@ def scan_d_prefilter(as_of_date=None):
         if ma5_dev > MA5_DEV_MAX or ma25_dev > MA25_DEV_MAX:
             continue
 
-        entry_date = str(df.iloc[-1]["Date"])
+        # 候補の有効日は「データの最新日（=前営業日）」ではなく「これから取引される当日」。
+        # as_of_date指定時（バックテスト用）はその日付をそのまま使う。
+        entry_date = str(as_of_date) if as_of_date is not None else datetime.now(JST).strftime("%Y-%m-%d")
         rows.append({
             "date": entry_date,
             "strategy": "D",
