@@ -68,14 +68,16 @@ SL_PCT = 0.05   # -5%（analyze_a TP/SL最適化結果: Sharpe=6.558, WR=68.5%�
 # ── 候補銘柄ソース ────────────────────────────────
 # True: scan_morning_strategy_d_candidates.py の戦略D専用候補（candidates_log, strategy='D'）を使う
 # False: 従来通りscan_results（戦略A用TOP20〜30リスト）を使う
-# 2026-08-04: scan_resultsは母集団ミスマッチと判明したため新設。市場時間外の検証が
-# 完了するまではFalseのまま据え置く（安全側のデフォルト）。
-USE_D_CANDIDATE_SCAN  = False
+# 2026-08-04: scan_resultsは母集団ミスマッチと判明したため新設。テスト運用のため
+# 2026-08-05からTrueに切り替え、建玉サイズを半分にして様子を見る（下記参照）。
+USE_D_CANDIDATE_SCAN  = True
 
 # ── 発注設定 ──────────────────────────────────────
 DAYTIME_TRADING       = True      # False にすると監視のみ（発注なし）
-MAX_ORDER_AMOUNT      = 200_000   # 安い株の1発注上限額（2026-08-01: 段階的に引き上げ 10万→20万円）
-DEFAULT_SHARES        = 200       # 高値株のデフォルト株数（2026-08-01: 段階的に引き上げ 100→200）
+# 2026-08-05: 新候補ソース(USE_D_CANDIDATE_SCAN)のテスト運用のため、
+# 検証が終わるまで戦略Dのみ建玉サイズを半分にする（20万円→10万円 / 200株→100株）。
+MAX_ORDER_AMOUNT      = 100_000   # 安い株の1発注上限額（テスト運用中につき半分）
+DEFAULT_SHARES        = 100       # 高値株のデフォルト株数（テスト運用中につき半分）
 CHEAP_THRESHOLD       = 1_000     # この価格未満は金額ベースで株数計算
 MAX_DAYTIME_POSITIONS = 10        # 日中最大ポジション数（戦略A とは別カウント）
 MIN_VOLUME            = 50_000    # 前日出来高フィルター（5万株未満は除外）
