@@ -72,6 +72,7 @@ from scan_morning_strategy_b import judge_entry_b
 from scan_morning_macro_scan import (
     scan_strategy_d, calc_stop_loss, calc_score_d,
 )
+from scan_morning_strategy_d_candidates import scan_d_prefilter
 
 _BASE_DIR          = Path(__file__).parent
 SCAN_CSV           = str(_BASE_DIR / "out" / "scan_results.csv")
@@ -504,9 +505,18 @@ def main():
                       f"{price_str} {ask_s} {bid_s} {ratio_s} {drop_str:>10} "
                       f"{tp_price:>8,}円 {sl_price:>8,}円 {rb_score:>4}点")
                 
-    # ── 4.5 戦略D: 大型株マクロ連動スキャン ──
+    # ── 4.5 戦略D: 大型株マクロ連動スキャン（表示専用・戦略Dの実発注候補とは別物）──
     macro = fetch_macro_indicators(usdjpy)
     scan_strategy_d(macro, condition, tachibana_prices=tachibana_prices)
+
+    # ── 4.6 戦略D専用候補スキャン（Stage 1: 事前フィルタ）──
+    # daytime.py の USE_D_CANDIDATE_SCAN=True 時にのみ使われる（2026-08-04追加）。
+    try:
+        d_candidate_rows = scan_d_prefilter()
+        print(f"  戦略D専用候補（事前フィルタ）: {len(d_candidate_rows)}件")
+        candidate_rows.extend(d_candidate_rows)
+    except Exception as e:
+        print(f"  ⚠️  戦略D専用候補スキャンでエラー: {e}")
 
     # ── 5. 候補銘柄ログ保存 ──
     if candidate_rows:

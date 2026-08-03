@@ -65,6 +65,13 @@ POLL_INTERVAL    = 15   # 秒
 TP_PCT = 0.03   # +3%（STRONG地合い × gap小 の平均高値 +2.39% に基づく）
 SL_PCT = 0.05   # -5%（analyze_a TP/SL最適化結果: Sharpe=6.558, WR=68.5%）
 
+# ── 候補銘柄ソース ────────────────────────────────
+# True: scan_morning_strategy_d_candidates.py の戦略D専用候補（candidates_log, strategy='D'）を使う
+# False: 従来通りscan_results（戦略A用TOP20〜30リスト）を使う
+# 2026-08-04: scan_resultsは母集団ミスマッチと判明したため新設。市場時間外の検証が
+# 完了するまではFalseのまま据え置く（安全側のデフォルト）。
+USE_D_CANDIDATE_SCAN  = False
+
 # ── 発注設定 ──────────────────────────────────────
 DAYTIME_TRADING       = True      # False にすると監視のみ（発注なし）
 MAX_ORDER_AMOUNT      = 200_000   # 安い株の1発注上限額（2026-08-01: 段階的に引き上げ 10万→20万円）
@@ -171,17 +178,39 @@ TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 # ══════════════════════════════════════════════════
 
 def load_candidates():
-    """scan_results から直近スキャン日の候補銘柄を取得する。"""
+    """戦略D専用候補（candidates_log, strategy='D'）を優先して読み込み、
+    未生成の場合はscan_results（戦略A用TOP20〜30リスト）にフォールバックする。
+
+    2026-08-04の検証で、scan_resultsは戦略A用に絞られた狭い候補プール（1日20〜30銘柄）
+    であり、戦略Dのモメンタム条件（市場全体では1日150〜200銘柄が該当）とは母集団が
+    ミスマッチしていることが判明。scan_morning_strategy_d_candidates.py の事前フィルタ
+    結果（USE_D_CANDIDATE_SCAN=Trueの場合のみ有効）に切り替えられるようにする。
+    """
     conn = db.get_conn()
     try:
-        row = conn.execute("SELECT MAX(scan_date) FROM scan_results").fetchone()
-        if not row or not row[0]:
-            return []
-        latest_date = row[0]
-        df = pd.read_sql(
-            "SELECT * FROM scan_results WHERE scan_date=?", conn,
-            params=(latest_date,)
-        )
+        if USE_D_CANDIDATE_SCAN:
+            df = pd.read_sql(
+                "SELECT code, name, score FROM candidates_log WHERE strategy='D' AND date=?",
+                conn, params=(TODAY,)
+            )
+            if not df.empty:
+                print(f"  候補銘柄: {len(df)}件（戦略D専用スキャン・{TODAY}）")
+                source = "d_scan"
+            else:
+                df = None
+        else:
+            df = None
+
+        if df is None:
+            row = conn.execute("SELECT MAX(scan_date) FROM scan_results").fetchone()
+            if not row or not row[0]:
+                return []
+            latest_date = row[0]
+            df = pd.read_sql(
+                "SELECT * FROM scan_results WHERE scan_date=?", conn,
+                params=(latest_date,)
+            )
+            source = "scan_results"
     finally:
         conn.close()
 
@@ -196,7 +225,10 @@ def load_candidates():
         if excluded > 0:
             print(f"  🚫 日計取引制限銘柄を除外: {excluded}件 {restricted & set(df['code'].astype(str).tolist()) or restricted}")
 
-    print(f"  候補銘柄: {len(df)}件（スキャン日: {latest_date}）")
+    if source == "scan_results":
+        print(f"  候補銘柄: {len(df)}件（スキャン日: {latest_date}）")
+    else:
+        print(f"  候補銘柄: {len(df)}件（除外後）")
     return df.to_dict("records")
 
 
