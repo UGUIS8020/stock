@@ -84,12 +84,15 @@ def get_open_positions(conn):
         ref_is_daily_close = False
 
         # intraday_prices（監視対象銘柄のみ・記録が疎）に無い場合は
-        # daily_prices の直近終値で代用する（多少の時差は許容）
+        # daily_prices の終値で代用する（多少の時差は許容）。
+        # ただし買付日以前の終値は使わない —— 押し目買い（買値<前日終値）の
+        # 銘柄で前日終値を参照すると、エントリー時点の下落幅がそのまま逆符号の
+        # 含み益として表示されてしまうため（買付日より後の終値のみ有効）。
         if ref_price is None:
             daily = conn.execute(
                 """SELECT Close, Date FROM daily_prices
-                   WHERE code = ? ORDER BY Date DESC LIMIT 1""",
-                (r["code"],),
+                   WHERE code = ? AND Date > ? ORDER BY Date DESC LIMIT 1""",
+                (r["code"], r["date"]),
             ).fetchone()
             if daily:
                 ref_price = daily["Close"]
