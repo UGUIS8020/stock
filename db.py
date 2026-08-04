@@ -355,6 +355,21 @@ def save_intraday_df(code, date, df):
     conn.close()
 
 
+def save_intraday_snapshot(code, date, time_str, price):
+    """position_monitor.py等が取得したスナップショット価格を1本のバーとしてintraday_pricesに保存する。
+    分足OHLCではなく単一価格しか無いため、open/high/low/closeは同値で保存する。"""
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO intraday_prices "
+        "(code, date, datetime, time, open, high, low, close, volume) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(code), str(date), f"{date} {time_str}", str(time_str),
+         float(price), float(price), float(price), float(price), None),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_intraday(code, date):
     """指定銘柄・日付の分足データを DataFrame で返す。"""
     conn = get_conn()
