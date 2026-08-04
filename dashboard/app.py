@@ -80,6 +80,22 @@ def get_open_positions(conn):
             (r["code"], r["date"]),
         ).fetchone()
         ref_price = ref["close"] if ref else None
+        ref_time = ref["time"] if ref else None
+        ref_is_daily_close = False
+
+        # intraday_prices（監視対象銘柄のみ・記録が疎）に無い場合は
+        # daily_prices の直近終値で代用する（多少の時差は許容）
+        if ref_price is None:
+            daily = conn.execute(
+                """SELECT Close, Date FROM daily_prices
+                   WHERE code = ? ORDER BY Date DESC LIMIT 1""",
+                (r["code"],),
+            ).fetchone()
+            if daily:
+                ref_price = daily["Close"]
+                ref_time = daily["Date"]
+                ref_is_daily_close = True
+
         pnl_pct = (
             round((ref_price - r["buy_price"]) / r["buy_price"] * 100, 2)
             if ref_price
@@ -89,27 +105,15 @@ def get_open_positions(conn):
             {
                 **dict(r),
                 "ref_price": ref_price,
-                "ref_time": ref["time"] if ref else None,
+                "ref_time": ref_time,
+                "ref_is_daily_close": ref_is_daily_close,
                 "pnl_pct": pnl_pct,
             }
         )
     return positions
 
 
-def get_today_candidates(conn):
-    latest = conn.execute("SELECT MAX(date) AS d FROM candidates_log").fetchone()["d"]
-    if not latest:
-        return None, []
-    rows = conn.execute(
-        """SELECT strategy, code, name, condition, score, ratio, judgment, reason
-           FROM candidates_log WHERE date = ?
-           ORDER BY strategy, judgment, score DESC""",
-        (latest,),
-    ).fetchall()
-    return latest, [dict(r) for r in rows]
-
-
-def get_trade_history(conn):
+def get_trade_history(conn, today):
     rows = conn.execute(
         """SELECT date, code, name, shares, buy_price, sell_price, pnl_pct,
                   sell_time, exit_reason, strategy
@@ -123,6 +127,8 @@ def get_trade_history(conn):
     trades = [dict(r) for r in rows]
     cumulative_yen = 0
     wins = 0
+    today_yen = 0
+    today_count = 0
     points = []
     for t in trades:
         pnl = t["pnl_pct"] or 0.0
@@ -136,6 +142,11 @@ def get_trade_history(conn):
         points.append(t["cumulative_yen"])
         if pnl > 0:
             wins += 1
+        # 買付日=本日の決済のみを「本日分」として集計（戦略Bの2泊保有で
+        # 数日前に買って本日決済された分は買付日ベースでは捕捉できない既知の制約）
+        if t["date"] == today:
+            today_yen += yen
+            today_count += 1
 
     win_rate = round(wins / len(trades) * 100, 1) if trades else None
     return {
@@ -144,6 +155,8 @@ def get_trade_history(conn):
         "win_rate": win_rate,
         "total_yen": round(cumulative_yen),
         "count": len(trades),
+        "today_yen": round(today_yen),
+        "today_count": today_count,
     }
 
 
@@ -199,8 +212,7 @@ def index():
     try:
         health = get_health(conn, now)
         positions = get_open_positions(conn)
-        candidates_date, candidates = get_today_candidates(conn)
-        history = get_trade_history(conn)
+        history = get_trade_history(conn, now.strftime("%Y-%m-%d"))
     finally:
         conn.close()
 
@@ -211,8 +223,6 @@ def index():
         db_missing=False,
         health=health,
         positions=positions,
-        candidates_date=candidates_date,
-        candidates=candidates,
         history=history,
         chart=chart,
         generated_at=now.strftime("%Y-%m-%d %H:%M:%S"),

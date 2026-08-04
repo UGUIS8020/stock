@@ -57,6 +57,19 @@
       <div class="value">{{ positions|length }}</div>
     </div>
     <div class="stat-tile card">
+      <div class="label">本日の実現損益</div>
+      <div class="value {{ 'delta-good' if history.today_yen >= 0 else 'delta-bad' }}">
+        {% if history.today_count %}
+          {{ history.today_yen|yen }}
+        {% else %}
+          ―
+        {% endif %}
+      </div>
+      {% if history.today_count %}
+      <div class="sub">{{ history.today_count }}件決済</div>
+      {% endif %}
+    </div>
+    <div class="stat-tile card">
       <div class="label">実現損益合計（全期間）</div>
       <div class="value {{ 'delta-good' if history.total_yen >= 0 else 'delta-bad' }}">
         {{ history.total_yen|yen }}
@@ -96,7 +109,14 @@
           <td class="num">{{ "%.0f"|format(p.tp_price) }}</td>
           <td class="num">{{ "%.0f"|format(p.sl_price) }}</td>
           <td class="num">
-            {% if p.ref_price %}{{ "%.0f"|format(p.ref_price) }}<span class="muted small">（{{ p.ref_time }}時点・遅延あり）</span>{% else %}―{% endif %}
+            {% if p.ref_price %}
+              {{ "%.0f"|format(p.ref_price) }}
+              {% if p.ref_is_daily_close %}
+                <span class="muted small">（{{ p.ref_time }}終値）</span>
+              {% else %}
+                <span class="muted small">（{{ p.ref_time }}時点・遅延あり）</span>
+              {% endif %}
+            {% else %}―{% endif %}
           </td>
           <td class="num {{ 'delta-good' if p.pnl_pct and p.pnl_pct >= 0 else 'delta-bad' if p.pnl_pct else '' }}">
             {% if p.pnl_pct is not none %}{{ "%+.2f"|format(p.pnl_pct) }}%{% else %}―{% endif %}
@@ -109,43 +129,6 @@
     </div>
     {% else %}
     <p class="muted">保有中のポジションはありません。</p>
-    {% endif %}
-  </section>
-
-  <!-- 本日の候補銘柄 -->
-  <section class="card">
-    <h2>本日の候補銘柄・地合い判定{% if candidates_date %}（{{ candidates_date }}）{% endif %}</h2>
-    {% if candidates %}
-    <div class="table-scroll">
-    <table>
-      <thead>
-        <tr>
-          <th>戦略</th><th>コード</th><th>銘柄名</th><th>地合い</th>
-          <th>判定</th><th>スコア</th><th>ratio</th><th>理由</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for c in candidates %}
-        <tr>
-          <td>{{ c.strategy }}</td>
-          <td>{{ c.code }}</td>
-          <td>{{ c.name }}</td>
-          <td><span class="badge {{ CONDITION_BADGE_MAP[c.condition] if c.condition in CONDITION_BADGE_MAP else 'info' }}">{{ c.condition }}</span></td>
-          <td>
-            {% if c.judgment == 'BUY' %}<span class="badge good">BUY</span>
-            {% elif c.judgment == 'CAUTION' %}<span class="badge warning">CAUTION</span>
-            {% else %}{{ c.judgment }}{% endif %}
-          </td>
-          <td class="num">{{ "%.1f"|format(c.score) if c.score is not none else "―" }}</td>
-          <td class="num">{{ "%.2f"|format(c.ratio) if c.ratio is not none else "―" }}</td>
-          <td class="muted small">{{ c.reason or "" }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    </div>
-    {% else %}
-    <p class="muted">本日の候補データはまだありません。</p>
     {% endif %}
   </section>
 

@@ -123,6 +123,11 @@ h2 { font-size: 15px; margin: 0 0 12px; color: var(--text-primary); }
   font-size: 26px;
   font-weight: 600;
 }
+.stat-tile .sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
 
 .badge {
   display: inline-block;

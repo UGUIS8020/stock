@@ -514,17 +514,30 @@ def main(start_now=False, manual=False):
     candidates.sort(key=lambda c: (-c["rb_score"], c["change_pct"]))
 
     # 銘柄名を取得（可能な場合）
+    # scan_resultsは戦略AのTOP20候補のみを含むため、そこにない銘柄（戦略B候補は
+    # 全銘柄が対象）はget_eq_master()（全銘柄マスタ）で補う。
     try:
         conn = db.get_conn()
         code_names = dict(pd.read_sql(
             "SELECT DISTINCT code, name FROM scan_results WHERE name != ''", conn
         ).values.tolist())
         conn.close()
-        for c in candidates:
-            c["name"] = code_names.get(c["code"], c["code"])
     except Exception:
-        for c in candidates:
-            c["name"] = c.get("name", c["code"])
+        code_names = {}
+
+    missing_codes = [c["code"] for c in candidates if c["code"] not in code_names]
+    if missing_codes:
+        try:
+            import jquantsapi
+            cli_master = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
+            master = cli_master.get_eq_master()
+            master["code4"] = master["Code"].astype(str).str[:4]
+            code_names.update(dict(zip(master["code4"], master["CoName"])))
+        except Exception as e:
+            print(f"  ⚠️  銘柄マスタ取得失敗（コード表示にフォールバック）: {e}")
+
+    for c in candidates:
+        c["name"] = code_names.get(c["code"], c.get("name") or c["code"])
 
     # ── 異常フラグ除外（コードで処理）──
     before = len(candidates)
