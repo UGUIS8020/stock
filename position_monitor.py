@@ -26,6 +26,7 @@ GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
 GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
 FORCE_CLOSE_MIN    = 15 * 60 + 20  # 15:20 前日ポジションを引け成行で強制決済
                                    # ※15:25は東証がオークションモードに切り替わり成行注文不可(11481エラー)
+DASHBOARD_SYNC_INTERVAL_SEC = 600  # ダッシュボード向けに10分おきintraday_prices保存+S3同期
 
 
 def load_positions():
@@ -229,6 +230,7 @@ def main():
     ROUTINE_LOG_INTERVAL   = 300   # 通常ステータス（価格・TP/SL・価格取得失敗）は5分に1回だけ出力（ノイズ削減）
     last_routine_print     = {}    # code -> 直近出力時刻（監視自体は15秒間隔のまま変更なし）
     last_no_position_print = None  # 「ポジションなし」待機メッセージの直近出力時刻
+    last_dashboard_sync    = None  # ダッシュボード向けintraday_prices保存+S3同期の直近実施時刻
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
@@ -382,6 +384,28 @@ def main():
 
         if changed:
             save_all_positions(positions)
+
+        # ── ダッシュボード向け: 10分おきに現在値をintraday_pricesへ保存しS3同期 ──
+        if (last_dashboard_sync is None
+                or (now - last_dashboard_sync).total_seconds() >= DASHBOARD_SYNC_INTERVAL_SEC):
+            last_dashboard_sync = now
+            snap_time = now.strftime("%H:%M:%S")
+            for pos in positions:
+                data = prices_data.get(pos["code"])
+                if data and data.get("price"):
+                    try:
+                        db.save_intraday_snapshot(pos["code"], TODAY, snap_time, data["price"])
+                    except Exception as e:
+                        print(f"  ⚠️  ダッシュボード用スナップショット保存失敗 [{pos['code']}]: {e}")
+            if tachibana_order.LIVE_TRADING:
+                try:
+                    import boto3 as _boto3
+                    _s3 = _boto3.client("s3")
+                    _db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "stock.db")
+                    _s3.upload_file(_db_path, os.getenv("S3_BUCKET", "shibuya8020"), "stock-db/stock.db")
+                    print(f"  ☁️  ダッシュボード向けS3同期完了（{snap_time}）")
+                except Exception as e:
+                    print(f"  ⚠️  ダッシュボード向けS3同期失敗: {e}")
 
         remaining_sec = (EXIT_HOUR * 60 + EXIT_MIN - now_min) * 60 - now.second
         time.sleep(min(POLL_INTERVAL, max(1, remaining_sec)))
