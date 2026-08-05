@@ -18,6 +18,30 @@ sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 import tachibana_order
 import db
 
+
+def _is_trading_day(d):
+    """土日・祝日・東証の年末年始休場を除く営業日か判定する（run_daily.pyのis_trading_dayと同ロジック）。"""
+    if d.weekday() >= 5:
+        return False
+    if (d.month == 12 and d.day == 31) or (d.month == 1 and d.day in (2, 3)):
+        return False
+    try:
+        import jpholiday
+        if jpholiday.is_holiday(d):
+            return False
+    except ImportError:
+        pass
+    return True
+
+
+def _prev_trading_day(today_str):
+    """TODAY（"YYYY-MM-DD"）の直前の営業日を"YYYY-MM-DD"で返す。"""
+    d = datetime.strptime(today_str, "%Y-%m-%d").date()
+    d -= timedelta(days=1)
+    while not _is_trading_day(d):
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
 POLL_INTERVAL      = 15
 EXIT_HOUR          = 15
 EXIT_MIN           = 28
@@ -236,17 +260,21 @@ def main():
         now_min = now.hour * 60 + now.minute
 
         # ── 15:20: 引け成行で強制決済 ──
-        # ①前日以前に買ったポジション（戦略B最適化2026-06-23: 2泊保有のため「前日」→「前々日以前」に変更）
+        # ①前々日以前に買ったポジション（戦略B最適化2026-06-23: 2泊保有のため「前日」→「前々日以前」に変更）
         # ②当日買った戦略A/Dのポジション（2026-07-28追加）
         #   戦略A/Dは simulate_precise.py のバックテストが「買った当日1日分の値動きのみ」で
         #   TP/SLを検証しており、翌日以降への持ち越しはバックテスト対象外（想定外のオーバーナイトリスク）。
         #   従来はTODAY分が対象外で、TP/SL未達のまま翌営業日の本ブロックまで無自覚に持ち越されていた。
         #   戦略B（引け前逆張り）は2泊保有が設計通りのため対象外のまま。
+        # 2026-08-05: 上記コメント通りの「前々日以前」に実装されておらず、
+        #   実際には p["date"] < TODAY （前日を含む）のままだったため、戦略Bが
+        #   意図した2泊ではなく1泊で強制決済されていたバグを修正（2216/3407が該当）。
         if not force_closed and now_min >= FORCE_CLOSE_MIN:
             force_closed = True
+            prev_trading_day = _prev_trading_day(TODAY)
             prev_positions = [
                 p for p in load_positions()
-                if p["date"] < TODAY or (p["date"] == TODAY and p.get("strategy") in ("A", "D"))
+                if p["date"] < prev_trading_day or (p["date"] == TODAY and p.get("strategy") in ("A", "D"))
             ]
             if prev_positions:
                 print(f"\n  ⏰ 15:20 引け決済開始（{len(prev_positions)}件）")
