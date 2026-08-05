@@ -961,15 +961,15 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             # gap<0（寄り付きが前日終値割れ）を強い地合いで拾う
             # OOS根拠: STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
             # 専用TP/SL（STRONG_GAP_TP_PCT/SL_PCT）を適用。順張りTP_PCTとは独立（2026-07-25分離）
-            # 2026-08-01: is_v_recovery()によるV字回復確認を追加（フォワードテスト）。
-            #   従来はlatest_chg<0のみで即エントリーしており、まだ下げ止まっていない銘柄を
-            #   買っていた可能性がある（直近8件中1勝のみ・7件force_close）。過去ログが
-            #   日次で上書きされ厳密なバックテストができなかったため、実運用で効果を確認する。
+            # 2026-08-01: is_v_recovery()によるV字回復確認を追加していたが、正式なバックテストを
+            #   経ていない変更だった（過去ログが日次で上書きされ厳密な検証ができなかったため、
+            #   「実運用で効果を確認する」目的の未検証フォワードテストとして投入されていた）。
+            # 2026-08-05: 全体の勝率がバックテスト実績(64.5%)を下回っていることの一因と判断し、
+            #   本来のバックテスト条件（latest_chgのみ判定、V字回復確認なし）に戻した。
             if (condition == "STRONG"
                     and timing["style"] == "WAIT_CONFIRM"
                     and not ordered[code]
-                    and latest_chg < 0.0
-                    and is_v_recovery(histories[code])):
+                    and latest_chg < 0.0):
                 open_pos = db.load_open_positions(strategy="A")
                 if len(open_pos) >= MAX_POSITIONS:
                     ordered[code] = True
@@ -979,7 +979,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 ordered[code] = True
                 results[code] = "発注(STRONG逆張り)"
                 c_gap = {**c, "tp_pct": STRONG_GAP_TP_PCT, "sl_pct": STRONG_GAP_SL_PCT}
-                print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り（V字回復確認済み）"
+                print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り"
                       f" TP={STRONG_GAP_TP_PCT*100:.0f}%/SL={STRONG_GAP_SL_PCT*100:.0f}%")
                 confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
