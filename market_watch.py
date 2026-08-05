@@ -211,6 +211,19 @@ def is_v_recovery(history, dip_threshold=-0.3, recovery_min=0.5):
     return min_chg <= dip_threshold and (latest - min_chg) >= recovery_min
 
 
+# 2026-08-05検証: ratio<=3.0の候補はn=10・勝率70.0%・平均+1.632%（ratio>3.0はn=34・勝率38.2%）。
+# サンプルがまだ少ないため発注ロジック（株数・除外）は変更せず、後から集計しやすいよう
+# 発注時にログへ明示するだけに留める（candidates_logと突き合わせれば集計可能）。
+LOW_RATIO_THRESHOLD = 3.0
+
+
+def _log_low_ratio_candidate(c):
+    """低ratio候補を発注時にログへ明示する分析用マーカー（発注可否・株数には影響しない）。"""
+    ratio = c.get("ratio")
+    if ratio is not None and ratio <= LOW_RATIO_THRESHOLD:
+        print(f"     📊 低ratio候補（ratio={ratio:.2f} ≤ {LOW_RATIO_THRESHOLD}）※分析用マーカー・検証中の指標")
+
+
 # ══════════════════════════════════════════════
 # 9:05 地合い再判定（立花API 実日経 + yfinance 前日終値）
 # ══════════════════════════════════════════════
@@ -954,6 +967,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 ordered[code] = True
                 results[code] = "発注"
                 print(f"\n  🟢 {code} {c['name']}: {timing['description']}")
+                _log_low_ratio_candidate(c)
                 confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
@@ -981,6 +995,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 c_gap = {**c, "tp_pct": STRONG_GAP_TP_PCT, "sl_pct": STRONG_GAP_SL_PCT}
                 print(f"\n  🔄 {code} {c['name']}: gap{latest_chg:+.1f}% STRONG逆張り"
                       f" TP={STRONG_GAP_TP_PCT*100:.0f}%/SL={STRONG_GAP_SL_PCT*100:.0f}%")
+                _log_low_ratio_candidate(c)
                 confirm_and_order(c_gap, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
@@ -1023,6 +1038,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             results[code] = "発注"
             print(f"\n  🟢 {code} {c['name']}: 前日比{latest_chg:+.1f}% ≥ 閾値{threshold:+.1f}%"
                   f" → 発注（上昇率優先）")
+            _log_low_ratio_candidate(c)
             confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
 
         time.sleep(POLL_INTERVAL_SEC)
