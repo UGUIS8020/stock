@@ -81,14 +81,17 @@ MAX_WATCH_F =  5   # 戦略F: scoreで降順
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
 LIMIT_ORDER      = False    # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
 LIMIT_WAIT_SECS  = 30       # 指値約定確認の待機秒数
-DEFAULT_SHARES   = 200      # 高値株のデフォルト株数（2026-08-01: 段階的に引き上げ 100→200）
-CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード
-MAX_ORDER_AMOUNT = 200_000  # 安い株の1発注上限額（2026-08-01: 段階的に引き上げ 10万→20万円）
+DEFAULT_SHARES   = 300      # 高値株のデフォルト株数（2026-08-06: 1,000円未満/以上で成績差が
+                            # あり安い株の方が良いため、安い株側により厚く配分する形で200→300へ。
+                            # CHEAP_THRESHOLDも1,000→1,500円に引き上げ、閾値境界の断層を解消）
+CHEAP_THRESHOLD  = 1_500   # この価格未満は最大株数モード（2026-08-06: 1,000→1,500円）
+MAX_ORDER_AMOUNT = 500_000  # 安い株の1発注上限額（2026-08-06: 20万→50万円。戦略A限定でB/Dより
+                            # 高めの倍率に設定 = 安い株への傾斜配分）
 
 
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
-    1,000円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
+    CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
     if price and price < CHEAP_THRESHOLD:
         lots = int(MAX_ORDER_AMOUNT / price / 100)
         return max(lots, 1) * 100
@@ -1158,7 +1161,7 @@ def main(start_now=False):
     else:
         print(f"  🌐 Yahoo Finance: 遅延価格取得モード（立花APIにログインすると精度向上）")
     mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
-    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / 1,000円以上→{DEFAULT_SHARES}株")
+    print(f"  💼 発注: {mode_str}  {CHEAP_THRESHOLD:,}円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / {CHEAP_THRESHOLD:,}円以上→{DEFAULT_SHARES}株")
 
     print(f"  監視対象: {len(candidates)}銘柄  地合い: {condition}")
     for c in candidates:
