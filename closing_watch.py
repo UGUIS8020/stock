@@ -67,8 +67,10 @@ EXCESS_DECLINE_MIN = -5.0
 MIN_VOLUME          = 50_000
 MAX_POSITIONS_PER_DAY = 5      # 1日の最大自動発注件数（安全装置）
 
-DEFAULT_SHARES   = 300      # 2026-08-01: 100→200 / 2026-08-06: 200→300（戦略A/Dと同水準）
-CHEAP_THRESHOLD  = 1_000
+DEFAULT_SHARES   = 200      # 2026-08-01: 100→200（2026-08-06: 300へ一時変更したが資金所要額を
+                            # 抑えるため200に戻し、代わりにCHEAP_THRESHOLDを引き上げ）
+CHEAP_THRESHOLD  = 1_500   # 2026-08-06: 1,000→1,500円（MAX_ORDER_AMOUNT30万円÷200株の自然な
+                            # 境界と一致するため崖なく連続）
 MAX_ORDER_AMOUNT = 300_000  # 2026-08-01: 10万→20万円 / 2026-08-06: 20万→30万円
 
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
@@ -80,7 +82,7 @@ LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
 def calc_shares(price):
     """価格に応じた発注株数を返す（100株単位）。
-    1,000円未満の安い株は30万円以内で買えるだけ。"""
+    CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
     if price and price < CHEAP_THRESHOLD:
         lots = int(MAX_ORDER_AMOUNT / price / 100)
         return max(lots, 1) * 100
@@ -459,7 +461,7 @@ def main(start_now=False, manual=False):
         return
     print(f"  📡 Tachibana API: リアルタイム価格取得モード")
     mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
-    print(f"  💼 発注: {mode_str}  1,000円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / 1,000円以上→{DEFAULT_SHARES}株\n")
+    print(f"  💼 発注: {mode_str}  {CHEAP_THRESHOLD:,}円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / {CHEAP_THRESHOLD:,}円以上→{DEFAULT_SHARES}株\n")
 
     # 開始待機
     now = datetime.now(JST)
