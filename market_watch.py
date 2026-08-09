@@ -72,7 +72,8 @@ STRONG_GAP_SL_PCT = 0.06   # 損切 -6%
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
 MAX_POSITIONS    = 5   # 戦略A
 MAX_POSITIONS_F  = 3   # 戦略F（銀行）
-MAX_POSITIONS_AN = 3   # 戦略AN（2026-08-10新設。件数がまだ少ない検証済み条件のため小さめから開始）
+MAX_POSITIONS_AN = 5   # 戦略AN（2026-08-10: 3→5。テスト運用中は建玉半分(AN_DEFAULT_SHARES等)で
+                        #   資金拘束を抑えつつ枠を広げる。戦略Dの「建玉半分でテスト運用」と同じ方式）
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A  = 10   # 戦略A: scoreで降順
@@ -83,6 +84,11 @@ MAX_WATCH_AN = 10   # 戦略AN（2026-08-10新設。戦略AのSCORE_MIN_A/TOP_N/
 #   RBスコア≥5.4×連続下落≥1、2年OOS 検証n=149 勝率69.8% avg+0.393%）
 AN_TP_PCT = 0.015
 AN_SL_PCT = 0.059
+
+# 戦略AN テスト運用中の建玉サイズ（2026-08-10: 通常の半分。MAX_ORDER_AMOUNT/DEFAULT_SHARES比を
+#   CHEAP_THRESHOLDと揃え、境界の断層を回避 = 150,000/100 = 1,500 = CHEAP_THRESHOLD）
+AN_DEFAULT_SHARES   = 100
+AN_MAX_ORDER_AMOUNT = 150_000
 
 # 発注設定
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
@@ -96,13 +102,18 @@ MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額（2026-08-06: 50万�
                             # 30万円/200株/閾値1,500円の組み合わせで境界の断層も解消）
 
 
-def calc_shares(price):
+def calc_shares(price, strategy="A"):
     """価格に応じた発注株数を返す（100株単位）。
-    CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
+    CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
+    strategy="AN"はテスト運用中のため半分サイズ（AN_DEFAULT_SHARES/AN_MAX_ORDER_AMOUNT）を使う。"""
+    default_shares, max_order_amount = (
+        (AN_DEFAULT_SHARES, AN_MAX_ORDER_AMOUNT) if strategy == "AN"
+        else (DEFAULT_SHARES, MAX_ORDER_AMOUNT)
+    )
     if price and price < CHEAP_THRESHOLD:
-        lots = int(MAX_ORDER_AMOUNT / price / 100)
+        lots = int(max_order_amount / price / 100)
         return max(lots, 1) * 100
-    return DEFAULT_SHARES
+    return default_shares
 
 
 # ══════════════════════════════════════════════
@@ -692,7 +703,7 @@ def confirm_and_order(candidate, price, url_request, condition=None, entry_chang
     sell_p    = round(price * (1 + tp_pct)) if price else None
     stop_p    = round(price * (1 - sl_pct)) if price else None
 
-    shares    = calc_shares(rec_price or price)
+    shares    = calc_shares(rec_price or price, strategy=strat)
     estimated = int((rec_price or price or 0) * shares)
 
     # 買い余力確認
