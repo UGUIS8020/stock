@@ -261,8 +261,8 @@ def main():
 
         # ── 15:20: 引け成行で強制決済 ──
         # ①前々日以前に買ったポジション（戦略B最適化2026-06-23: 2泊保有のため「前日」→「前々日以前」に変更）
-        # ②当日買った戦略A/Dのポジション（2026-07-28追加）
-        #   戦略A/Dは simulate_precise.py のバックテストが「買った当日1日分の値動きのみ」で
+        # ②当日買った戦略A/D/ANのポジション（2026-07-28追加、2026-08-10にANを追加）
+        #   戦略A/D/ANは simulate_precise.py 系のバックテストが「買った当日1日分の値動きのみ」で
         #   TP/SLを検証しており、翌日以降への持ち越しはバックテスト対象外（想定外のオーバーナイトリスク）。
         #   従来はTODAY分が対象外で、TP/SL未達のまま翌営業日の本ブロックまで無自覚に持ち越されていた。
         #   戦略B（引け前逆張り）は2泊保有が設計通りのため対象外のまま。
@@ -274,7 +274,7 @@ def main():
             prev_trading_day = _prev_trading_day(TODAY)
             prev_positions = [
                 p for p in load_positions()
-                if p["date"] < prev_trading_day or (p["date"] == TODAY and p.get("strategy") in ("A", "D"))
+                if p["date"] < prev_trading_day or (p["date"] == TODAY and p.get("strategy") in ("A", "D", "AN"))
             ]
             if prev_positions:
                 print(f"\n  ⏰ 15:20 引け決済開始（{len(prev_positions)}件）")

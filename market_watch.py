@@ -70,12 +70,19 @@ STRONG_GAP_TP_PCT = 0.04   # 利確 +4%
 STRONG_GAP_SL_PCT = 0.06   # 損切 -6%
 
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
-MAX_POSITIONS   = 5   # 戦略A
-MAX_POSITIONS_F = 3   # 戦略F（銀行）
+MAX_POSITIONS    = 5   # 戦略A
+MAX_POSITIONS_F  = 3   # 戦略F（銀行）
+MAX_POSITIONS_AN = 3   # 戦略AN（2026-08-10新設。件数がまだ少ない検証済み条件のため小さめから開始）
 
 # 監視銘柄数の上限（絞り込み）
-MAX_WATCH_A = 10   # 戦略A: scoreで降順
-MAX_WATCH_F =  5   # 戦略F: scoreで降順
+MAX_WATCH_A  = 10   # 戦略A: scoreで降順
+MAX_WATCH_F  =  5   # 戦略F: scoreで降順
+MAX_WATCH_AN = 10   # 戦略AN（2026-08-10新設。戦略AのSCORE_MIN_A/TOP_N/MAX_WATCH_Aとは無関係の独立枠）
+
+# 戦略AN 専用TP/SL（2026-08-09検証: score1.5〜3.0×ratio1.4〜50×前日騰落-1.2〜+9.1%×
+#   RBスコア≥5.4×連続下落≥1、2年OOS 検証n=149 勝率69.8% avg+0.393%）
+AN_TP_PCT = 0.015
+AN_SL_PCT = 0.059
 
 # 発注設定
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
@@ -124,6 +131,29 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
           "description":  表示用テキスト,
         }
     """
+    # 戦略AN（戦略A・NORMAL日専用の独立パイプライン、2026-08-10新設）:
+    # 検証済み条件はNORMAL日限定・確認なしで即エントリー（confirm_threshold_pct
+    # を極端に低く設定し、価格に関わらず最初のティックで発注させる）。
+    # 9:00の朝予測ではなく、9:03の実測地合い再判定後の確定値で判断するため、
+    # STRONG日CAUTION経路と同じCONDITION_REFRESH_MIN(9:03)まで待つ
+    # （朝の予測地合いだけで即発注すると、9:03の補正で覆るリスクがあるため）。
+    # STRONG/WEAK/PANICでは検証していないため見送り。
+    if strategy == "AN":
+        if condition == "NORMAL":
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        CONDITION_REFRESH_MIN,
+                "confirm_threshold_pct": -99.0,
+                "surge_limit_pct":       None,
+                "description":           "戦略AN NORMAL日 → 9:03の地合い確定後に即エントリー",
+            }
+        return {
+            "style":                 "SKIP",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           f"戦略AN: {condition}日は未検証のため見送り",
+        }
+
     if condition == "PANIC":
         # PANIC日: 全見送り
         # 【根拠】PANIC日 BUY avg -0.27%、終日下落多数
@@ -547,13 +577,19 @@ def load_candidates():
             .sort_values("score", ascending=False)
             .head(MAX_WATCH_A))
 
-    targets = df_a.drop_duplicates(subset=["code"])
+    # ── 戦略AN: 戦略Aとは独立した枠（SCORE_MIN_A/TOP_N/MAX_WATCH_Aの絞り込みを受けない）
+    df_an = (targets[targets["strategy"] == "AN"]
+             .sort_values("score", ascending=False)
+             .head(MAX_WATCH_AN))
+
+    targets = pd.concat([df_a, df_an], ignore_index=True).drop_duplicates(subset=["code", "strategy"])
 
     if len(targets) < original:
-        print(f"  📌 監視対象を絞り込み: {original}件 → {len(targets)}件（A:{len(df_a)}件）")
+        print(f"  📌 監視対象を絞り込み: {original}件 → {len(targets)}件（A:{len(df_a)}件 / AN:{len(df_an)}件）")
 
     candidates = []
     for _, row in targets.iterrows():
+        is_an = str(row["strategy"]) == "AN"
         candidates.append({
             "code":              str(row["code"]),
             "name":              str(row["name"]),
@@ -565,8 +601,8 @@ def load_candidates():
             "reason":            str(row["reason"]),
             "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
             "pending_reeval":    bool(row.get("pending_reeval", False)),
-            "tp_pct":            TP_PCT,
-            "sl_pct":            SL_PCT,
+            "tp_pct":            AN_TP_PCT if is_an else TP_PCT,
+            "sl_pct":            AN_SL_PCT if is_an else SL_PCT,
         })
 
     # 戦略F: WEAK地合いのみ銀行候補を追加
@@ -960,7 +996,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             # OPEN_MARKET: トリガー時刻到達で即発注（変更なし）
             if timing["style"] == "OPEN_MARKET":
                 strat_c  = c.get("strategy", "A")
-                max_pos  = MAX_POSITIONS_F if strat_c == "F" else MAX_POSITIONS
+                max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else MAX_POSITIONS)
                 open_pos = db.load_open_positions(strategy=strat_c)
                 if len(open_pos) >= max_pos:
                     ordered[code] = True
@@ -1030,7 +1066,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if ordered[code]:
                 continue
             strat_c  = c.get("strategy", "A")
-            max_pos  = MAX_POSITIONS_F if strat_c == "F" else MAX_POSITIONS
+            max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else MAX_POSITIONS)
             open_pos = db.load_open_positions(strategy=strat_c)
             if len(open_pos) >= max_pos:
                 ordered[code] = True
