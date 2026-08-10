@@ -99,69 +99,80 @@ def scan_as_candidates(as_of_date=None):
     codes = db.get_all_codes(exclude_etf=True)
 
     rows = []
+    error_codes = []
     for code in codes:
-        if as_of_date is not None:
-            df = pd.read_sql(
-                "SELECT Date, Open, Close, Volume FROM daily_prices "
-                "WHERE code=? AND Date <= ? ORDER BY Date DESC LIMIT 26",
-                conn, params=(code, str(as_of_date)),
-            )
-        else:
-            df = pd.read_sql(
-                "SELECT Date, Open, Close, Volume FROM daily_prices WHERE code=? ORDER BY Date DESC LIMIT 26",
-                conn, params=(code,),
-            )
-        if len(df) < 26:
-            continue
-        df = df.iloc[::-1].reset_index(drop=True)
+        # 2026-08-10追加: 1銘柄の異常データでスキャン全体が例外停止し、
+        # その日の候補が0件になる（既に見つかった候補も失われる）のを防ぐため、
+        # 銘柄単位でエラーを分離する。
+        try:
+            if as_of_date is not None:
+                df = pd.read_sql(
+                    "SELECT Date, Open, Close, Volume FROM daily_prices "
+                    "WHERE code=? AND Date <= ? ORDER BY Date DESC LIMIT 26",
+                    conn, params=(code, str(as_of_date)),
+                )
+            else:
+                df = pd.read_sql(
+                    "SELECT Date, Open, Close, Volume FROM daily_prices WHERE code=? ORDER BY Date DESC LIMIT 26",
+                    conn, params=(code,),
+                )
+            if len(df) < 26:
+                continue
+            df = df.iloc[::-1].reset_index(drop=True)
 
-        today = df.iloc[-1]
-        if pd.isna(today["Close"]) or pd.isna(today["Open"]):
-            continue
-        close = float(today["Close"])
-        open_ = float(today["Open"])
-        volume = float(pd.to_numeric(today["Volume"], errors="coerce") or 0)
-        if close < MIN_PRICE or volume < MIN_VOLUME or volume * close < MIN_TURNOVER:
-            continue
-        if open_ <= 0:
-            continue
+            today = df.iloc[-1]
+            if pd.isna(today["Close"]) or pd.isna(today["Open"]):
+                continue
+            close = float(today["Close"])
+            open_ = float(today["Open"])
+            volume = float(pd.to_numeric(today["Volume"], errors="coerce") or 0)
+            if close < MIN_PRICE or volume < MIN_VOLUME or volume * close < MIN_TURNOVER:
+                continue
+            if open_ <= 0:
+                continue
 
-        sa = calc_score_as(df)
-        if sa is None:
-            continue
-        score, ratio = sa
-        if not (SCORE_MIN <= score < SCORE_MAX):
-            continue
-        if not (RATIO_MIN <= ratio <= RATIO_MAX):
-            continue
+            sa = calc_score_as(df)
+            if sa is None:
+                continue
+            score, ratio = sa
+            if not (SCORE_MIN <= score < SCORE_MAX):
+                continue
+            if not (RATIO_MIN <= ratio <= RATIO_MAX):
+                continue
 
-        today_rise = (close - open_) / open_ * 100
-        if not (RISE_MIN <= today_rise <= RISE_MAX):
-            continue
+            today_rise = (close - open_) / open_ * 100
+            if not (RISE_MIN <= today_rise <= RISE_MAX):
+                continue
 
-        rb_score = calc_rebound_score(df)
-        if rb_score < RB_MIN:
-            continue
+            rb_score = calc_rebound_score(df)
+            if rb_score < RB_MIN:
+                continue
 
-        # 候補の有効日は「データの最新日（=前営業日）」ではなく「これから取引される当日」。
-        # as_of_date指定時（バックテスト用）はその日付をそのまま使う（scan_morning_strategy_d/an
-        # で過去に発生した日付バグと同じ問題を避けるため、必ずJSTの実日付を使う）。
-        entry_date = str(as_of_date) if as_of_date is not None else datetime.now(JST).strftime("%Y-%m-%d")
-        rows.append({
-            "date": entry_date,
-            "strategy": "AS",
-            "code": code,
-            "condition": None,
-            "name": code,
-            "score": score,
-            "ratio": ratio,
-            "judgment": "BUY",
-            "reason": (f"戦略AS: score{score:.1f}×ratio{ratio:.1f}倍×寄引{today_rise:+.1f}%"
-                       f"×RB{rb_score:.1f}"
-                       f" - 検証済み条件(2年 勝率66.4%/平均+0.832%)"),
-        })
+            # 候補の有効日は「データの最新日（=前営業日）」ではなく「これから取引される当日」。
+            # as_of_date指定時（バックテスト用）はその日付をそのまま使う（scan_morning_strategy_d/an
+            # で過去に発生した日付バグと同じ問題を避けるため、必ずJSTの実日付を使う）。
+            entry_date = str(as_of_date) if as_of_date is not None else datetime.now(JST).strftime("%Y-%m-%d")
+            rows.append({
+                "date": entry_date,
+                "strategy": "AS",
+                "code": code,
+                "condition": None,
+                "name": code,
+                "score": score,
+                "ratio": ratio,
+                "judgment": "BUY",
+                "reason": (f"戦略AS: score{score:.1f}×ratio{ratio:.1f}倍×寄引{today_rise:+.1f}%"
+                           f"×RB{rb_score:.1f}"
+                           f" - 検証済み条件(2年 勝率66.4%/平均+0.832%)"),
+            })
+        except Exception as e:
+            error_codes.append((code, str(e)))
+            continue
 
     conn.close()
+    if error_codes:
+        print(f"  ⚠️  戦略ASスキャンで{len(error_codes)}銘柄をエラーによりスキップ: "
+              f"{error_codes[:5]}{'...' if len(error_codes) > 5 else ''}")
     return rows
 
 
