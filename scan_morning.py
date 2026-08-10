@@ -74,6 +74,7 @@ from scan_morning_macro_scan import (
 )
 from scan_morning_strategy_d_candidates import scan_d_prefilter
 from scan_morning_strategy_an_candidates import scan_an_candidates
+from scan_morning_strategy_as_candidates import scan_as_candidates
 
 _BASE_DIR          = Path(__file__).parent
 SCAN_CSV           = str(_BASE_DIR / "out" / "scan_results.csv")
@@ -528,6 +529,16 @@ def main():
         candidate_rows.extend(an_candidate_rows)
     except Exception as e:
         print(f"  ⚠️  戦略AN専用候補スキャンでエラー: {e}")
+
+    # ── 4.8 戦略AS専用候補スキャン（戦略A・STRONG日 score<3.0限定の独立パイプライン）──
+    # 戦略A本体のSCORE_MIN_A/TOP_N/MAX_WATCH_Aとは無関係の独立スキャン（2026-08-10追加）。
+    # 地合いを問わず候補を保存し、実際の発注可否は発注側でSTRONG地合いかを確認する。
+    try:
+        as_candidate_rows = scan_as_candidates()
+        print(f"  戦略AS専用候補: {len(as_candidate_rows)}件")
+        candidate_rows.extend(as_candidate_rows)
+    except Exception as e:
+        print(f"  ⚠️  戦略AS専用候補スキャンでエラー: {e}")
 
     # ── 5. 候補銘柄ログ保存 ──
     if candidate_rows:

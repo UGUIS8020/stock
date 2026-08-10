@@ -74,21 +74,32 @@ MAX_POSITIONS    = 5   # 戦略A
 MAX_POSITIONS_F  = 3   # 戦略F（銀行）
 MAX_POSITIONS_AN = 5   # 戦略AN（2026-08-10: 3→5。テスト運用中は建玉半分(AN_DEFAULT_SHARES等)で
                         #   資金拘束を抑えつつ枠を広げる。戦略Dの「建玉半分でテスト運用」と同じ方式）
+MAX_POSITIONS_AS = 3   # 戦略AS（2026-08-10新設。実運用ゼロ日・候補数が非常に多いため小さめから開始）
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A  = 10   # 戦略A: scoreで降順
 MAX_WATCH_F  =  5   # 戦略F: scoreで降順
 MAX_WATCH_AN = 10   # 戦略AN（2026-08-10新設。戦略AのSCORE_MIN_A/TOP_N/MAX_WATCH_Aとは無関係の独立枠）
+MAX_WATCH_AS = 20   # 戦略AS（2026-08-10新設。1日25〜500件超と候補が多いため監視上限を広めに設定）
 
 # 戦略AN 専用TP/SL（2026-08-09検証: score1.5〜3.0×ratio1.4〜50×前日騰落-1.2〜+9.1%×
 #   RBスコア≥5.4×連続下落≥1、2年OOS 検証n=149 勝率69.8% avg+0.393%）
 AN_TP_PCT = 0.015
 AN_SL_PCT = 0.059
 
+# 戦略AS 専用TP/SL（2026-08-10検証: score0〜3×ratio0〜4×前日騰落-1.8〜+7.6%×RBスコア≥2.7、
+#   STRONG日、2年 N=7,028 勝率66.4% avg+0.832%。GA探索(196/200が安定基準クリア)でも再現済み）
+AS_TP_PCT = 0.048
+AS_SL_PCT = 0.056
+
 # 戦略AN テスト運用中の建玉サイズ（2026-08-10: 通常の半分。MAX_ORDER_AMOUNT/DEFAULT_SHARES比を
 #   CHEAP_THRESHOLDと揃え、境界の断層を回避 = 150,000/100 = 1,500 = CHEAP_THRESHOLD）
 AN_DEFAULT_SHARES   = 100
 AN_MAX_ORDER_AMOUNT = 150_000
+
+# 戦略AS 建玉サイズ（2026-08-10新設。実運用ゼロ日のためANと同じ半分サイズから開始）
+AS_DEFAULT_SHARES   = 100
+AS_MAX_ORDER_AMOUNT = 150_000
 
 # 発注設定
 AUTO_ORDER       = True     # True: 確認プロンプトなしで自動発注
@@ -105,11 +116,13 @@ MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額（2026-08-06: 50万�
 def calc_shares(price, strategy="A"):
     """価格に応じた発注株数を返す（100株単位）。
     CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
-    strategy="AN"はテスト運用中のため半分サイズ（AN_DEFAULT_SHARES/AN_MAX_ORDER_AMOUNT）を使う。"""
-    default_shares, max_order_amount = (
-        (AN_DEFAULT_SHARES, AN_MAX_ORDER_AMOUNT) if strategy == "AN"
-        else (DEFAULT_SHARES, MAX_ORDER_AMOUNT)
-    )
+    strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。"""
+    if strategy == "AN":
+        default_shares, max_order_amount = AN_DEFAULT_SHARES, AN_MAX_ORDER_AMOUNT
+    elif strategy == "AS":
+        default_shares, max_order_amount = AS_DEFAULT_SHARES, AS_MAX_ORDER_AMOUNT
+    else:
+        default_shares, max_order_amount = DEFAULT_SHARES, MAX_ORDER_AMOUNT
     if price and price < CHEAP_THRESHOLD:
         lots = int(max_order_amount / price / 100)
         return max(lots, 1) * 100
@@ -163,6 +176,24 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "ai_trigger_min":        None,
             "confirm_threshold_pct": None,
             "description":           f"戦略AN: {condition}日は未検証のため見送り",
+        }
+
+    # 戦略AS（戦略A・STRONG日 score<3.0専用の独立パイプライン、2026-08-10新設）:
+    # 戦略AN(NORMAL日)と同じ設計。9:03の地合い確定後に即エントリー、STRONG以外は見送り。
+    if strategy == "AS":
+        if condition == "STRONG":
+            return {
+                "style":                 "WAIT_CONFIRM",
+                "ai_trigger_min":        CONDITION_REFRESH_MIN,
+                "confirm_threshold_pct": -99.0,
+                "surge_limit_pct":       None,
+                "description":           "戦略AS STRONG日 → 9:03の地合い確定後に即エントリー",
+            }
+        return {
+            "style":                 "SKIP",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           f"戦略AS: {condition}日は未検証のため見送り",
         }
 
     if condition == "PANIC":
@@ -596,14 +627,20 @@ def load_candidates():
              .sort_values("score", ascending=False)
              .head(MAX_WATCH_AN))
 
-    targets = pd.concat([df_a, df_an], ignore_index=True).drop_duplicates(subset=["code", "strategy"])
+    # ── 戦略AS: 戦略Aとは独立した枠（SCORE_MIN_A/TOP_N/MAX_WATCH_Aの絞り込みを受けない）
+    df_as = (targets[targets["strategy"] == "AS"]
+             .sort_values("score", ascending=False)
+             .head(MAX_WATCH_AS))
+
+    targets = pd.concat([df_a, df_an, df_as], ignore_index=True).drop_duplicates(subset=["code", "strategy"])
 
     if len(targets) < original:
-        print(f"  📌 監視対象を絞り込み: {original}件 → {len(targets)}件（A:{len(df_a)}件 / AN:{len(df_an)}件）")
+        print(f"  📌 監視対象を絞り込み: {original}件 → {len(targets)}件（A:{len(df_a)}件 / AN:{len(df_an)}件 / AS:{len(df_as)}件）")
 
     candidates = []
     for _, row in targets.iterrows():
         is_an = str(row["strategy"]) == "AN"
+        is_as = str(row["strategy"]) == "AS"
         candidates.append({
             "code":              str(row["code"]),
             "name":              str(row["name"]),
@@ -615,8 +652,8 @@ def load_candidates():
             "reason":            str(row["reason"]),
             "ai_recommendation": str(row["ai_recommendation"]) if "ai_recommendation" in row and pd.notna(row["ai_recommendation"]) else "",
             "pending_reeval":    bool(row.get("pending_reeval", False)),
-            "tp_pct":            AN_TP_PCT if is_an else TP_PCT,
-            "sl_pct":            AN_SL_PCT if is_an else SL_PCT,
+            "tp_pct":            AN_TP_PCT if is_an else (AS_TP_PCT if is_as else TP_PCT),
+            "sl_pct":            AN_SL_PCT if is_an else (AS_SL_PCT if is_as else SL_PCT),
         })
 
     # 戦略F: WEAK地合いのみ銀行候補を追加
@@ -979,11 +1016,11 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
 
             # SKIP: PANIC日・WEAK日など全見送り
             if timing["style"] == "SKIP":
-                # 戦略ANは9:03の地合い再判定より前にSKIPを確定させない。
-                # 朝STRONG予測→9:03にNORMAL相当へ修正されるケースを取りこぼすため
-                # （2026-08-10発覚。9:03再判定後はtimingsが再計算されるので、
-                # 　そこで改めてSKIP/WAIT_CONFIRMが正しく決まる）。
-                if c.get("strategy") == "AN" and not condition_refreshed:
+                # 戦略AN/ASは9:03の地合い再判定より前にSKIPを確定させない。
+                # 朝の予測地合いが対象条件(AN=NORMAL/AS=STRONG)と異なっていても、
+                # 9:03に修正されるケースを取りこぼすため（2026-08-10発覚。
+                # 9:03再判定後はtimingsが再計算されるので、そこで改めてSKIP/WAIT_CONFIRMが正しく決まる）。
+                if c.get("strategy") in ("AN", "AS") and not condition_refreshed:
                     continue
                 ordered[code]  = True
                 results[code]  = f"見送り({condition})"
@@ -1016,7 +1053,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             # OPEN_MARKET: トリガー時刻到達で即発注（変更なし）
             if timing["style"] == "OPEN_MARKET":
                 strat_c  = c.get("strategy", "A")
-                max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else MAX_POSITIONS)
+                max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS))
                 open_pos = db.load_open_positions(strategy=strat_c)
                 if len(open_pos) >= max_pos:
                     ordered[code] = True
@@ -1086,7 +1123,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if ordered[code]:
                 continue
             strat_c  = c.get("strategy", "A")
-            max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else MAX_POSITIONS)
+            max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS))
             open_pos = db.load_open_positions(strategy=strat_c)
             if len(open_pos) >= max_pos:
                 ordered[code] = True
