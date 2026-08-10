@@ -501,6 +501,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     signal_count  = 0
     ROUTINE_LOG_INTERVAL = 300   # 「監視中」の定型メッセージは5分に1回だけ出力（ノイズ削減）
     last_routine_print   = None
+    last_lunch_print      = None
 
     # 曜日別パラメータ上書き（月曜は構造的に弱いため制限付き発注）
     is_monday     = (datetime.now(JST).weekday() == 0)
@@ -556,6 +557,8 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     start_min       = WATCH_START_HOUR * 60 + WATCH_START_MIN
     NOON_RESCAN_MIN = 13 * 60   # 後場再開(12:30)から30分経過した13:00に実測地合いを取り直す
                                 # ※12:00は前場引け(11:30)〜後場再開(12:30)の昼休み中で値が動かないため不適
+    LUNCH_START_MIN = 11 * 60 + 30   # 前場引け
+    LUNCH_END_MIN   = 12 * 60 + 30   # 後場再開
     opening_rescanned = False  # 監視開始(9:30)時点の実測補正フラグ
     noon_rescanned     = False
 
@@ -567,6 +570,17 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
         if now_min >= watch_end_min:
             print(f"\n  ⏰ {WATCH_END_HOUR}:{WATCH_END_MIN:02d} 到達 → 監視終了")
             break
+
+        # 2026-08-10追加: 前場引け(11:30)〜後場再開(12:30)の昼休み中は市場が
+        # 閉まっており値が動かないため、Tachibana APIへの問い合わせを完全に休止する
+        # （立花証券のAPI高負荷指摘を受けた対応の一環。この時間帯のシグナル発生は
+        # 実績上ゼロで、機会損失にはならない）。
+        if LUNCH_START_MIN <= now_min < LUNCH_END_MIN:
+            if last_lunch_print is None or (now - last_lunch_print).total_seconds() >= ROUTINE_LOG_INTERVAL:
+                last_lunch_print = now
+                print(f"  [{now_str}] 昼休み中（11:30〜12:30）→ 市場休場のためAPI呼び出しを休止")
+            time.sleep(60)
+            continue
 
         # 市場開始前は待機（このプロセス自体は9:00頃から起動しているため、
         # 実測補正スキャンも9:30に到達するまではここで待つ）
