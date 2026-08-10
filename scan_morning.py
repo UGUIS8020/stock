@@ -420,12 +420,16 @@ def main():
         candidates_a = candidates_a.sort_values(["score", "ratio"], ascending=[False, False])
         print(f"  スキャン日: {latest_date}  候補数: {len(candidates_a)}件\n")
 
+        # 2026-08-10: scan_daily.py側がSCORE_MIN_Aを満たす候補をほぼ全件保存する方式に
+        # 変更したため、判定処理（judge_entry_a・candidate_rows追加）は全件に対して行うが、
+        # コンソール表示（画面が流れないよう）は上位DISPLAY_LIMIT_A件のみに絞る。
+        DISPLAY_LIMIT_A = 30
         buy_a = caution_a = pass_a = 0
         print(f"  {'判定':<10} {'コード':<6} {'銘柄名':<16} {'現在値':>8} {'売気配':>7} {'買気配':>7} {'需給':>5} {'スコア':>6} {'比率':>5}  理由")
         print("  " + "─" * 95)
 
         surge_candidates = []
-        for _, row in candidates_a.iterrows():
+        for i, (_, row) in enumerate(candidates_a.iterrows()):
             judgment, reason = judge_entry_a(row, condition, strategy_a_thr)
             surge = is_surge_flag(row)
             candidate_rows.append({
@@ -440,15 +444,18 @@ def main():
             if judgment == "BUY":      buy_a    += 1
             elif judgment == "CAUTION": caution_a += 1
             else:                       pass_a    += 1
-            q = _tquote(tachibana_prices, row["code"])
-            rt = q["price"] if q else None
-            price_str = f"{rt:>8,.0f}円" if rt else f"{'---':>8}  "
-            ask_s, bid_s, ratio_s = _quote_summary(q)
-            print(f"  {icon:<10} {str(row['code']):<6} {str(row['name'])[:14]:<16} "
-                  f"{price_str} {ask_s} {bid_s} {ratio_s} "
-                  f"{float(row['score']):>6.2f} {float(row['ratio']):>5.1f}倍{surge_mark}  {reason}")
+            if i < DISPLAY_LIMIT_A:
+                q = _tquote(tachibana_prices, row["code"])
+                rt = q["price"] if q else None
+                price_str = f"{rt:>8,.0f}円" if rt else f"{'---':>8}  "
+                ask_s, bid_s, ratio_s = _quote_summary(q)
+                print(f"  {icon:<10} {str(row['code']):<6} {str(row['name'])[:14]:<16} "
+                      f"{price_str} {ask_s} {bid_s} {ratio_s} "
+                      f"{float(row['score']):>6.2f} {float(row['ratio']):>5.1f}倍{surge_mark}  {reason}")
             if surge:
                 surge_candidates.append(row)
+        if len(candidates_a) > DISPLAY_LIMIT_A:
+            print(f"  …他{len(candidates_a) - DISPLAY_LIMIT_A}件（判定・保存は全件実施、表示のみ省略）")
 
         print(f"\n  【集計】 ✅買い:{buy_a}件  ⚠️要注意:{caution_a}件  ❌見送り:{pass_a}件")
 
