@@ -800,9 +800,27 @@ def main():
     # API制限リスクが増大する。分足収集の対象は従来通りtop_a(表示用30件)に
     # 加え、実際にmarket_watch.pyが翌朝選ぶ低score側(昇順)も収集しておく。
     intraday_low = a_pool.sort_values("score", ascending=True).head(TOP_N)
+
+    # 2026-08-10追加(1週間トライアル): 戦略Dの監視終了時刻(14:30)を15:00/15:30に
+    # 延長すべきか判断するためのデータ収集。今朝scan_morning.pyが保存済みの
+    # 戦略D候補（本日実際に使われた候補）を分足収集の対象に加える。
+    # 全件(現状864件規模)だとyfinance逐次呼び出しが膨大になるため上限を設ける。
+    SAVE_CAP_D_INTRADAY = 200
+    d_intraday_codes = []
+    try:
+        d_today_df = pd.read_sql(
+            "SELECT code FROM candidates_log WHERE strategy='D' AND date=?",
+            _db.get_conn(), params=(TODAY,)
+        )
+        d_intraday_codes = d_today_df["code"].astype(str).tolist()[:SAVE_CAP_D_INTRADAY]
+        print(f"  戦略D分足収集対象: {len(d_intraday_codes)}件（15:00/15:30延長判断用、1週間トライアル）")
+    except Exception as e:
+        print(f"  ⚠️ 戦略D分足収集用の候補取得に失敗: {e}")
+
     scan_a_codes = list(dict.fromkeys(
         [r["code"] for r in top_a.to_dict("records")] +
-        [r["code"] for r in intraday_low.to_dict("records")]
+        [r["code"] for r in intraday_low.to_dict("records")] +
+        d_intraday_codes
     ))
     save_intraday(scan_a_codes)
 
