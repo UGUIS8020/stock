@@ -617,9 +617,13 @@ def load_candidates():
         if excluded > 0:
             print(f"  🚫 日計取引制限銘柄を除外: {excluded}件")
 
-    # ── 戦略A: scoreで降順、上限MAX_WATCH_A件（戦略Bはclosing_watchに移管）
+    # ── 戦略A: scoreで昇順（SCORE_MIN_Aに近い順）、上限MAX_WATCH_A件（戦略Bはclosing_watchに移管）
+    # 2026-08-10変更: STRONG日はscore降順(高score優先)だと勝率46〜48%/平均ほぼ0%だったが、
+    # score昇順(3.0に近い順)だと勝率62〜65%/平均+0.58〜+0.89%（4分割点全てでwalk-forward確認済み）。
+    # scan_daily.pyのtop_a_low追加保存と対になる変更。WEAK日保留機構はtoday_df全体を見るため
+    # 影響を受けない（MAX_WATCH_A絞り込み後のtargetsではなくtoday_dfから直接候補を拾う設計）。
     df_a = (targets[targets["strategy"] == "A"]
-            .sort_values("score", ascending=False)
+            .sort_values("score", ascending=True)
             .head(MAX_WATCH_A))
 
     # ── 戦略AN: 戦略Aとは独立した枠（SCORE_MIN_A/TOP_N/MAX_WATCH_Aの絞り込みを受けない）

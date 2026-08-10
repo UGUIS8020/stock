@@ -41,6 +41,14 @@ BACKTEST_LOG_CSV    = str(_BASE_DIR / "out" / "backtest_log.csv")
 CANDIDATES_LOG_CSV  = str(_BASE_DIR / "out" / "candidates_log.csv")
 BANK_RESULTS_CSV    = str(_BASE_DIR / "out" / "bank_results.csv")
 TOP_N            = 30
+TOP_N_LOW        = 30   # 2026-08-10追加: score降順TOP_N=30とは別に、SCORE_MIN_Aに近い
+                         # （昇順）候補も別途保存する。STRONG日の実際の売買選定
+                         # (market_watch.pyのMAX_WATCH_A)はこちらを優先する設計に変更したため。
+                         # 根拠: STRONG日はscore降順(高score優先)だと勝率46〜48%/平均ほぼ0%だが、
+                         # score昇順(3.0に近い順)だと勝率62〜65%/平均+0.58〜+0.89%
+                         # （4分割点全てでwalk-forward確認済み、2026-08-10）。
+                         # 既存のTOP_N=30(降順)はWEAK日保留機構(score>=5.0が必要)向けに
+                         # そのまま残し、追加する形にして既存ロジックへの影響を避けている。
 SCORE_MIN_A      = 3.0
 MIN_PRICE        = 100
 MIN_VOLUME       = 50_000
@@ -704,12 +712,17 @@ def main():
     low_price_mask = df_a["close"] < MIN_PRICE
     if low_price_mask.sum() > 0:
         print(f"  💴 低位株除外: {low_price_mask.sum()}件 {df_a[low_price_mask]['name'].tolist()}")
-    top_a = df_a[
+    a_pool = df_a[
         (df_a["score"] >= SCORE_MIN_A) &
         (df_a["ratio"] < RATIO_LIMIT_A) &
         (~bank_mask) &
         (~low_price_mask)
-    ].head(TOP_N)
+    ]
+    top_a = a_pool.head(TOP_N)
+
+    # 2026-08-10追加: score降順とは別に、SCORE_MIN_Aに近い（昇順）候補も保存。
+    # STRONG日の実際の売買選定に使う（TOP_Nコメント参照）。
+    top_a_low = a_pool.sort_values("score", ascending=True).head(TOP_N_LOW)
 
     # 戦略F: 銀行候補を別ファイルに保存（翌朝WEAK地合い時に market_watch.py が活用）
     bank_f = df_a[
@@ -767,11 +780,14 @@ def main():
             print(f"     [{r['code']}]{r['name']}  score:{r['score']:.1f}  ratio:{r['ratio']:.1f}倍"
                   f"  過去実績: 高値+10%到達率10.6% / avg+1.02%")
 
+    # top_a(降順・WEAK保留機構等の従来用途向け)とtop_a_low(昇順・STRONG日の
+    # 実際の売買選定向け、2026-08-10追加)を統合して保存。重複はcodeで除去。
+    save_pool = pd.concat([top_a, top_a_low]).drop_duplicates(subset=["code"])
     save_a = [{"scan_date": TODAY, "code": r["code"], "name": r["name"],
                "score": r["score"], "trend": r["trend"], "accel": r["accel"],
                "ratio": r["ratio"], "today_rise": r.get("today_rise", 0),
                "actual_top20": pd.NA, "market_condition": condition}
-              for _, r in top_a.iterrows()]
+              for _, r in save_pool.iterrows()]
     new_a = pd.DataFrame(save_a)
     _db.save_scan_results(new_a)
 
