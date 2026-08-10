@@ -40,15 +40,19 @@ STRATEGY_C_CSV   = str(_BASE_DIR / "out" / "strategy_c_log.csv")
 BACKTEST_LOG_CSV    = str(_BASE_DIR / "out" / "backtest_log.csv")
 CANDIDATES_LOG_CSV  = str(_BASE_DIR / "out" / "candidates_log.csv")
 BANK_RESULTS_CSV    = str(_BASE_DIR / "out" / "bank_results.csv")
-TOP_N            = 30
-TOP_N_LOW        = 30   # 2026-08-10追加: score降順TOP_N=30とは別に、SCORE_MIN_Aに近い
-                         # （昇順）候補も別途保存する。STRONG日の実際の売買選定
-                         # (market_watch.pyのMAX_WATCH_A)はこちらを優先する設計に変更したため。
-                         # 根拠: STRONG日はscore降順(高score優先)だと勝率46〜48%/平均ほぼ0%だが、
-                         # score昇順(3.0に近い順)だと勝率62〜65%/平均+0.58〜+0.89%
-                         # （4分割点全てでwalk-forward確認済み、2026-08-10）。
-                         # 既存のTOP_N=30(降順)はWEAK日保留機構(score>=5.0が必要)向けに
-                         # そのまま残し、追加する形にして既存ロジックへの影響を避けている。
+TOP_N            = 30   # コンソール表示（画面が流れないよう上位30件のみ表示）専用の上限。
+                         # 保存件数の上限ではない（SAVE_CAP_A参照、2026-08-10変更）。
+SAVE_CAP_A       = 500  # scan_resultsへの保存件数の安全弁。SCORE_MIN_A(3.0)を満たす候補は
+                         # 実測で1日最大442件程度のため、この上限に達することは通常ない。
+                         # 2026-08-10: 以前はTOP_N=30(score降順)だけを保存していたが、
+                         # STRONG日はscore降順(高score優先)だと勝率46〜48%/平均ほぼ0%、
+                         # score昇順(3.0に近い順)だと勝率62〜65%/平均+0.58〜+0.89%と判明
+                         # （4分割点全てでwalk-forward確認済み）。降順のまま保存件数を絞ると
+                         # 良い候補（score3.0付近）がそもそも保存されないため、絞り込みを
+                         # やめてSCORE_MIN_Aを満たす候補をほぼ全件保存する方式に変更。
+                         # 実際にどの10件を売買するか（昇順で近い順）はmarket_watch.pyの
+                         # MAX_WATCH_A側で選ぶ。WEAK日保留機構(score>=5.0が必要)も
+                         # 全件保存されるため引き続き機能する。
 SCORE_MIN_A      = 3.0
 MIN_PRICE        = 100
 MIN_VOLUME       = 50_000
@@ -718,11 +722,7 @@ def main():
         (~bank_mask) &
         (~low_price_mask)
     ]
-    top_a = a_pool.head(TOP_N)
-
-    # 2026-08-10追加: score降順とは別に、SCORE_MIN_Aに近い（昇順）候補も保存。
-    # STRONG日の実際の売買選定に使う（TOP_Nコメント参照）。
-    top_a_low = a_pool.sort_values("score", ascending=True).head(TOP_N_LOW)
+    top_a = a_pool.head(TOP_N)   # コンソール表示専用（上位30件、score降順）
 
     # 戦略F: 銀行候補を別ファイルに保存（翌朝WEAK地合い時に market_watch.py が活用）
     bank_f = df_a[
@@ -780,9 +780,10 @@ def main():
             print(f"     [{r['code']}]{r['name']}  score:{r['score']:.1f}  ratio:{r['ratio']:.1f}倍"
                   f"  過去実績: 高値+10%到達率10.6% / avg+1.02%")
 
-    # top_a(降順・WEAK保留機構等の従来用途向け)とtop_a_low(昇順・STRONG日の
-    # 実際の売買選定向け、2026-08-10追加)を統合して保存。重複はcodeで除去。
-    save_pool = pd.concat([top_a, top_a_low]).drop_duplicates(subset=["code"])
+    # SCORE_MIN_Aを満たす候補をほぼ全件保存（SAVE_CAP_Aコメント参照）。
+    # 表示用のtop_a(上位30件)ではなくa_pool全体を保存することで、
+    # 実際にどれを売買するかの選定はmarket_watch.py側（MAX_WATCH_A昇順）に委ねる。
+    save_pool = a_pool.head(SAVE_CAP_A)
     save_a = [{"scan_date": TODAY, "code": r["code"], "name": r["name"],
                "score": r["score"], "trend": r["trend"], "accel": r["accel"],
                "ratio": r["ratio"], "today_rise": r.get("today_rise", 0),
