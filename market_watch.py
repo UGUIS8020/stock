@@ -553,7 +553,10 @@ def load_candidates():
         print("  ⚠️  candidates_log にデータがありません。scan_morning.py を先に実行してください。")
         return [], "UNKNOWN"
 
-    condition = today_df["condition"].iloc[0] if not today_df.empty else "UNKNOWN"
+    # 2026-08-10修正: candidates_logの先頭行から取るとAN/D(condition=None)の行を
+    # 拾ってしまうリスクがあった（戦略Aが常に先頭に入る実装順序に暗黙依存していた）。
+    # market_log→morning_logを正しく参照する既存関数に差し替え、行順に依存しないようにする。
+    condition = _db.get_today_condition_db(TODAY)
     targets   = today_df[today_df["judgment"].isin(["BUY", "CAUTION"])].copy()
     targets["pending_reeval"] = False
 
