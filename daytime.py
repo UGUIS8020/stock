@@ -59,7 +59,8 @@ WATCH_START_HOUR = 9
 WATCH_START_MIN  = 30  # market_watch.py（9:00-9:30）終了後から開始
 WATCH_END_HOUR   = 14
 WATCH_END_MIN    = 30
-POLL_INTERVAL    = 15   # 秒
+POLL_INTERVAL    = 30   # 秒（2026-08-10: 15→30。立花証券よりAPI高負荷の指摘を受け、
+                         # gap絞り込みと合わせてTachibana API呼び出し回数を削減するため）
 
 # ── TP / SL ───────────────────────────────────────
 TP_PCT = 0.03   # +3%（STRONG地合い × gap小 の平均高値 +2.39% に基づく）
@@ -611,7 +612,17 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             except Exception as e:
                 print(f"  ⚠️  昼の地合い再チェックに失敗（現在の判定のまま継続）: {e}")
 
-        quotes = fetch_prices(url_price, codes) if url_price else {}
+        # 2026-08-10追加: gap%(first_prices)は寄り付き後は変わらないため、
+        # gap_min〜gap_max（Filter1、check_signal内と同一条件）を満たす銘柄だけに
+        # 問い合わせ対象を絞り込む。まだfirst_pricesが無い銘柄（初回取得失敗）は
+        # フォールバック確定のため対象に残す。これにより1日あたりのTachibana API
+        # 呼び出し回数を候補全数(1日数百〜900件超)から大幅に削減する
+        # （立花証券より2026-08-10にAPI高負荷の指摘を受けて対応）。
+        watch_codes = [
+            c for c in codes
+            if c not in first_prices or (gap_min <= first_prices[c] <= gap_max)
+        ]
+        quotes = fetch_prices(url_price, watch_codes) if url_price else {}
 
         # ── Step1: このポーリングで出たシグナルを全件収集 ──
         new_signals = []
