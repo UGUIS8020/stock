@@ -795,7 +795,15 @@ def main():
     scan_strategy_c(df_today, name_dict, exclude_codes, mc)
 
     # ── 分足データ収集 ──
-    scan_a_codes = [r["code"] for r in save_a]
+    # 2026-08-10: save_a(候補全件、最大SAVE_CAP_A=500件)をそのまま渡すと
+    # save_intraday内でyfinance APIを銘柄ごとに逐次呼び出すため、実行時間・
+    # API制限リスクが増大する。分足収集の対象は従来通りtop_a(表示用30件)に
+    # 加え、実際にmarket_watch.pyが翌朝選ぶ低score側(昇順)も収集しておく。
+    intraday_low = a_pool.sort_values("score", ascending=True).head(TOP_N)
+    scan_a_codes = list(dict.fromkeys(
+        [r["code"] for r in top_a.to_dict("records")] +
+        [r["code"] for r in intraday_low.to_dict("records")]
+    ))
     save_intraday(scan_a_codes)
 
     print(f"\n✅ 完了")
