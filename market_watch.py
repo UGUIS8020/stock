@@ -976,6 +976,12 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
 
             # SKIP: PANIC日・WEAK日など全見送り
             if timing["style"] == "SKIP":
+                # 戦略ANは9:03の地合い再判定より前にSKIPを確定させない。
+                # 朝STRONG予測→9:03にNORMAL相当へ修正されるケースを取りこぼすため
+                # （2026-08-10発覚。9:03再判定後はtimingsが再計算されるので、
+                # 　そこで改めてSKIP/WAIT_CONFIRMが正しく決まる）。
+                if c.get("strategy") == "AN" and not condition_refreshed:
+                    continue
                 ordered[code]  = True
                 results[code]  = f"見送り({condition})"
                 print(f"\n  ⏭️  {code} {c['name']}: {timing['description']}")
