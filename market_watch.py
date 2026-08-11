@@ -74,7 +74,9 @@ MAX_POSITIONS    = 5   # 戦略A
 MAX_POSITIONS_F  = 3   # 戦略F（銀行）
 MAX_POSITIONS_AN = 5   # 戦略AN（2026-08-10: 3→5。テスト運用中は建玉半分(AN_DEFAULT_SHARES等)で
                         #   資金拘束を抑えつつ枠を広げる。戦略Dの「建玉半分でテスト運用」と同じ方式）
-MAX_POSITIONS_AS = 3   # 戦略AS（2026-08-10新設。実運用ゼロ日・候補数が非常に多いため小さめから開始）
+MAX_POSITIONS_AS = 5   # 戦略AS（2026-08-11: 3→5。ANと同じ建玉半分(AS_DEFAULT_SHARES等)の
+                        #   状態で、他戦略(A/ANとも5)に合わせた。資金拘束は5×15万=75万円
+                        #   （3×15万=45万円だった旧設定より増加するが、ANの時と同じ判断基準）
 
 # 監視銘柄数の上限（絞り込み）
 MAX_WATCH_A  = 10   # 戦略A: scoreで降順
