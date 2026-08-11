@@ -226,6 +226,39 @@ def reconcile_db_with_api(url_request):
         print(f"  ✅ DB/API一致: {len(matched)}件 "
               f"({', '.join(sorted(matched))})")
 
+        # 2026-08-11追加: 取得単価(sHiritsuTanka、分割約定も加味した真の平均取得価格)
+        # とDBのbuy_priceにズレがあれば補正する。成行注文は発注直前の気配値を
+        # 暫定的にbuy_priceとして記録しているため、約定までのタイムラグや
+        # 分割約定でズレることがある（ナガホリ8139の実例で発見。約20円/約1%）。
+        # TP/SLもbuy_priceからの比率を保ったまま再計算する。
+        corrected = 0
+        for p in db_positions:
+            code = p["code"]
+            if code not in matched:
+                continue
+            h = api_holdings[code]
+            true_price = h.get("buy_price")
+            old_price  = float(p["buy_price"]) if p.get("buy_price") not in (None, "") else 0
+            if not true_price or old_price <= 0:
+                continue
+            if abs(true_price - old_price) < 0.5:   # 誤差50銭未満は無視
+                continue
+            update_fields = {"buy_price": true_price}
+            if p.get("tp_price") not in (None, ""):
+                tp_pct = float(p["tp_price"]) / old_price - 1
+                update_fields["tp_price"] = round(true_price * (1 + tp_pct))
+            if p.get("sl_price") not in (None, ""):
+                sl_pct = 1 - float(p["sl_price"]) / old_price
+                update_fields["sl_price"] = round(true_price * (1 - sl_pct))
+            if h.get("name"):
+                update_fields["name"] = h["name"]
+            db.update_position(p["date"], code, **update_fields)
+            corrected += 1
+            print(f"     🔧 [{code}] {h.get('name') or p['name']}: "
+                  f"buy_price {old_price:.1f}円 → {true_price:.1f}円 に補正（TP/SLも再計算）")
+        if corrected:
+            print(f"  🔧 取得単価の補正: {corrected}件")
+
     if not stale and not new_in_api:
         print(f"  ✅ DB/API完全一致（{len(matched)}件）")
 
