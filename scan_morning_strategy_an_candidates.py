@@ -38,6 +38,7 @@ score3.0以上を優先する設計には一切触れない。
     python scan_morning_strategy_an_candidates.py
 """
 import sys
+import os
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -47,6 +48,22 @@ import db
 from closing_watch import calc_rebound_score
 
 JST = timezone(timedelta(hours=9))
+
+
+def _load_name_dict():
+    """J-Quants全銘柄マスタからcode→会社名の辞書を作る（2026-08-11追加）。
+    取得失敗時は空dictを返し、呼び出し側でcodeそのものにフォールバックする。"""
+    try:
+        import jquantsapi
+        from dotenv import load_dotenv
+        load_dotenv()
+        cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
+        master = cli.get_eq_master()
+        master["code4"] = master["Code"].astype(str).str[:4]
+        return dict(zip(master["code4"], master["CoName"]))
+    except Exception as e:
+        print(f"  ⚠️  会社名マスタ取得に失敗（コード表示にフォールバック）: {e}")
+        return {}
 
 # ── 戦略AN 判定条件（2026-08-10 検証済み。変更する場合は再検証すること）──
 SCORE_MIN   = 1.5
@@ -113,6 +130,7 @@ def scan_an_candidates(as_of_date=None):
     """
     conn = db.get_conn()
     codes = db.get_all_codes(exclude_etf=True)
+    name_dict = _load_name_dict()
 
     rows = []
     error_codes = []
@@ -177,7 +195,7 @@ def scan_an_candidates(as_of_date=None):
                 "strategy": "AN",
                 "code": code,
                 "condition": None,
-                "name": code,
+                "name": name_dict.get(code, code),
                 "score": score,
                 "ratio": ratio,
                 "judgment": "BUY",

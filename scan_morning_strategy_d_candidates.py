@@ -14,6 +14,7 @@ Stage 2（daytime.py起動時・市場開始直後）で別途確認する。
 しきい値はdaytime.pyの既存定数をそのまま参照し、値を重複定義しない。
 """
 import sys
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -22,6 +23,22 @@ import db
 from daytime import MA5_DEV_MAX, MA25_DEV_MAX, MIN_VOLUME, PREV_RISE_MIN
 
 JST = timezone(timedelta(hours=9))
+
+
+def _load_name_dict():
+    """J-Quants全銘柄マスタからcode→会社名の辞書を作る（2026-08-11追加）。
+    取得失敗時は空dictを返し、呼び出し側でcodeそのものにフォールバックする。"""
+    try:
+        import jquantsapi
+        from dotenv import load_dotenv
+        load_dotenv()
+        cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
+        master = cli.get_eq_master()
+        master["code4"] = master["Code"].astype(str).str[:4]
+        return dict(zip(master["code4"], master["CoName"]))
+    except Exception as e:
+        print(f"  ⚠️  会社名マスタ取得に失敗（コード表示にフォールバック）: {e}")
+        return {}
 
 
 def scan_d_prefilter(as_of_date=None):
@@ -33,6 +50,7 @@ def scan_d_prefilter(as_of_date=None):
     """
     conn = db.get_conn()
     codes = db.get_all_codes(exclude_etf=True)
+    name_dict = _load_name_dict()
 
     rows = []
     error_codes = []
@@ -82,7 +100,7 @@ def scan_d_prefilter(as_of_date=None):
                 "strategy": "D",
                 "code": code,
                 "condition": None,
-                "name": code,
+                "name": name_dict.get(code, code),
                 "score": round(prev_rise, 2),
                 "ratio": round(ma5_dev, 2),
                 "judgment": "PREFILTER",
