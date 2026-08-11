@@ -101,6 +101,7 @@ def fetch_prices(url_price, codes):
         try:
             resp   = http.request("GET", url_price + "?" + params,
                                   timeout=urllib3.Timeout(connect=5, read=10))
+            tachibana_order.log_api_call("position_monitor.fetch_prices")
             result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
             for item in result.get("aCLMMfdsMarketPrice", []):
                 code = item.get("sIssueCode", "").strip('"')
@@ -158,6 +159,7 @@ def fetch_api_holdings(url_request):
         try:
             resp   = http.request("GET", url_request + "?" + params,
                                   timeout=urllib3.Timeout(connect=5, read=10))
+            tachibana_order.log_api_call("position_monitor.fetch_api_holdings")
             result = _json.loads(resp.data.decode("shift-jis", errors="ignore"))
             if result.get("p_errno", "0") != "0":
                 print(f"  ⚠️ {clm_id} APIエラー p_errno={result.get('p_errno')} → 照合スキップ")

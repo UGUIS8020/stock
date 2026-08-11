@@ -332,6 +332,7 @@ def _fetch_nikkei_905(url_price):
     try:
         resp = http.request("GET", url_price + "?" + params,
                             timeout=urllib3.Timeout(connect=3, read=5))
+        tachibana_order.log_api_call("market_watch.nikkei")
         result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
         for item in result.get("aCLMMfdsMarketPrice", []):
             v = str(item.get("pDPP", "")).strip('"')
@@ -490,6 +491,7 @@ def fetch_tachibana_prices(url_price, codes):
             p_no_file.write_text(str(p_no_base + i))
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=5))
+            tachibana_order.log_api_call("market_watch.fetch_prices")
             text = resp.data.decode("shift-jis", errors="ignore")
             result = json.loads(text)
             for item in result.get("aCLMMfdsMarketPrice", []):

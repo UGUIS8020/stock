@@ -170,6 +170,7 @@ def _fetch_price_batch(url_price, codes, http):
     try:
         resp = http.request("GET", url_price + "?" + params,
                             timeout=urllib3.Timeout(connect=3, read=8))
+        tachibana_order.log_api_call("closing_watch.fetch_prices")
         text   = resp.data.decode("shift-jis", errors="ignore")
         result = json.loads(text)
         out    = {}
