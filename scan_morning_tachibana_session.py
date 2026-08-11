@@ -14,6 +14,7 @@ import pandas as pd
 import yfinance as yf
 
 import db as _db
+import tachibana_order
 
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,7 @@ def _check_tachibana_session(url_request):
         http = urllib3.PoolManager()
         resp = http.request("GET", url_request + "?" + params,
                             timeout=urllib3.Timeout(connect=3, read=5))
+        tachibana_order.log_api_call("scan_morning_session.check")
         result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
         return result.get("p_errno", "") == "0"
     except Exception:
@@ -115,6 +117,7 @@ def _tachibana_login():
     try:
         http = urllib3.PoolManager()
         resp = http.request("GET", url, timeout=urllib3.Timeout(connect=10, read=15))
+        tachibana_order.log_api_call("scan_morning_session.login")
         result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
     except Exception as e:
         print(f"  ❌ 通信エラー: {e}")
@@ -237,6 +240,7 @@ def fetch_tachibana_prices(url_price, codes):
             p_no_file.write_text(str(p_no_base + i))
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=5))
+            tachibana_order.log_api_call("scan_morning_session.fetch_prices")
             result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
             for item in result.get("aCLMMfdsMarketPrice", []):
                 code = item.get("sIssueCode", "").strip('"')

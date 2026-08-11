@@ -369,6 +369,7 @@ def fetch_prices(url_price, codes):
         try:
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=8))
+            tachibana_order.log_api_call("daytime.fetch_prices")
             data = json.loads(resp.data.decode("shift-jis", errors="ignore"))
             for item in data.get("aCLMMfdsMarketPrice", []):
                 code = item.get("sIssueCode", "").strip('"')

@@ -10,12 +10,14 @@ import json
 import os
 import time
 import urllib3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
 import db
 
 load_dotenv()
+
+JST = timezone(timedelta(hours=9))
 
 LOGIN_FILE      = str(Path(__file__).parent / "tachibana_login_response.json")
 SECOND_PASSWORD = os.getenv("TACHIBANA_SECOND_PASSWORD", "")
@@ -122,9 +124,28 @@ def _p_sd_date():
             f".{t.microsecond // 1000:03}")
 
 
-def _api_get(url):
+_API_CALL_LOG_DIR = Path(__file__).parent / "logs"
+
+
+def log_api_call(source):
+    """立花証券APIへの呼び出し1回ごとに日次ログへ追記する（2026-08-12追加）。
+    daytime.py等の複数プロセスから同時に呼ばれるため、DB書き込みではなく
+    単純な追記のみのテキストファイルにして競合を避ける。件数確認は
+    check_api_calls.py で当日ログの行数を数えるだけでよい。"""
+    try:
+        now = datetime.now(JST)
+        _API_CALL_LOG_DIR.mkdir(exist_ok=True)
+        path = _API_CALL_LOG_DIR / f"api_calls_{now.strftime('%Y%m%d')}.log"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{now.strftime('%Y-%m-%d %H:%M:%S')},{source}\n")
+    except Exception:
+        pass  # カウント失敗が本番取引を止めてはならない
+
+
+def _api_get(url, source="tachibana_order"):
     http = urllib3.PoolManager()
     resp = http.request("GET", url, timeout=urllib3.Timeout(connect=5, read=10))
+    log_api_call(source)
     text = resp.data.decode("shift-jis", errors="ignore")
     return json.loads(text)
 
