@@ -88,7 +88,7 @@ MAX_POSITIONS_AS = 10  # 戦略AS（2026-08-12: 5→10。STRONG日は1日25〜50
                         #   10×15万=150万円（5×15万=75万円だった旧設定から倍増）
 
 # 監視銘柄数の上限（絞り込み）
-MAX_WATCH_A  = 10   # 戦略A: scoreで降順
+MAX_WATCH_A  = 10   # 戦略A: scoreで昇順（2026-08-10: 降順→昇順に修正、L638-640参照）
 MAX_WATCH_F  =  5   # 戦略F: scoreで降順
 MAX_WATCH_AN = 10   # 戦略AN（2026-08-10新設。戦略AのSCORE_MIN_A/TOP_N/MAX_WATCH_Aとは無関係の独立枠）
 MAX_WATCH_AS = 20   # 戦略AS（2026-08-10新設。1日25〜500件超と候補が多いため監視上限を広めに設定）
