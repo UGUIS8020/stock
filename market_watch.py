@@ -1084,9 +1084,15 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 confirm_and_order(c, latest_px, url_request, condition=condition, entry_change_pct=latest_chg)
                 continue
 
-            # STRONG日ギャップダウン逆張りパス
+            # STRONG日ギャップダウン逆張りパス（戦略A本体専用）
             # gap<0（寄り付きが前日終値割れ）を強い地合いで拾う
             # OOS根拠: STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
+            # このバックテストはscore≥3（戦略A本体の対象帯）に基づくもので、score<3の
+            # 戦略ASでは未検証。2026-08-13: strat_c=="A"の条件が無かったため、AS候補も
+            # このパスに入り込み、かつ上限チェックがstrategy="A"/MAX_POSITIONSに
+            # ハードコードされていたためAS本来の上限(MAX_POSITIONS_AS)を素通りして
+            # 14件保有（上限10件のはず）という事象が発生。strat_c=="A"限定に修正し、
+            # ASは通常のWAIT_CONFIRM経路（上限が正しくチェックされる）に流す。
             # 専用TP/SL（STRONG_GAP_TP_PCT/SL_PCT）を適用。順張りTP_PCTとは独立（2026-07-25分離）
             # 2026-08-01: is_v_recovery()によるV字回復確認を追加していたが、正式なバックテストを
             #   経ていない変更だった（過去ログが日次で上書きされ厳密な検証ができなかったため、
@@ -1096,7 +1102,8 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if (condition == "STRONG"
                     and timing["style"] == "WAIT_CONFIRM"
                     and not ordered[code]
-                    and latest_chg < 0.0):
+                    and latest_chg < 0.0
+                    and c.get("strategy", "A") == "A"):
                 open_pos = db.load_open_positions(strategy="A")
                 if len(open_pos) >= MAX_POSITIONS:
                     ordered[code] = True
