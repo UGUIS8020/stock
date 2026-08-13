@@ -511,7 +511,7 @@ def main(start_now=False, manual=False):
     candidates = enrich_with_rb(raw_candidates)
 
     if not candidates:
-        print(f"  RBスコア{RB_MIN}以上の銘柄なし")
+        print(f"  RBスコア{RB_MIN}以上×連続下落{CD_MIN}日以上を両方満たす銘柄なし")
         return
 
     # RBスコア降順 → 下落幅降順でソート
