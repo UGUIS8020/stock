@@ -13,6 +13,8 @@ out/sim_precise_trades.csv
 out/sim_precise_*.csv
 # simulate_b_2night.py を実行すれば再生成できる
 out/sim_b_2night_trades.csv
+# simulate_d.py を実行すれば再生成できる
+out/sim_d_trades.csv
 out/opt_*.csv
 out/sweep_results.csv
 
