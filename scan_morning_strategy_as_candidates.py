@@ -25,6 +25,10 @@ score3.0以上を優先する既存ロジック（戦略A本体）には一切�
     ratio       : 0.0 <= ratio <= 4.0
     today_rise  : -1.8% <= 当日の寄り引け値幅 <= +7.6%
     rb_score    : calc_rebound_score(hist) >= 2.7
+    price       : 200円 <= 株価 < 10,000円（2026-08-13追加。10,000円以上は勝率58.96%・
+                  平均+0.579%と全価格帯中最弱、かつAS_DEFAULT_SHARES=100固定のため
+                  高値株ほど1件あたりの資金インパクトも大きく除外。候補全体に占める
+                  割合は約2.1%で機会損失はほぼ無し）
     TP/SL       : +4.8% / -5.6%（エントリー翌営業日の寄り付きで買う想定）
     検証結果    : 全体 N=7,028  勝率66.4%  平均+0.832%（2年、STRONG日）
                   50/60/70/80%の全分割点でwalk-forward訓練・検証とも頑健
@@ -79,6 +83,11 @@ SL_PCT = 0.056
 MIN_VOLUME   = 50_000
 MIN_TURNOVER = 50_000_000
 MIN_PRICE    = 200   # simulate_precise.pyと同一（検証済み条件と揃える。scan_daily.pyのMIN_PRICE=100とは別）
+MAX_PRICE    = 10_000  # 2026-08-13新設: 10,000円以上は勝率58.96%・平均+0.579%と全価格帯中
+                        # 最弱(sim_precise_trades.csvで検証、それ以外は平均+0.71%前後)。
+                        # walk-forward4分割点中3つで同じ傾向を確認。全体候補に占める割合は
+                        # 約2.1%とごく僅かで、除外による機会損失はほぼ無い（AS_DEFAULT_SHARES=100
+                        # 固定のため高値株ほど1件あたりの金額も大きく、資金効率の面でも除外が妥当）。
 
 
 def calc_score_as(hist):
@@ -144,7 +153,7 @@ def scan_as_candidates(as_of_date=None):
             close = float(today["Close"])
             open_ = float(today["Open"])
             volume = float(pd.to_numeric(today["Volume"], errors="coerce") or 0)
-            if close < MIN_PRICE or volume < MIN_VOLUME or volume * close < MIN_TURNOVER:
+            if close < MIN_PRICE or close >= MAX_PRICE or volume < MIN_VOLUME or volume * close < MIN_TURNOVER:
                 continue
             if open_ <= 0:
                 continue
