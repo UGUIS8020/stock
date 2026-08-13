@@ -65,14 +65,20 @@ CD_MIN       = 3      # 連続下落日数最小値（cd≥3: 前々日も下落
 # 超過下落幅-2.8%〜-3.8%と全てこのライン内で、遡って適用しても結果は変わらないことを確認済み。
 EXCESS_DECLINE_MIN = -5.0
 MIN_VOLUME          = 50_000
-MAX_POSITIONS_PER_DAY = 5      # 1日の最大自動発注件数（安全装置）
+MAX_POSITIONS_PER_DAY = 7      # 1日の最大自動発注件数（安全装置）。2026-08-13: 5→7。
+                                # MIN_PRICE導入後の母集団で候補が6件以上ある日が27.8%、
+                                # rank別検証で6〜8位も1〜5位と同等の質(quality)と確認済み。
 
 DEFAULT_SHARES   = 300      # 2026-08-01: 100→200（2026-08-06: 300へ一時変更したが資金所要額を
                             # 抑えるため200に戻していた）。2026-08-12: 実績30件で勝率56.7%・
                             # 平均+1.97%と良好なため300へ再変更（資金拘束は増加するが許容判断）。
-CHEAP_THRESHOLD  = 1_000   # 2026-08-12: 1,500→1,000円（DEFAULT_SHARES300化に合わせ、
-                            # MAX_ORDER_AMOUNT30万円÷300株の自然な境界に再アラインし崖を回避）
-MAX_ORDER_AMOUNT = 300_000  # 2026-08-01: 10万→20万円 / 2026-08-06: 20万→30万円
+                            # 2026-08-13: MIN_PRICE導入により金額ベースの分岐が不要になったため
+                            # 全銘柄一律300株固定に単純化（詳細はMIN_PRICEのコメント参照）。
+MIN_PRICE = 1_000  # 2026-08-13新設: 1,000円未満は勝率43.9%・平均-0.12%〜+0.05%と明確に不振
+                    # (2泊分の正確なシミュレーションsimulate_b_2night.pyで検証、1,000円以上は
+                    # 平均+0.47%・勝率53.4%)。walk-forwardでも境界として最も切れ味が良く、
+                    # 1,000円未満を除外することにした。これに伴いCHEAP_THRESHOLD/
+                    # MAX_ORDER_AMOUNTによる金額ベースの株数分岐は廃止。
 
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
 SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
@@ -82,11 +88,7 @@ LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
 
 def calc_shares(price):
-    """価格に応じた発注株数を返す（100株単位）。
-    CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。"""
-    if price and price < CHEAP_THRESHOLD:
-        lots = int(MAX_ORDER_AMOUNT / price / 100)
-        return max(lots, 1) * 100
+    """発注株数を返す。MIN_PRICE未満は候補から除外済みのため、常に固定株数。"""
     return DEFAULT_SHARES
 
 PANIC_NIKKEI  = -2.0;  PANIC_AD  = 0.20
@@ -463,7 +465,7 @@ def main(start_now=False, manual=False):
         return
     print(f"  📡 Tachibana API: リアルタイム価格取得モード")
     mode_str = "本番発注モード" if tachibana_order.LIVE_TRADING else "モックモード（実発注なし）"
-    print(f"  💼 発注: {mode_str}  {CHEAP_THRESHOLD:,}円未満→最大{MAX_ORDER_AMOUNT//10000}万円分 / {CHEAP_THRESHOLD:,}円以上→{DEFAULT_SHARES}株\n")
+    print(f"  💼 発注: {mode_str}  {MIN_PRICE:,}円未満は除外 / {MIN_PRICE:,}円以上→{DEFAULT_SHARES}株固定\n")
 
     # 開始待機
     now = datetime.now(JST)
@@ -543,12 +545,12 @@ def main(start_now=False, manual=False):
     for c in candidates:
         c["name"] = code_names.get(c["code"], c.get("name") or c["code"])
 
-    # ── 異常フラグ除外（コードで処理）──
+    # ── 異常フラグ除外 + 低位株除外（コードで処理）──
     before = len(candidates)
-    candidates = [c for c in candidates if c["change_pct"] > -15 and c["price"] >= 200]
+    candidates = [c for c in candidates if c["change_pct"] > -15 and c["price"] >= MIN_PRICE]
     removed = before - len(candidates)
     if removed > 0:
-        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価200円未満）")
+        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価{MIN_PRICE:,}円未満）")
 
     if not candidates:
         print(f"  異常フラグ除外後、該当銘柄なし")
