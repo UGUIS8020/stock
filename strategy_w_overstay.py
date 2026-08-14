@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-strategy_w.py - 戦略W（WEAK日専用・2泊保有の逆張り、2026-08-14新設）
+strategy_w_overstay.py - 戦略W_OVERSTAY（WEAK日の翌営業日エントリー・2泊保有の逆張り、2026-08-14新設）
+
+【命名について】当初「戦略W」として開発したが、実際の狙い(WEAK当日、他戦略が
+休止している間の空き資金を使う)とは異なり、エントリーは「WEAKの翌営業日」に
+なる(引け確定データで判定→翌朝発注という仕組み上、当日中の判定・発注はできない)。
+本来のWEAK当日発動型の戦略は別途「戦略W」として改めて開発する予定のため、
+本ファイル・戦略名は区別のため W_OVERSTAY とする。
 
 戦略B(closing_watch.py)はNORMAL/STRONG日限定で、WEAK日(2年間で全体の
-約16%)は完全に休止している。戦略Wはこの空白を埋めるための独立戦略。
+約16%)は完全に休止している。戦略W_OVERSTAYはこの空白の翌営業日を狙う独立戦略。
 
 【他戦略との関係】
-    - 発動条件はWEAK限定で、B(NORMAL/STRONG)とは排他的（同日に両方は動かない）
+    - 発動条件（トリガー）はWEAK限定だが、実際の発注はWEAK当日ではなく
+      翌営業日のため、A/AN/AS/B/Dと資金・APIタイミングが重なる可能性がある
+      （詳細はStage2の地合い実測ガード参照）
     - コード・ロジックは closing_watch.py から完全に独立（import・共有なし。
       calc_rebound_score/calc_rsiもこのファイル内に複製し、依存を持たない）
     - position_monitor.py の変更は不要（15:20強制決済は「strategy in
-      (A,D,AN,AS)以外は当日は決済しない」設計のため、Wは自動的にB同様の
-      2泊保有として扱われる）
+      (A,D,AN,AS)以外は当日は決済しない」設計のため、W_OVERSTAYは自動的に
+      B同様の2泊保有として扱われる）
 
 【条件（2026-08-14 GA探索(20,000人×100世代)+walk-forward検証済み、2年データ）】
     today_rise  : -4.2% < 下落率 <= -3.0%
@@ -27,13 +35,13 @@ strategy_w.py - 戦略W（WEAK日専用・2泊保有の逆張り、2026-08-14新
 【2段階方式（戦略Dと同じ発想）】
     Stage1（前日夜、daily_pricesのDBデータのみで完結・API呼び出しなし）:
         WEAK地合い判定 + 下落幅・RBスコア・下ヒゲ条件で候補を絞り込み、
-        out/w_stage1_candidates.csv に保存
+        out/w_overstay_stage1_candidates.csv に保存
     Stage2（翌朝寄り付き、ライブAPIで始値を取得）:
-        Stage1候補の始値を取得しgap_pct条件を確認、発注
+        Stage1候補の始値を取得しgap_pct条件を確認、当日朝の地合いを実測して発注
 
 実行方法:
-    python strategy_w.py --stage1          # 前日夜（scan_daily.py等から呼ぶ想定）
-    python strategy_w.py --stage2           # 翌朝寄り付き
+    python strategy_w_overstay.py --stage1          # 前日夜（scan_daily.py等から呼ぶ想定）
+    python strategy_w_overstay.py --stage2           # 翌朝寄り付き
 """
 import sys
 import os
@@ -65,7 +73,7 @@ def _is_trading_day(d=None):
 
 
 _BASE_DIR = os.path.dirname(__file__)
-STAGE1_CSV = os.path.join(_BASE_DIR, "out", "w_stage1_candidates.csv")
+STAGE1_CSV = os.path.join(_BASE_DIR, "out", "w_overstay_stage1_candidates.csv")
 TACHIBANA_LOGIN_FILE = os.path.join(_BASE_DIR, "tachibana_login_response.json")
 
 # ── 地合い判定用（closing_watch.pyと同一値だが独立管理） ──
@@ -73,7 +81,7 @@ PANIC_NIKKEI, PANIC_AD   = -2.0, 0.20
 WEAK_NIKKEI,  WEAK_AD    = -1.0, 0.35
 STRONG_NIKKEI, STRONG_AD =  0.5, 0.60
 
-# ── 戦略W 判定条件（2026-08-14 GA探索+walk-forward検証済み。変更する場合は再検証すること）──
+# ── 戦略W_OVERSTAY 判定条件（2026-08-14 GA探索+walk-forward検証済み。変更する場合は再検証すること）──
 DROP_LO      = -4.2
 DROP_HI      = -3.0
 RB_MIN       = 4
@@ -198,7 +206,7 @@ def stage1_scan(as_of_date=None):
     print(f"  {scan_date}  AD比率{up_ratio:.2f} → {condition}")
 
     if condition != "WEAK":
-        print(f"  地合い{condition} → 戦略W見送り（WEAK限定）")
+        print(f"  地合い{condition} → 戦略W_OVERSTAY見送り（WEAK限定）")
         _save_stage1_csv([], scan_date)
         return []
 
@@ -236,7 +244,7 @@ def stage1_scan(as_of_date=None):
         })
 
     conn.close()
-    print(f"  戦略W候補: {len(rows)}件")
+    print(f"  戦略W_OVERSTAY候補: {len(rows)}件")
     _save_stage1_csv(rows, scan_date)
     return rows
 
@@ -287,7 +295,7 @@ def _fetch_open_prices(url_price, codes):
         try:
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=8))
-            tachibana_order.log_api_call("strategy_w.fetch_open_prices")
+            tachibana_order.log_api_call("strategy_w_overstay.fetch_open_prices")
             result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
             for item in result.get("aCLMMfdsMarketPrice", []):
                 code = item.get("sIssueCode", "").strip('"')
@@ -345,7 +353,7 @@ def _check_entry_day_condition(url_price):
         try:
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=8))
-            tachibana_order.log_api_call("strategy_w.check_entry_day_condition")
+            tachibana_order.log_api_call("strategy_w_overstay.check_entry_day_condition")
             result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
             for item in result.get("aCLMMfdsMarketPrice", []):
                 def _f(key):
@@ -387,7 +395,7 @@ def stage2_order(url_price=None, url_request=None):
 
     df = pd.read_csv(STAGE1_CSV, encoding="utf-8-sig")
     if df.empty:
-        print("  戦略W: 前日はWEAK日でないか候補0件でした")
+        print("  戦略W_OVERSTAY: 前日はWEAK日でないか候補0件でした")
         return
 
     url_price   = url_price   or _load_url_price()
@@ -398,18 +406,18 @@ def stage2_order(url_price=None, url_request=None):
 
     entry_condition = _check_entry_day_condition(url_price)
     if entry_condition not in ("STRONG", "NORMAL"):
-        print(f"  戦略W: 当日の地合いが{entry_condition}（WEAK継続 or PANIC）のため発注見送り")
+        print(f"  戦略W_OVERSTAY: 当日の地合いが{entry_condition}（WEAK継続 or PANIC）のため発注見送り")
         return
 
     codes = df["code"].astype(str).tolist()
     open_prices = _fetch_open_prices(url_price, codes)
 
-    open_pos = db.load_open_positions(strategy="W")
+    open_pos = db.load_open_positions(strategy="W_OVERSTAY")
     order_count = len(open_pos)
 
     for _, r in df.iterrows():
         if order_count >= MAX_POSITIONS_W:
-            print(f"  戦略W: 上限{MAX_POSITIONS_W}件に到達、以降スキップ")
+            print(f"  戦略W_OVERSTAY: 上限{MAX_POSITIONS_W}件に到達、以降スキップ")
             break
         code = str(r["code"])
         open_p = open_prices.get(code)
@@ -425,7 +433,7 @@ def stage2_order(url_price=None, url_request=None):
         if result["success"]:
             print(f"  ✅ [{code}] 買い成功: {DEFAULT_SHARES_W}株 gap{gap_pct:+.2f}%  {result['message']}")
             tachibana_order.save_position(
-                code, code, DEFAULT_SHARES_W, open_p, strategy="W",
+                code, code, DEFAULT_SHARES_W, open_p, strategy="W_OVERSTAY",
                 tp_pct=TP_PCT, sl_pct=SL_PCT,
                 entry_change_pct=r["today_rise"], rb_score=r["rb_score"],
                 condition="WEAK", url_request=url_request,
@@ -436,7 +444,7 @@ def stage2_order(url_price=None, url_request=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="戦略W（WEAK日専用）")
+    parser = argparse.ArgumentParser(description="戦略W_OVERSTAY（WEAK日の翌営業日エントリー）")
     parser.add_argument("--stage1", action="store_true", help="前日夜: 候補抽出")
     parser.add_argument("--stage2", action="store_true", help="翌朝: ギャップ確認・発注")
     parser.add_argument("--as-of-date", type=str, default=None, help="stage1のバックテスト用日付指定")

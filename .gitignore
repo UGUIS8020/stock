@@ -21,7 +21,7 @@ out/sweep_results.csv
 out/sim_b_weak_*.csv
 out/sim_w_*.csv
 out/evolve_b_weak_*.csv
-out/w_stage1_candidates.csv
+out/w_overstay_stage1_candidates.csv
 out/as_extra_features.csv
 
 # ログ・エラーファイル（自動生成）
