@@ -23,6 +23,7 @@ out/sim_w_*.csv
 out/evolve_b_weak_*.csv
 out/w_overstay_stage1_candidates.csv
 out/as_extra_features.csv
+out/sim_panic_2night.csv
 
 # ログ・エラーファイル（自動生成）
 out/*_log.txt
