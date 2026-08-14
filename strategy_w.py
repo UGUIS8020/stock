@@ -305,6 +305,69 @@ def _fetch_open_prices(url_price, codes):
     return out
 
 
+def _check_entry_day_condition(url_price):
+    """当日朝の始値ベースでAD比率を計算し、STRONG/NORMALかどうかを返す。
+
+    2026-08-14追加: WEAK当日に候補を抽出しても、実際に買うのは翌営業日の
+    ため、その日の地合いがSTRONG/NORMALに転じているとは限らない
+    （WEAKが連続する・PANICに転じるケースもある）。検証の結果、
+    エントリー日がSTRONG/NORMALの時はwalk-forwardでも一貫してプラス
+    （N=93 勝率65.6% avg+1.106%）だが、WEAK継続/PANICの時は明確に
+    マイナス（N=16 avg-0.469%）だったため、発注直前に実測して見送る。
+    全銘柄スキャンのため戦略Bのscan_dropping_stocks相当のAPI負荷が
+    かかるが、Wが実際に候補を持つ日（月2回程度）のみ発生するため軽微。
+    """
+    codes = db.get_all_codes(exclude_etf=True)
+    http = urllib3.PoolManager()
+    up = down = 0
+    for i in range(0, len(codes), 120):
+        chunk = codes[i:i+120]
+        code_list = ",".join(str(c) for c in chunk)
+        t = datetime.now(JST)
+        p_sd_date = (f"{t.year}.{t.month:02}.{t.day:02}"
+                     f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
+                     f".{t.microsecond // 1000:03}")
+        params = (
+            "{"
+            f'"p_no":"{tachibana_order._next_p_no()}",'
+            f'"p_sd_date":"{p_sd_date}",'
+            '"sCLMID":"CLMMfdsGetMarketPrice",'
+            f'"sTargetIssueCode":"{code_list}",'
+            '"sTargetColumn":"pDOP,pPRP",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        try:
+            resp = http.request("GET", url_price + "?" + params,
+                                timeout=urllib3.Timeout(connect=3, read=8))
+            tachibana_order.log_api_call("strategy_w.check_entry_day_condition")
+            result = json.loads(resp.data.decode("shift-jis", errors="ignore"))
+            for item in result.get("aCLMMfdsMarketPrice", []):
+                def _f(key):
+                    v = item.get(key, "")
+                    if isinstance(v, str):
+                        v = v.strip('"')
+                    try:
+                        return float(v)
+                    except (ValueError, TypeError):
+                        return None
+                open_p = _f("pDOP")
+                prev   = _f("pPRP")
+                if open_p and prev and prev > 0:
+                    if open_p > prev:
+                        up += 1
+                    else:
+                        down += 1
+        except Exception:
+            continue
+
+    total = up + down
+    ad_ratio = up / total if total > 0 else 0.5
+    condition = _classify_condition(ad_ratio, nikkei_change=None)
+    print(f"  当日朝の地合い実測: AD比率{ad_ratio:.2f}（上昇{up}/下落{down}） → {condition}")
+    return condition
+
+
 def stage2_order(url_price=None, url_request=None):
     """Stage1候補の始値を取得し、gap_pct条件を満たす銘柄を発注する。"""
     if not os.path.exists(STAGE1_CSV):
@@ -326,6 +389,11 @@ def stage2_order(url_price=None, url_request=None):
     url_request = url_request or tachibana_order.load_url_request()
     if not url_price or not url_request:
         print("  ⚠️  APIセッションが取得できません")
+        return
+
+    entry_condition = _check_entry_day_condition(url_price)
+    if entry_condition not in ("STRONG", "NORMAL"):
+        print(f"  戦略W: 当日の地合いが{entry_condition}（WEAK継続 or PANIC）のため発注見送り")
         return
 
     codes = df["code"].astype(str).tolist()
