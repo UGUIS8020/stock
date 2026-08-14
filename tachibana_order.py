@@ -420,9 +420,65 @@ def place_buy_order(url_request, code, shares, price=None, market_code=None):
         }
 
 
+def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, wait_secs=3):
+    """買い注文の実際の平均取得単価をAPIから取得する（2026-08-14追加、Fix②）。
+
+    position_monitor.fetch_api_holdings()が使っているのと同じCLMKabuZanList/
+    CLMShinyouZanListのsHiritsuTanka/sTategyokuTanka（分割約定も加味した真の
+    平均取得単価）を、発注直後に1銘柄だけ照会する。反映までに数秒かかることが
+    あるためリトライする。取得できなければNoneを返し、呼び出し側は気配値の
+    ままフォールバックする（[[bug_buy_price_inaccuracy]]のFix①と同じ仕組みを
+    日中の発注直後にも適用したもの）。
+    """
+    clm_id, list_key, price_key = (
+        ("CLMShinyouZanList", "aCLMShinyouZanList", "sTategyokuTanka")
+        if account_type == "shinyou" else
+        ("CLMKabuZanList", "aCLMKabuZanList", "sHiritsuTanka")
+    )
+    for attempt in range(max_retry):
+        if attempt > 0:
+            time.sleep(wait_secs)
+        params = (
+            "{"
+            f'"p_no":"{_next_p_no()}",'
+            f'"p_sd_date":"{_p_sd_date()}",'
+            f'"sCLMID":"{clm_id}",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        try:
+            result = _api_get(url_request + "?" + params, source="tachibana_order.get_true_buy_price")
+            if result.get("p_errno", "0") != "0":
+                continue
+            for item in result.get(list_key, []):
+                item_code = str(item.get("sIssueCode", "")).strip('"')
+                if item_code != str(code):
+                    continue
+                v = item.get(price_key, "")
+                if isinstance(v, str):
+                    v = v.strip('"')
+                try:
+                    price = float(v)
+                    if price > 0:
+                        return price
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            continue
+    return None
+
+
 def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
-                  entry_change_pct=None, rb_score=None, condition=None):
-    """買い成功後にポジションを DB へ記録する。"""
+                  entry_change_pct=None, rb_score=None, condition=None,
+                  url_request=None, account_type="genbutsu"):
+    """買い成功後にポジションを DB へ記録する。
+
+    url_request指定時は、発注直前の気配値ではなく実際の約定平均単価で
+    buy_price/tp_price/sl_priceを補正する（2026-08-14追加、Fix②）。
+    当日完結取引（戦略A/AN/AS/D）はこれまで気配値のまま記録され、実額と
+    ズレていた（[[bug_buy_price_inaccuracy]]参照）。補正に失敗しても
+    本体の発注処理は継続する（気配値のまま記録・従来動作にフォールバック）。
+    """
     db.init_db()
     db.save_position_db(
         code, name, shares, buy_price, strategy,
@@ -430,7 +486,22 @@ def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0
         entry_change_pct=entry_change_pct,
         rb_score=rb_score,
         condition=condition,
+        account_type=account_type,
     )
+
+    if url_request:
+        try:
+            true_price = get_true_buy_price(url_request, code, account_type=account_type)
+            if true_price and abs(true_price - float(buy_price)) >= 0.5:
+                today  = datetime.now().strftime("%Y-%m-%d")
+                new_tp = round(true_price * (1 + tp_pct))
+                new_sl = round(true_price * (1 - sl_pct))
+                db.update_position(today, code, buy_price=true_price,
+                                   tp_price=new_tp, sl_price=new_sl)
+                print(f"  🔧 [{code}] 約定単価を補正: {float(buy_price):.1f}円 → {true_price:.1f}円 "
+                      f"（TP:{new_tp}円 SL:{new_sl}円 に再計算）")
+        except Exception as e:
+            print(f"  ⚠️ [{code}] 約定単価の補正確認に失敗（気配値のまま記録・処理は継続）: {e}")
 
 
 def place_sell_order(url_request, code, shares, price=None, market_code=None,

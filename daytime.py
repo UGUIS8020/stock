@@ -756,6 +756,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                         code, name, r["filled"], r["fill_price"], "D",
                         tp_pct=TP_PCT, sl_pct=SL_PCT,
                         entry_change_pct=sig["change_pct"],
+                        url_request=url_request,
                     )
                     ordered_today.add(code)
                     signaled.add(code)
@@ -773,6 +774,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                         code, name, shares, sig["price"], "D",
                         tp_pct=TP_PCT, sl_pct=SL_PCT,
                         entry_change_pct=sig["change_pct"],
+                        url_request=url_request,
                     )
                     ordered_today.add(code)
                     signaled.add(code)

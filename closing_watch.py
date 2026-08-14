@@ -403,6 +403,7 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
                 entry_change_pct=candidate.get("change_pct"),
                 rb_score=candidate.get("rb_score"),
                 condition=condition,
+                url_request=url_request,
             )
             ordered_today.add(str(code))
             return True
@@ -419,6 +420,7 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
                 entry_change_pct=candidate.get("change_pct"),
                 rb_score=candidate.get("rb_score"),
                 condition=condition,
+                url_request=url_request,
             )
             ordered_today.add(str(code))
             return True
