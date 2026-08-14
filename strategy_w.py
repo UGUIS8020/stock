@@ -38,6 +38,7 @@ strategy_w.py - 戦略W（WEAK日専用・2泊保有の逆張り、2026-08-14新
 import sys
 import os
 import json
+import time
 import argparse
 from datetime import datetime, timezone, timedelta
 
@@ -61,6 +62,8 @@ def _is_trading_day(d=None):
     d = d or datetime.now(JST).date()
     tse_year_end_new_year = (d.month == 12 and d.day == 31) or (d.month == 1 and d.day in (2, 3))
     return d.weekday() < 5 and not jpholiday.is_holiday(d) and not tse_year_end_new_year
+
+
 _BASE_DIR = os.path.dirname(__file__)
 STAGE1_CSV = os.path.join(_BASE_DIR, "out", "w_stage1_candidates.csv")
 TACHIBANA_LOGIN_FILE = os.path.join(_BASE_DIR, "tachibana_login_response.json")
@@ -266,6 +269,7 @@ def _fetch_open_prices(url_price, codes):
     for i in range(0, len(codes), 120):
         chunk = codes[i:i+120]
         code_list = ",".join(str(c) for c in chunk)
+        time.sleep(0.6)   # p_sd_date競合（p_errno=6/8）を避けるため他プロセスと時間をずらす
         t = datetime.now(JST)
         p_sd_date = (f"{t.year}.{t.month:02}.{t.day:02}"
                      f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
@@ -323,6 +327,7 @@ def _check_entry_day_condition(url_price):
     for i in range(0, len(codes), 120):
         chunk = codes[i:i+120]
         code_list = ",".join(str(c) for c in chunk)
+        time.sleep(0.6)   # p_sd_date競合（p_errno=6/8）を避けるため他プロセスと時間をずらす
         t = datetime.now(JST)
         p_sd_date = (f"{t.year}.{t.month:02}.{t.day:02}"
                      f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
