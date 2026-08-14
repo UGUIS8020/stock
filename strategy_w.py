@@ -44,12 +44,23 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
 import urllib3
+import jpholiday
 
 sys.path.insert(0, os.path.dirname(__file__))
 import db
 import tachibana_order
 
 JST = timezone(timedelta(hours=9))
+
+
+def _is_trading_day(d=None):
+    """東証の営業日判定（deploy/run_daily_cron.shと同一ロジックを複製）。
+    土日・祝日に加え、祝日扱いでない年末年始休場(12/31, 1/2, 1/3)も除外する。
+    独立したcrontabエントリで起動するため、休日判定もこのファイル内で完結させる。
+    """
+    d = d or datetime.now(JST).date()
+    tse_year_end_new_year = (d.month == 12 and d.day == 31) or (d.month == 1 and d.day in (2, 3))
+    return d.weekday() < 5 and not jpholiday.is_holiday(d) and not tse_year_end_new_year
 _BASE_DIR = os.path.dirname(__file__)
 STAGE1_CSV = os.path.join(_BASE_DIR, "out", "w_stage1_candidates.csv")
 TACHIBANA_LOGIN_FILE = os.path.join(_BASE_DIR, "tachibana_login_response.json")
@@ -359,8 +370,14 @@ def main():
     args = parser.parse_args()
 
     if args.stage1:
+        if args.as_of_date is None and not _is_trading_day():
+            print("  休日（土日・祝日・年末年始休場）のためstage1をスキップ")
+            return
         stage1_scan(as_of_date=args.as_of_date)
     elif args.stage2:
+        if not _is_trading_day():
+            print("  休日（土日・祝日・年末年始休場）のためstage2をスキップ")
+            return
         stage2_order()
     else:
         print("  --stage1 または --stage2 を指定してください")
