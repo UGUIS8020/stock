@@ -4,7 +4,8 @@ position_monitor.py - ポジション監視・自動売り
 
 out/positions.csv の "open" 行を15秒ごとに監視し、
 TP または SL に達したら自動で成行売りを発注する。
-15:20 に前日持越しポジションを強制決済、15:28 に終了。
+15:00 に前日持越しポジションを強制決済、15:28 に終了。
+（2026-08-14: 15:20→15:00に変更。詳細はFORCE_CLOSE_MINのコメント参照）
 """
 
 import sys
@@ -48,8 +49,17 @@ EXIT_MIN           = 28
 JST                = timezone(timedelta(hours=9))
 GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
 GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
-FORCE_CLOSE_MIN    = 15 * 60 + 20  # 15:20 前日ポジションを引け成行で強制決済
-                                   # ※15:25は東証がオークションモードに切り替わり成行注文不可(11481エラー)
+FORCE_CLOSE_MIN    = 15 * 60 + 0   # 2026-08-14: 15:20→15:00に変更。戦略B(引け前15:05スキャン
+                                   # →15:13-15:20発注)が、A/AN/AS/D当日分の強制決済(同じ仕組み
+                                   # で処理される2泊満了のB自身の決済も含む)と資金を取り合わない
+                                   # よう、Bの発注ウィンドウより前に確実に資金を解放する。
+                                   # intraday_pricesの実測(A/AN/AS/D強制決済92件中31件でデータ
+                                   # 照合: 15:00頃→15:20頃の変化率は平均-0.046%・標準偏差0.346%
+                                   # とごく僅かで、20分早めることによる価格面の悪影響は限定的
+                                   # と判断（B戦略自体はN=2と少なく未検証だが、同じ市場性質が
+                                   # 働くと推測）。
+                                   # ※15:25は東証がオークションモードに切り替わり成行注文不可
+                                   # (11481エラー)のため、15:00なら十分な安全マージンがある。
 DASHBOARD_SYNC_INTERVAL_SEC = 600  # ダッシュボード向けに10分おきintraday_prices保存+S3同期
 
 
@@ -294,7 +304,7 @@ def main():
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
 
-        # ── 15:20: 引け成行で強制決済 ──
+        # ── 15:00: 引け成行で強制決済（2026-08-14: 15:20→15:00、詳細はFORCE_CLOSE_MIN参照） ──
         # ①前々日以前に買ったポジション（戦略B最適化2026-06-23: 2泊保有のため「前日」→「前々日以前」に変更）
         # ②当日買った戦略A/D/AN/ASのポジション（2026-07-28追加、2026-08-10にAN・ASを追加）
         #   戦略A/D/AN/ASは simulate_precise.py 系のバックテストが「買った当日1日分の値動きのみ」で
@@ -312,7 +322,7 @@ def main():
                 if p["date"] < prev_trading_day or (p["date"] == TODAY and p.get("strategy") in ("A", "D", "AN", "AS"))
             ]
             if prev_positions:
-                print(f"\n  ⏰ 15:20 引け決済開始（{len(prev_positions)}件）")
+                print(f"\n  ⏰ 15:00 引け決済開始（{len(prev_positions)}件）")
                 updated = []
                 for pos in prev_positions:
                     code  = pos["code"]
