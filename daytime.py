@@ -468,6 +468,22 @@ def check_signal(code, quote, prev_ohlcv, first_prices, score=None,
 # ログ保存
 # ══════════════════════════════════════════════════
 
+def log_noon_ad_observation(time_label, ad_ratio, nikkei_change, scanned_cond, condition):
+    """2026-08-14追加: 13:00再判定の30分バッファ(12:30後場再開→13:00)が妥当か検証するため、
+    12:40時点のAD比率を発注判断に使わず観測目的のみでlogs/に記録する。
+    dt_live.txt(当日上書き)と違い、複数日分を蓄積して後日比較できるようappendする。"""
+    try:
+        log_dir = _BASE_DIR / "logs"
+        log_dir.mkdir(exist_ok=True)
+        path = log_dir / "noon_ad_observation.log"
+        nikkei_str = f"{nikkei_change:.2f}" if nikkei_change is not None else "NA"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{TODAY},{time_label},{ad_ratio:.3f},{nikkei_str},"
+                    f"{scanned_cond},{condition}\n")
+    except Exception:
+        pass
+
+
 def save_signal(code, name, sig):
     """シグナルを DB（daytime_signals テーブル）に保存する。"""
     db.save_daytime_signal({
@@ -562,6 +578,10 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     LUNCH_END_MIN   = 12 * 60 + 30   # 後場再開
     opening_rescanned = False  # 監視開始(9:30)時点の実測補正フラグ
     noon_rescanned     = False
+    OBSERVE_MIN  = 12 * 60 + 40   # 2026-08-14追加: 13:00再判定の30分バッファが妥当か
+                                   # 検証するため、12:40時点のAD比率を発注判断に使わず
+                                   # 観測目的のみで記録する（[[entry_timing_review_plan]]と同じ考え方）
+    observed_1240 = False
 
     while True:
         now     = datetime.now(JST)
@@ -609,12 +629,25 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             except Exception as e:
                 print(f"  ⚠️  開始時点の地合い再チェックに失敗（現在の判定のまま継続）: {e}")
 
+        # 2026-08-14追加: 12:40時点のAD比率を観測目的のみで記録（発注判断には使わない）。
+        # 13:00再判定の30分バッファが妥当か、後日ログを見て検証するための布石。
+        if not observed_1240 and now_min >= OBSERVE_MIN and url_price:
+            observed_1240 = True
+            try:
+                ad_ratio, nikkei_change, scanned_cond, _ = closing_watch.scan_dropping_stocks(url_price)
+                log_noon_ad_observation("12:40", ad_ratio, nikkei_change, scanned_cond, condition)
+                print(f"  [{now_str}] 📝 12:40観測記録: AD{ad_ratio:.2f} → {scanned_cond}"
+                      f"（現行条件{condition}、発注判断には未使用）")
+            except Exception as e:
+                print(f"  ⚠️  12:40観測の記録に失敗（無視して継続）: {e}")
+
         # 昼(13:00)の地合い再チェック（朝9:30の1回だけだと午後の反転を拾えないため）
         if not noon_rescanned and now_min >= NOON_RESCAN_MIN and url_price:
             noon_rescanned = True
             try:
                 print(f"\n  [{now_str}] 🕐 後場の地合い再チェック中（全銘柄スキャン）...")
                 ad_ratio, nikkei_change, scanned_cond, _ = closing_watch.scan_dropping_stocks(url_price)
+                log_noon_ad_observation("13:00", ad_ratio, nikkei_change, scanned_cond, condition)
                 if scanned_cond != condition:
                     print(f"  ⚠️  地合い変化: {condition}（直前）→ {scanned_cond}（昼実測 AD{ad_ratio:.2f}）")
                     condition       = scanned_cond
