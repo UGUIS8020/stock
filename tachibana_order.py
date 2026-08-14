@@ -438,6 +438,8 @@ def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, 
     for attempt in range(max_retry):
         if attempt > 0:
             time.sleep(wait_secs)
+        time.sleep(0.6)   # p_sd_date競合（p_errno=6/8）を避けるため他プロセスと時間をずらす
+                          # （position_monitor.fetch_api_holdings()と同じ対策）
         params = (
             "{"
             f'"p_no":"{_next_p_no()}",'
