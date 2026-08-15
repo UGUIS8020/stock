@@ -55,6 +55,11 @@ SAVE_CAP_A       = 500  # scan_resultsへの保存件数の安全弁。SCORE_MIN
                          # 全件保存されるため引き続き機能する。
 SCORE_MIN_A      = 3.0
 MIN_PRICE        = 100
+MAX_PRICE_A      = 10_000  # 2026-08-15新設: 戦略A本体、STRONG日限定バックテスト(64日・walk-forward
+                            # 4分割全て)で、1万円以上を除外しても質は落ちず(繰り上がる候補との差なし、
+                            # 候補プール中央値54件/日と深いため)、日次必要資金が約20%減り、
+                            # 資金効率(損益/投入資金)は4分割全てで改善(+0.05〜0.08pt)。
+                            # 戦略AS(scan_morning_strategy_as_candidates.py)のMAX_PRICEとは別定数
 MIN_VOLUME       = 50_000
 MIN_TURNOVER     = 50_000_000
 
@@ -716,11 +721,15 @@ def main():
     low_price_mask = df_a["close"] < MIN_PRICE
     if low_price_mask.sum() > 0:
         print(f"  💴 低位株除外: {low_price_mask.sum()}件 {df_a[low_price_mask]['name'].tolist()}")
+    high_price_mask = df_a["close"] >= MAX_PRICE_A
+    if high_price_mask.sum() > 0:
+        print(f"  💰 高位株除外: {high_price_mask.sum()}件 {df_a[high_price_mask]['name'].tolist()}")
     a_pool = df_a[
         (df_a["score"] >= SCORE_MIN_A) &
         (df_a["ratio"] < RATIO_LIMIT_A) &
         (~bank_mask) &
-        (~low_price_mask)
+        (~low_price_mask) &
+        (~high_price_mask)
     ]
     top_a = a_pool.head(TOP_N)   # コンソール表示専用（上位30件、score降順）
 
