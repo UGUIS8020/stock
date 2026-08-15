@@ -130,6 +130,27 @@ def fetch_prices(url_price, codes):
     return prices
 
 
+def _confirm_sell_price(url_request, pos, result, buy_px, now):
+    """売り注文成功後、実際の約定単価で pos["sell_price"]/["pnl_pct"] を補正する（2026-08-15、Fix③）。
+
+    CLMOrderListDetailを発注直後に照会するため数秒かかる。取得できない場合は
+    気配値のままフォールバックする（呼び出し元のpos内容は変更しない）。
+    DBへの保存は呼び出し元の既存の save_all_positions() 経路に任せる。
+    """
+    order_no = result.get("order_no")
+    if not order_no:
+        return
+    eigyou_day = (result.get("raw") or {}).get("sEigyouDay") or now.strftime("%Y%m%d")
+    true_price = tachibana_order.get_true_execution_price(url_request, order_no, eigyou_day)
+    if true_price and buy_px:
+        true_chg = (true_price - buy_px) / buy_px * 100
+        old_price = pos["sell_price"]
+        pos["sell_price"] = str(true_price)
+        pos["pnl_pct"]    = str(round(true_chg, 2))
+        print(f"  🔧 [{pos['code']}] {pos['name']}: 約定単価を補正: {float(old_price):.1f}円 → "
+              f"{true_price:.1f}円  損益: {true_chg:+.2f}%")
+
+
 def load_url_price():
     try:
         from pathlib import Path
@@ -324,6 +345,7 @@ def main():
             if prev_positions:
                 print(f"\n  ⏰ 15:00 引け決済開始（{len(prev_positions)}件）")
                 updated = []
+                to_confirm = []   # (pos, result, buy_px) 発注完了後にまとめて約定単価を確認する（Fix③）
                 for pos in prev_positions:
                     code  = pos["code"]
                     name  = pos["name"]
@@ -344,12 +366,21 @@ def main():
                         pos["pnl_pct"]     = str(round(chg, 2))
                         pos["exit_reason"] = "force_close"
                         print(f"  ✅ {result['message']}  損益: {chg:+.2f}%（引け決済）")
+                        to_confirm.append((pos, result, float(pos["buy_price"])))
                     else:
                         print(f"  ❌ 引け決済失敗: {result['message']}")
                         if "11482" in result["message"]:
                             db.add_restriction(code, "11482")
                             print(f"  🚫 {code} {name}: 日計取引制限（11482）→ ブラックリスト登録（30日間）")
                     updated.append(pos)
+
+                # 全銘柄の発注完了後にまとめて約定単価を確認・補正する（Fix③、2026-08-15追加）。
+                # 15:25のオークションモード切替までの発注ウィンドウを優先し、
+                # 1件ずつ発注の合間に確認を挟んで遅延させることはしない。
+                if to_confirm:
+                    print(f"  🔧 約定単価の確認・補正を開始（{len(to_confirm)}件）")
+                    for pos, result, buy_px in to_confirm:
+                        _confirm_sell_price(url_request, pos, result, buy_px, now)
                 save_all_positions(updated)
 
         if now_min >= EXIT_HOUR * 60 + EXIT_MIN:
@@ -413,6 +444,7 @@ def main():
                         pos["exit_reason"] = "gap_sell"
                         changed = True
                         print(f"  ✅ {result['message']}  損益: {gap_pct:+.2f}% (ギャップ売り)")
+                        _confirm_sell_price(url_request, pos, result, buy_px, now)
                     else:
                         print(f"  ❌ ギャップ売り失敗: {result['message']}")
                     continue
@@ -441,6 +473,7 @@ def main():
                     changed = True
                     emoji = "✅" if hit_tp else "🛑"
                     print(f"  {emoji} {result['message']}  損益: {chg:+.2f}%")
+                    _confirm_sell_price(url_request, pos, result, buy_px, now)
                 else:
                     print(f"  ❌ 売り失敗: {result['message']}")
                     if "11482" in result["message"]:
