@@ -470,6 +470,62 @@ def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, 
     return None
 
 
+def get_true_execution_price(url_request, order_no, eigyou_day, max_retry=3, wait_secs=3):
+    """売り注文の実際の約定単価をCLMOrderListDetailから取得する（2026-08-15追加、Fix③）。
+
+    Fix②(get_true_buy_price)はCLMKabuZanList（保有残高）を使うため、全数売却して
+    残高がゼロになる売り注文には使えない。代わりに注文番号で約定明細を直接照会する
+    CLMOrderListDetailを使う。aYakuzyouSikkouList（約定失効リスト）を数量加重平均する
+    ことで、分割約定（例: 200株@298円+100株@297円）も加味した真の平均約定単価になる。
+    取得できなければNoneを返し、呼び出し側は気配値のままフォールバックする
+    （[[bug_buy_price_inaccuracy]]参照）。
+    """
+    for attempt in range(max_retry):
+        if attempt > 0:
+            time.sleep(wait_secs)
+        time.sleep(0.6)   # p_sd_date競合（p_errno=6/8）を避けるため他プロセスと時間をずらす
+        params = (
+            "{"
+            f'"p_no":"{_next_p_no()}",'
+            f'"p_sd_date":"{_p_sd_date()}",'
+            '"sCLMID":"CLMOrderListDetail",'
+            f'"sOrderNumber":"{order_no}",'
+            f'"sEigyouDay":"{eigyou_day}",'
+            '"sJsonOfmt":"5"'
+            "}"
+        )
+        try:
+            result = _api_get(url_request + "?" + params, source="tachibana_order.get_true_execution_price")
+            if result.get("p_errno", "0") != "0":
+                continue
+            total_qty = 0.0
+            total_amt = 0.0
+            for fill in result.get("aYakuzyouSikkouList", []):
+                try:
+                    qty = float(str(fill.get("sYakuzyouSuryou", "0")).strip('"'))
+                    px  = float(str(fill.get("sYakuzyouPrice", "0")).strip('"'))
+                except (TypeError, ValueError):
+                    continue
+                if qty > 0 and px > 0:
+                    total_qty += qty
+                    total_amt += qty * px
+            if total_qty > 0:
+                return total_amt / total_qty
+            # 約定失効リストが空の場合のフォールバック（トップレベルのsYakuzyouPrice）
+            v = result.get("sYakuzyouPrice", "")
+            if isinstance(v, str):
+                v = v.strip('"')
+            try:
+                price = float(v)
+                if price > 0:
+                    return price
+            except (TypeError, ValueError):
+                pass
+        except Exception:
+            continue
+    return None
+
+
 def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
                   entry_change_pct=None, rb_score=None, condition=None,
                   url_request=None, account_type="genbutsu"):
