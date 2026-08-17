@@ -734,9 +734,13 @@ def load_market_info():
 # ══════════════════════════════════════════════
 # 異常検知（ルールベース）
 # ══════════════════════════════════════════════
-def check_anomaly(candidate):
-    """異常な銘柄を検出してメッセージを返す。正常ならNone。"""
-    price      = candidate.get("price") or 0
+def check_anomaly(candidate, price=None):
+    """異常な銘柄を検出してメッセージを返す。正常ならNone。
+    price指定時はcandidate自身の価格ではなくこちらを使う。candidate["price"]は
+    候補作成時点の値のまま更新されないため、監視中に200円を割り込んだ銘柄が
+    古い価格でチェックをすり抜ける実例(2026-08-17発覚)があった。発注直前の
+    最新価格(latest_px)を渡すことでこれを防ぐ。"""
+    price      = price if price is not None else (candidate.get("price") or 0)
     ratio      = candidate.get("ratio") or 0
     today_rise = candidate.get("today_rise") or 0
 
@@ -1067,8 +1071,8 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             latest_chg = histories[code][-1]["change_pct"] if histories[code] else 0
             latest_px  = histories[code][-1]["price"]       if histories[code] else None
 
-            # 異常検知 → 強制見送り
-            anomaly = check_anomaly(c)
+            # 異常検知 → 強制見送り（発注直前の最新価格でチェック、2026-08-17修正）
+            anomaly = check_anomaly(c, price=latest_px)
             if anomaly:
                 ordered[code] = True
                 results[code] = f"見送り(異常検知)"
