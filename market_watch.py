@@ -287,22 +287,6 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
     }
 
 
-def is_v_recovery(history, dip_threshold=-0.3, recovery_min=0.5):
-    """寄り付きダウン→V字回復パターンを検出する。
-    STRONG日BUYで一時的にマイナスになっても回復中の銘柄を拾うために使用。
-
-    条件:
-      - 過去データのうち最安値が dip_threshold% 以下（一度下落した）
-      - 直近の前日比 - 最安値前日比 >= recovery_min%（V字で回復中）
-    """
-    if len(history) < 3:
-        return False
-    changes  = [h["change_pct"] for h in history]
-    min_chg  = min(changes[:-1])   # 最終点を除いた最安値
-    latest   = changes[-1]
-    return min_chg <= dip_threshold and (latest - min_chg) >= recovery_min
-
-
 # 2026-08-05検証: ratio<=3.0の候補はn=10・勝率70.0%・平均+1.632%（ratio>3.0はn=34・勝率38.2%）。
 # サンプルがまだ少ないため発注ロジック（株数・除外）は変更せず、後から集計しやすいよう
 # 発注時にログへ明示するだけに留める（candidates_logと突き合わせれば集計可能）。
