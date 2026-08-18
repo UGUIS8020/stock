@@ -536,7 +536,10 @@ def main(start_now=False, manual=False):
 
     # 銘柄名を取得（可能な場合）
     # scan_resultsは戦略AのTOP20候補のみを含むため、そこにない銘柄（戦略B候補は
-    # 全銘柄が対象）はget_eq_master()（全銘柄マスタ）で補う。
+    # 全銘柄が対象）はstock_masterキャッシュ（J-Quants全銘柄マスタを1日1回取得
+    # したもの、2026-08-18追加）で補う。ここで毎回J-Quantsをライブ取得すると
+    # ネットワーク遅延で15:20の発注締切に迫るリスクがあったため、ライブ取得は
+    # キャッシュが空の場合のフォールバックのみに限定している。
     try:
         conn = db.get_conn()
         code_names = dict(pd.read_sql(
@@ -549,11 +552,8 @@ def main(start_now=False, manual=False):
     missing_codes = [c["code"] for c in candidates if c["code"] not in code_names]
     if missing_codes:
         try:
-            import jquantsapi
-            cli_master = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
-            master = cli_master.get_eq_master()
-            master["code4"] = master["Code"].astype(str).str[:4]
-            code_names.update(dict(zip(master["code4"], master["CoName"])))
+            import stock_master
+            code_names.update(stock_master.get_names())
         except Exception as e:
             print(f"  ⚠️  銘柄マスタ取得失敗（コード表示にフォールバック）: {e}")
 
