@@ -47,7 +47,13 @@ CLOSING_LOG_CSV      = str(_BASE_DIR / "out" / "closing_log.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 
 SCAN_START_HOUR    = 15
-SCAN_START_MIN     = 5
+SCAN_START_MIN     = 0     # 2026-08-18: 15:05→15:00（下落候補が多い日にRBスコア計算＋
+                           # J-Quants銘柄名取得の処理時間が伸び、15:20の発注締切に間に合わない
+                           # リスクが判明。処理時間の余裕を15分→20分に拡大。発注タイミング
+                           # (ORDER_WAIT_MIN/ORDER_DEADLINE_MIN)自体は変更しない。
+                           # FORCE_CLOSE_MIN(15:00, position_monitor.py)と同時刻になるが、
+                           # p_noはファイルロックで排他制御済み(tachibana_order._next_p_no)
+                           # のため衝突せず、Bのスキャン自体は資金を使わないため資金競合もない。
 ORDER_WAIT_MIN     = 15 * 60 + 13  # 15:13まで待機してから発注（引けギリギリ約15:15執行）
 ORDER_DEADLINE_MIN = 15 * 60 + 20  # 15:20 以降は発注しない（引けオークション開始前）
 
