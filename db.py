@@ -185,6 +185,12 @@ def init_db():
             restricted_date  TEXT NOT NULL,
             reason           TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS stock_master (
+            code       TEXT PRIMARY KEY,
+            name       TEXT,
+            updated_at TEXT
+        );
     """)
     conn.commit()
     conn.close()
@@ -417,6 +423,44 @@ def save_scan_results(df):
         conn.execute("DELETE FROM scan_results WHERE scan_date=?", [d])
     df.to_sql("scan_results", conn, if_exists="append", index=False,
               method="multi", chunksize=500)
+    conn.commit()
+    conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# stock_master（銘柄コード→会社名キャッシュ、2026-08-18追加）
+# ══════════════════════════════════════════════════════
+
+def get_stock_master():
+    """code→name の辞書を返す（ネットワーク呼び出しなし）。未構築なら空dict。"""
+    conn = get_conn()
+    df = pd.read_sql("SELECT code, name FROM stock_master", conn)
+    conn.close()
+    return dict(zip(df["code"], df["name"]))
+
+
+def get_stock_master_age_hours():
+    """キャッシュの最終更新からの経過時間（時間）。未構築なら None。"""
+    conn = get_conn()
+    row = conn.execute("SELECT MAX(updated_at) FROM stock_master").fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    updated = datetime.fromisoformat(row[0])
+    return (datetime.now() - updated).total_seconds() / 3600
+
+
+def save_stock_master(name_dict):
+    """code→name の辞書をまとめて保存（全件置き換え）。"""
+    if not name_dict:
+        return
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    conn.execute("DELETE FROM stock_master")
+    conn.executemany(
+        "INSERT INTO stock_master (code, name, updated_at) VALUES (?, ?, ?)",
+        [(str(code), name, now) for code, name in name_dict.items()]
+    )
     conn.commit()
     conn.close()
 

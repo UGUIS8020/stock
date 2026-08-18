@@ -291,6 +291,15 @@ def main():
     else:
         print(f"  ✅ ローカルDB使用（{_db_age_hours:.1f}時間前に更新済み）")
 
+    # ── 銘柄名マスタキャッシュ更新（1日1回、2026-08-18追加）──
+    # closing_watch.py 等が引け間際にJ-Quantsをライブ取得すると遅延リスクが
+    # あるため、時間に余裕のあるこの朝の時点で更新しておく。
+    try:
+        import stock_master
+        stock_master.refresh()
+    except Exception as e:
+        print(f"  ⚠️  銘柄名マスタキャッシュ更新スキップ: {e}")
+
     # ── Tachibana API セッション確保（期限切れなら電話認証フローを案内）──
     print("  Tachibana API セッション確認中...")
     tachibana_url = ensure_tachibana_session()

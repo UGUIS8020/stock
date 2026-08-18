@@ -55,16 +55,13 @@ JST = timezone(timedelta(hours=9))
 
 
 def _load_name_dict():
-    """J-Quants全銘柄マスタからcode→会社名の辞書を作る（2026-08-11追加）。
+    """code→会社名の辞書を作る（2026-08-11追加、2026-08-18にstock_masterキャッシュ
+    経由に変更。J-Quants全銘柄マスタは1日1回だけ取得してDBにキャッシュされており
+    (stock_master.py)、通常はここでネットワーク呼び出しは発生しない。
     取得失敗時は空dictを返し、呼び出し側でcodeそのものにフォールバックする。"""
     try:
-        import jquantsapi
-        from dotenv import load_dotenv
-        load_dotenv()
-        cli = jquantsapi.ClientV2(api_key=os.getenv("JQUANTS_API_KEY"))
-        master = cli.get_eq_master()
-        master["code4"] = master["Code"].astype(str).str[:4]
-        return dict(zip(master["code4"], master["CoName"]))
+        import stock_master
+        return stock_master.get_names()
     except Exception as e:
         print(f"  ⚠️  会社名マスタ取得に失敗（コード表示にフォールバック）: {e}")
         return {}
