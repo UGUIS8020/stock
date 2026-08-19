@@ -70,6 +70,21 @@ CD_MIN       = 3      # 連続下落日数最小値（cd≥3: 前々日も下落
 # 除外ラインは-5%（母数の88.7%を維持しつつ明確な崖を除外）。7/30の実トレード5件では
 # 超過下落幅-2.8%〜-3.8%と全てこのライン内で、遡って適用しても結果は変わらないことを確認済み。
 EXCESS_DECLINE_MIN = -5.0
+
+# 「落ちるナイフ」除外フィルター（2026-08-19追加）
+# 根拠: 2026-08-18購入のサン電子(RB7.0で通過)が翌朝SL、直近6営業日で-29.99%という
+# 通常の押し目を超えた暴落の途中だったと判明。sim_b_2night_trades.csv(N=1,499、
+# MIN_PRICE=1,000円適用済み)で「エントリー時点の価格が6営業日前終値比でどれだけ
+# 下がっていたか」を検証したところ、-30%以下で平均pnlがマイナス転落(N=47・
+# 平均-0.09%・勝率34.0%)、-28%以下でもまだ明確に弱い(N=49・平均+0.12%・
+# 勝率36.7%、それ以外はN=1450・平均+0.6%台・勝率55〜60%台)。walk-forward4分割
+# 全てで直近ほど悪化と再現性を確認。既存のconsec_drop(連続下落日数、直近2-3日
+# しか見ない)とは相関なし(両グループとも平均3.0日)で、独立した情報。
+# RBスコアが高くても救えない(むしろ極端下落グループの平均RBスコアはより高い、
+# 下落幅が大きいほどRBスコアが上がりやすい性質のため)。
+# 閾値は-30%(全体平均が赤字転換する境界)ではなく-28%を採用: サン電子の実例
+# (-29.99%)を確実に捕捉するため、追加除外コストはわずか2件（47→49件）。
+PRIOR_6D_MAX_DECLINE = -28.0
 MIN_VOLUME          = 50_000
 MAX_POSITIONS_PER_DAY = 6      # 1日の最大自動発注件数（安全装置）。2026-08-13: 5→7へ変更した
                                 # 直後、2泊保有の重なり(最大14件)×300株×MIN_PRICE導入後の
@@ -337,7 +352,7 @@ def scan_dropping_stocks(url_price):
 
 
 def enrich_with_rb(candidates):
-    """候補銘柄のRBスコア・連続下落日数をSQLiteの履歴から計算して追加"""
+    """候補銘柄のRBスコア・連続下落日数・6営業日前比をSQLiteの履歴から計算して追加"""
     print(f"  RBスコア＋連続下落チェック中（{len(candidates)}件）...", flush=True)
     skip_cd = 0
     for c in candidates:
@@ -352,9 +367,16 @@ def enrich_with_rb(candidates):
                 c["consec_drop_ok"] = y_close < d2_close and d2_close < d3_close
             else:
                 c["consec_drop_ok"] = False
+            # 6営業日前比（「落ちるナイフ」除外用、2026-08-19追加）
+            if len(hist) >= 6 and c.get("price"):
+                close_6ago = float(hist["Close"].iloc[-6])
+                c["prior_6d_pct"] = (c["price"] - close_6ago) / close_6ago * 100 if close_6ago else None
+            else:
+                c["prior_6d_pct"] = None
         except Exception:
             c["rb_score"]       = 0
             c["consec_drop_ok"] = False
+            c["prior_6d_pct"]   = None
 
     before = len(candidates)
     result = [c for c in candidates
@@ -363,6 +385,16 @@ def enrich_with_rb(candidates):
     skip_cd2 = len([c for c in candidates if c["rb_score"] >= RB_MIN]) - len(result)
     if skip_cd2 > 0:
         print(f"  cd≥{CD_MIN}フィルタ: {skip_cd2}件除外（前日も下落していない）", flush=True)
+
+    # 「落ちるナイフ」除外（6営業日前比がPRIOR_6D_MAX_DECLINEを超えて下落している銘柄）
+    # 履歴不足でprior_6d_pctがNoneの場合はデータ不足で除外せず通過させる（安全側）
+    before_knife = len(result)
+    result = [c for c in result
+              if c.get("prior_6d_pct") is None or c["prior_6d_pct"] > PRIOR_6D_MAX_DECLINE]
+    skip_knife = before_knife - len(result)
+    if skip_knife > 0:
+        print(f"  落ちるナイフ除外: {skip_knife}件除外（6営業日前比{PRIOR_6D_MAX_DECLINE}%以下）", flush=True)
+
     return result
 
 
