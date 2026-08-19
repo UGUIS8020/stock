@@ -675,14 +675,20 @@ def main():
             print("   → python market_watch.py を手動で実行してください")
 
     # ── closing_watch（ブロッキング）──
-    if condition != "PANIC":
-        try:
-            import closing_watch
-            print(f"  ログ: out/closing_watch_live.txt")
-            _run_with_log(closing_watch.main, str(_OUT_DIR / "closing_watch_live.txt"))
-        except Exception as e:
-            print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
-            print("   → python closing_watch.py を手動で実行してください")
+    # 朝の予測がPANICでも常に起動する（2026-08-19変更）。closing_watch.py内部で
+    # 必ず15:00実測AD比率+日経に地合いを上書きし(condition = scanned_cond)、
+    # 実測でもWEAK/PANICのままなら何もせず安全に終了する設計のため、朝の予測
+    # だけでゲートする必要がない。過去のPANIC予測7日(データ欠損2日を除く)の
+    # うち2日(2026-03-27→STRONG、2026-07-08→NORMAL)は実際には回復しており、
+    # 従来はこの機会を丸ごと逃していた。A本体/AN/AS/Dは同様の自己修正の仕組みを
+    # 持たない（または9:03再判定の実測検証ができない）ため、今回は対象外。
+    try:
+        import closing_watch
+        print(f"  ログ: out/closing_watch_live.txt")
+        _run_with_log(closing_watch.main, str(_OUT_DIR / "closing_watch_live.txt"))
+    except Exception as e:
+        print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
+        print("   → python closing_watch.py を手動で実行してください")
 
     # ── closing_watch 終了後、16:45 に scan_daily.py を自動実行（データ未取得時は15分おきにリトライ）──
     _run_scan_daily_at_1640()
