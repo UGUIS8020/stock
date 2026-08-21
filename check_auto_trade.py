@@ -29,10 +29,6 @@ for _, r in df.head(10).iterrows():
     print(f"{mark} {r['date']} {str(r['code']):<6} {name:<12} {pnl:>+6.2f}%  [{reason:<12}] 戦略{strat}")
 
 # 未決済ポジション確認
-open_pos = pd.read_sql(
-    "SELECT date, code, name, shares, buy_price, tp_price, sl_price FROM positions WHERE status='open'",
-    conn if not conn.closed else db.get_conn()
-)
 conn2 = db.get_conn()
 open_pos = pd.read_sql(
     "SELECT date, code, name, shares, buy_price, tp_price, sl_price FROM positions WHERE status='open'",
