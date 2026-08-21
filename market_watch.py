@@ -206,6 +206,12 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "description":           f"戦略AS: {condition}日は未検証のため見送り",
         }
 
+    # 戦略A本体（AN/AS以外の全て）: 個別関数に分離（2026-08-22、純粋な切り出しのみ・ロジック変更なし）
+    return decide_timing_a(condition, judgment)
+
+
+def decide_timing_a(condition, judgment):
+    """戦略A本体のエントリータイミング戦略を返す（decide_timing()から分離）。"""
     if condition == "PANIC":
         # PANIC日: 全見送り
         # 【根拠】PANIC日 BUY avg -0.27%、終日下落多数
