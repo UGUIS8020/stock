@@ -39,7 +39,6 @@ MARKET_LOG_CSV   = str(_BASE_DIR / "out" / "market_log.csv")
 STRATEGY_C_CSV   = str(_BASE_DIR / "out" / "strategy_c_log.csv")
 BACKTEST_LOG_CSV    = str(_BASE_DIR / "out" / "backtest_log.csv")
 CANDIDATES_LOG_CSV  = str(_BASE_DIR / "out" / "candidates_log.csv")
-BANK_RESULTS_CSV    = str(_BASE_DIR / "out" / "bank_results.csv")
 TOP_N            = 30   # コンソール表示（画面が流れないよう上位30件のみ表示）専用の上限。
                          # 保存件数の上限ではない（SAVE_CAP_A参照、2026-08-10変更）。
 SAVE_CAP_A       = 500  # scan_resultsへの保存件数の安全弁。SCORE_MIN_A(3.0)を満たす候補は
@@ -732,17 +731,6 @@ def main():
         (~high_price_mask)
     ]
     top_a = a_pool.head(TOP_N)   # コンソール表示専用（上位30件、score降順）
-
-    # 戦略F: 銀行候補を別ファイルに保存（翌朝WEAK地合い時に market_watch.py が活用）
-    bank_f = df_a[
-        bank_mask &
-        (df_a["score"] >= SCORE_MIN_A) &
-        (df_a["ratio"] < RATIO_LIMIT_A) &
-        (~low_price_mask)
-    ].copy()
-    bank_f.to_csv(BANK_RESULTS_CSV, index=False, encoding="utf-8-sig")
-    if len(bank_f) > 0:
-        print(f"  🏦 戦略F候補: {len(bank_f)}件保存 → {', '.join(bank_f['name'].tolist())}")
 
     def get_rank(row):
         s = row["score"]

@@ -37,7 +37,6 @@ load_dotenv()
 _BASE_DIR            = Path(__file__).parent
 CANDIDATES_LOG_CSV   = str(_BASE_DIR / "out" / "candidates_log.csv")
 MORNING_LOG_CSV      = str(_BASE_DIR / "out" / "morning_log.csv")
-BANK_RESULTS_CSV     = str(_BASE_DIR / "out" / "bank_results.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 OBSERVE_LOG_CSV      = str(_BASE_DIR / "out" / "observe_log.csv")
 JST                = timezone(timedelta(hours=9))
@@ -54,16 +53,6 @@ WATCH_END_MIN      = 30    # 監視終了（9:30）
 TP_PCT = 0.06   # 利確 +6%（変更: 4%→6% / evolve.py GA 2026-07-18: A単独型STRONG限定 N=1528 WR=64.9% avg+0.659%
                 #   10,000人×150世代・5,000人×50世代の2回の実行で一貫してTP+5.5〜+8.9%が優勢だったため採用）
 SL_PCT = 0.06   # 損切 -6%（変更なし / 同GA結果でもSL-5〜-7%が中心で現行と大きくは乖離せず）
-
-# 戦略F: 銀行専用 TP/SL（WEAK地合い限定・振れ幅が小さいため低めに設定）
-BANK_TP_PCT = 0.02   # 利確 +2%（WEAK×銀行 シミュレーション: 勝率88%・平均+1.67%）
-BANK_SL_PCT = 0.03   # 損切 -3%（銀行の標準偏差2%に合わせ早めに切る）
-
-# 戦略F 有効化フラグ（2026-08-22: decide_timing()のWEAK日無条件SKIPにより
-#   候補生成〜監視ループは動いていたのに一度も発注されていなかったと判明。
-#   ロジック自体は本修正で直したが、本番未検証（過去の実取引実績0件）のため
-#   ユーザーが検証・許可するまでは明示的にFalseで停止しておく。
-STRATEGY_F_ENABLED = False
 
 # NORMAL日ギャップダウン逆張りパス（TP3%/SL-1%）は2026-07-25に撤廃
 # （ライブ勝率77.8%→0%の悪化を受け、7/12以前のシンプルなWAIT_CONFIRM判定に統一）
@@ -84,7 +73,6 @@ MAX_POSITIONS    = 15  # 戦略A（2026-08-14: 7→15。scoreランク別のwalk
                         #   0.754/0.853/1.004/0.676 → 0.774/0.933/1.056/0.888）。
                         #   資金拘束は7×30万=210万円→15×30万=450万円に増加（他戦略との
                         #   合計は超過するが、利益率改善を優先する方針でユーザー承認済み）
-MAX_POSITIONS_F  = 3   # 戦略F（銀行）
 MAX_POSITIONS_AN = 5   # 戦略AN（2026-08-10: 3→5。テスト運用中は建玉半分(AN_DEFAULT_SHARES等)で
                         #   資金拘束を抑えつつ枠を広げる。戦略Dの「建玉半分でテスト運用」と同じ方式）
 MAX_POSITIONS_AS = 5   # 戦略AS（2026-08-14: 10→5に一時的に引き下げ。8/13の実額検証で
@@ -99,7 +87,6 @@ MAX_POSITIONS_AS = 5   # 戦略AS（2026-08-14: 10→5に一時的に引き下�
 MAX_WATCH_A  = 15   # 戦略A: scoreで昇順（2026-08-10: 降順→昇順に修正、L638-640参照）
                      # （2026-08-14: 10→15。rank11-15を監視対象に含めるためMAX_POSITIONSと
                      #   合わせて引き上げ。詳細はMAX_POSITIONSのコメント参照）
-MAX_WATCH_F  =  5   # 戦略F: scoreで降順
 MAX_WATCH_AN = 10   # 戦略AN（2026-08-10新設。戦略AのSCORE_MIN_A/TOP_N/MAX_WATCH_Aとは無関係の独立枠）
 MAX_WATCH_AS = 20   # 戦略AS（2026-08-10新設。1日25〜500件超と候補が多いため監視上限を広めに設定）
 
@@ -219,27 +206,6 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "description":           f"戦略AS: {condition}日は未検証のため見送り",
         }
 
-    # 戦略F（銀行、WEAK限定、2026-08-22修正）:
-    # 元々このelse以降の条件分岐にstrategy区別が無く、WEAK日は他条件と無関係に
-    # 無条件SKIPされていたため、judgment="BUY"のF候補も常に見送られていた
-    # （過去の実取引実績0件・本修正まで一度も発注されていなかった）。
-    # STRATEGY_F_ENABLEDで検証・許可されるまでは明示的に停止したままにする。
-    if strategy == "F":
-        if STRATEGY_F_ENABLED and condition == "WEAK":
-            return {
-                "style":                 "OPEN_MARKET",
-                "ai_trigger_min":        0,
-                "confirm_threshold_pct": None,
-                "description":           f"戦略F WEAK日 → 即発注（TP{BANK_TP_PCT*100:.0f}%/SL{BANK_SL_PCT*100:.0f}%）",
-            }
-        return {
-            "style":                 "SKIP",
-            "ai_trigger_min":        None,
-            "confirm_threshold_pct": None,
-            "description":           ("戦略F: 未検証のため一時停止中（STRATEGY_F_ENABLED=False）"
-                                       if not STRATEGY_F_ENABLED else f"戦略F: {condition}日は対象外"),
-        }
-
     if condition == "PANIC":
         # PANIC日: 全見送り
         # 【根拠】PANIC日 BUY avg -0.27%、終日下落多数
@@ -252,7 +218,6 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
 
     # WEAK日: 戦略A全停止（OOS検証 2026-07-12: WEAK全体 avg=-0.781% n=7,289件）
     # 全gapレンジでマイナス（gap<0: avg=-0.607%, gap≥0: avg=-0.951%）
-    # 銀行株（戦略F）は別途 WEAK限定で継続
     # 【注意】judgment（scan_morning_strategy_a_weak.pyのPASS/CAUTION判定）は
     # ここで一切参照されず無条件SKIP。weak.py側のscore閾値ロジックは現状死んでいる。
     if condition == "WEAK":
@@ -706,41 +671,7 @@ def load_candidates():
             "sl_pct":            AN_SL_PCT if is_an else (AS_SL_PCT if is_as else SL_PCT),
         })
 
-    # 戦略F: WEAK地合いのみ銀行候補を追加
-    if condition == "WEAK":
-        bank_f = _load_bank_candidates_f()
-        if bank_f:
-            print(f"  🏦 戦略F候補: {len(bank_f)}件追加（WEAK×銀行 TP={BANK_TP_PCT*100:.0f}%/SL={BANK_SL_PCT*100:.0f}%）")
-            candidates.extend(bank_f)
-
     return candidates, condition
-
-
-def _load_bank_candidates_f():
-    """戦略F: bank_results.csv から銀行候補を読み込む。"""
-    try:
-        df = pd.read_csv(BANK_RESULTS_CSV, encoding="utf-8-sig")
-    except Exception:
-        return []
-    if df.empty:
-        return []
-    df = df.nlargest(MAX_WATCH_F, "score")
-    result = []
-    for _, row in df.iterrows():
-        result.append({
-            "code":              str(row["code"]),
-            "name":              str(row["name"]),
-            "strategy":          "F",
-            "score":             float(row["score"]),
-            "ratio":             float(row.get("ratio", 0) or 0),
-            "today_rise":        float(row.get("today_rise", 0) or 0),
-            "judgment":          "BUY",
-            "reason":            "戦略F: WEAK地合い×銀行系",
-            "ai_recommendation": "",
-            "tp_pct":            BANK_TP_PCT,
-            "sl_pct":            BANK_SL_PCT,
-        })
-    return result
 
 
 def load_market_info():
@@ -1109,7 +1040,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             # OPEN_MARKET: トリガー時刻到達で即発注（変更なし）
             if timing["style"] == "OPEN_MARKET":
                 strat_c  = c.get("strategy", "A")
-                max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS))
+                max_pos  = MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS)
                 open_pos = db.load_open_positions(strategy=strat_c)
                 if len(open_pos) >= max_pos:
                     ordered[code] = True
@@ -1186,7 +1117,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             if ordered[code]:
                 continue
             strat_c  = c.get("strategy", "A")
-            max_pos  = MAX_POSITIONS_F if strat_c == "F" else (MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS))
+            max_pos  = MAX_POSITIONS_AN if strat_c == "AN" else (MAX_POSITIONS_AS if strat_c == "AS" else MAX_POSITIONS)
             open_pos = db.load_open_positions(strategy=strat_c)
             if len(open_pos) >= max_pos:
                 ordered[code] = True
