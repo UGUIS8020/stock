@@ -59,6 +59,12 @@ SL_PCT = 0.06   # 損切 -6%（変更なし / 同GA結果でもSL-5〜-7%が中�
 BANK_TP_PCT = 0.02   # 利確 +2%（WEAK×銀行 シミュレーション: 勝率88%・平均+1.67%）
 BANK_SL_PCT = 0.03   # 損切 -3%（銀行の標準偏差2%に合わせ早めに切る）
 
+# 戦略F 有効化フラグ（2026-08-22: decide_timing()のWEAK日無条件SKIPにより
+#   候補生成〜監視ループは動いていたのに一度も発注されていなかったと判明。
+#   ロジック自体は本修正で直したが、本番未検証（過去の実取引実績0件）のため
+#   ユーザーが検証・許可するまでは明示的にFalseで停止しておく。
+STRATEGY_F_ENABLED = False
+
 # NORMAL日ギャップダウン逆張りパス（TP3%/SL-1%）は2026-07-25に撤廃
 # （ライブ勝率77.8%→0%の悪化を受け、7/12以前のシンプルなWAIT_CONFIRM判定に統一）
 
@@ -213,6 +219,27 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
             "description":           f"戦略AS: {condition}日は未検証のため見送り",
         }
 
+    # 戦略F（銀行、WEAK限定、2026-08-22修正）:
+    # 元々このelse以降の条件分岐にstrategy区別が無く、WEAK日は他条件と無関係に
+    # 無条件SKIPされていたため、judgment="BUY"のF候補も常に見送られていた
+    # （過去の実取引実績0件・本修正まで一度も発注されていなかった）。
+    # STRATEGY_F_ENABLEDで検証・許可されるまでは明示的に停止したままにする。
+    if strategy == "F":
+        if STRATEGY_F_ENABLED and condition == "WEAK":
+            return {
+                "style":                 "OPEN_MARKET",
+                "ai_trigger_min":        0,
+                "confirm_threshold_pct": None,
+                "description":           f"戦略F WEAK日 → 即発注（TP{BANK_TP_PCT*100:.0f}%/SL{BANK_SL_PCT*100:.0f}%）",
+            }
+        return {
+            "style":                 "SKIP",
+            "ai_trigger_min":        None,
+            "confirm_threshold_pct": None,
+            "description":           ("戦略F: 未検証のため一時停止中（STRATEGY_F_ENABLED=False）"
+                                       if not STRATEGY_F_ENABLED else f"戦略F: {condition}日は対象外"),
+        }
+
     if condition == "PANIC":
         # PANIC日: 全見送り
         # 【根拠】PANIC日 BUY avg -0.27%、終日下落多数
@@ -226,6 +253,8 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
     # WEAK日: 戦略A全停止（OOS検証 2026-07-12: WEAK全体 avg=-0.781% n=7,289件）
     # 全gapレンジでマイナス（gap<0: avg=-0.607%, gap≥0: avg=-0.951%）
     # 銀行株（戦略F）は別途 WEAK限定で継続
+    # 【注意】judgment（scan_morning_strategy_a_weak.pyのPASS/CAUTION判定）は
+    # ここで一切参照されず無条件SKIP。weak.py側のscore閾値ロジックは現状死んでいる。
     if condition == "WEAK":
         return {
             "style":                 "SKIP",
@@ -267,9 +296,11 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "confirm_threshold_pct": None,
                 "description":           "NORMAL日CAUTION → 見送り（BUY判定のみ発注対象）",
             }
-        else:
+        elif condition == "NORMAL":
             # NORMAL日BUY: 前日比0.0%以上〜0.5%未満でエントリー（0.5%超は出尽くし除外）
             # 9:07（analyze_entry_timing: NORMAL×9:07 avg+0.43%）
+            # ※ 現状normal.pyはBUYを返さないため理論上未到達だが、将来BUYゾーンが
+            #   復活した場合のために残す。
             range_desc = f"0.0%〜+{surge_limit:.1f}%" if surge_limit is not None else "0.0%以上"
             return {
                 "style":                 "WAIT_CONFIRM",
@@ -277,6 +308,18 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "confirm_threshold_pct": 0.0,
                 "surge_limit_pct":       surge_limit,
                 "description":           f"NORMAL日BUY → 9:07以降 前日比{range_desc}でエントリー",
+            }
+        else:
+            # STRONG日 + judgment=="PASS"（ratio≥5.0 or score≥9.0で除外された銘柄）。
+            # 2026-08-22修正: 従来はcondition区別が無くこの分岐に落ち、NORMAL日BUY用の
+            # 閾値0.0%（CAUTIONの0.3%より緩い）で発注されてしまっていた
+            # （strong.pyが除外する銘柄を、除外されない銘柄より緩い条件で通す矛盾）。
+            # strong.py本来の意図通りSKIPに修正。
+            return {
+                "style":                 "SKIP",
+                "ai_trigger_min":        None,
+                "confirm_threshold_pct": None,
+                "description":           f"STRONG日 {judgment} → 除外対象のため見送り",
             }
 
     # UNKNOWN など
