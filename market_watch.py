@@ -387,8 +387,14 @@ def _refresh_condition_905(current_condition, market_info, url_price):
         print(f"  ⚠️  {t_label} 日経前日終値取得失敗 → 地合い再判定スキップ")
         return None
 
-    actual_nk_chg = (actual_nk - prev_close) / prev_close * 100
-    saved_nk_chg  = float(market_info.get("nikkei_change") or 0.0)
+    actual_nk_chg  = (actual_nk - prev_close) / prev_close * 100
+    raw_saved_nk   = market_info.get("nikkei_change")
+    # 朝スキャン時にSGX/CME先物が両方取得失敗した場合、scan_morning.pyはLayer3を
+    # 0点寄与として扱う（NULL保存）。ここでも同様に0点寄与として扱わないと、
+    # NaN/Noneを0.0%相当のLayer3スコアとして誤って再計算に混ぜてしまう
+    # （NaNはPythonで真値になるため`or 0.0`では防げない）。
+    saved_nk_available = not pd.isna(raw_saved_nk)
+    saved_nk_chg  = float(raw_saved_nk) if saved_nk_available else 0.0
     saved_score   = int(market_info.get("condition_score") or 0)
 
     def _l3(chg):
@@ -398,11 +404,12 @@ def _refresh_condition_905(current_condition, market_info, url_price):
         if chg >= -1.5: return 0
         return -1
 
-    old_pts = _l3(saved_nk_chg)
+    old_pts = _l3(saved_nk_chg) if saved_nk_available else 0
     new_pts = _l3(actual_nk_chg)
 
     print(f"\n  📊 {t_label} 日経実値: {actual_nk:,.0f}円  前日比{actual_nk_chg:+.2f}%"
-          f"  (朝スキャン時: {saved_nk_chg:+.2f}%  Layer3: {old_pts}pt)")
+          f"  (朝スキャン時: {saved_nk_chg:+.2f}%  Layer3: {old_pts}pt"
+          f"{'' if saved_nk_available else '・朝は取得失敗のため0点扱い'})")
 
     if old_pts == new_pts:
         print(f"  ✅ Layer3スコア変化なし({old_pts}pt) → 地合い変更不要")
