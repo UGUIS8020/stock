@@ -638,10 +638,18 @@ def get_market_log(date=None):
 
 
 def get_prev_day_condition_db(today):
-    """market_log から today より前の最新の condition を返す。なければ None。"""
+    """morning_log から today より前の最新の condition_forecast を返す。なければ None。
+
+    2026-08-23修正: 以前はmarket_log.conditionを見ていたが、market_logは
+    scan_daily.pyが16:45に大引け確定値で再実行され上書きされるため、朝
+    （ライブ取引時点）の地合いを保持できない問題があった。Layer5（前日
+    WEAK/PANICリバウンド補正）の検証で、朝の値の方が引け確定値より翌日の
+    回復をよく予測した（朝WEAK/PANIC→翌日回復91.7% vs 引け確定値→88.2%、
+    n=24/17）ため、上書きされないmorning_log.condition_forecastに切り替えた。
+    """
     conn = get_conn()
     row = conn.execute(
-        "SELECT condition FROM market_log WHERE date < ? ORDER BY date DESC LIMIT 1",
+        "SELECT condition_forecast FROM morning_log WHERE date < ? ORDER BY date DESC LIMIT 1",
         [str(today)]
     ).fetchone()
     conn.close()
