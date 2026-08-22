@@ -609,7 +609,7 @@ def main():
         "dow_change":         us_data.get("ダウ", {}).get("change")     if us_data.get("ダウ")      else None,
         "nasdaq_change":      us_data.get("ナスダック", {}).get("change") if us_data.get("ナスダック") else None,
         "sp500_change":       us_data.get("S&P500", {}).get("change")   if us_data.get("S&P500")   else None,
-        "nikkei_change":      nikkei["change"] if nikkei else None,
+        "nikkei_change":      market_details.get("nikkei_change"),
         "usdjpy":             usdjpy,
         "strategy_a_thr":     strategy_a_thr,
         "stop_loss_pct":      stop_loss_pct,
