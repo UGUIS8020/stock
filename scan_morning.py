@@ -160,7 +160,7 @@ def predict_market(us_data, nikkei, usdjpy, sgx=None, prev_condition=None, prev_
     # 3/27誤判定の教訓: CME -2.08%（8:30時点）が東京開場前に急反転 → SGXで検知可能
     nk_chg = 0.0  # default（取得失敗時はPANIC判定に使わない）
     nk_data   = sgx if sgx is not None else nikkei
-    nk_source = "CME円建先物" if sgx is not None else "CME先物(USD)"
+    nk_source = "SGX円建先物" if sgx is not None else "CME先物(USD)"
     if nk_data:
         nk_chg = nk_data["change"]
         if nk_chg >= 1.0:
@@ -355,9 +355,9 @@ def main():
             print(f"  ❓ {name:<12}: 取得失敗")
 
     if sgx:
-        print(f"  🌐 CME円建先物(NIY): {sgx['close']:>10,.0f}  ({sgx['change']:>+.2f}%)  ← 直近値")
+        print(f"  🌐 SGX円建先物(NIY): {sgx['close']:>10,.0f}  ({sgx['change']:>+.2f}%)  ← 直近値")
     else:
-        print(f"  ❓ CME円建先物(NIY): 取得失敗")
+        print(f"  ❓ SGX円建先物(NIY): 取得失敗")
     if nikkei:
         print(f"  🌐 CME先物(NKD/USD): {nikkei['close']:>10,.0f}  ({nikkei['change']:>+.2f}%)")
     else:
