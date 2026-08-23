@@ -95,15 +95,14 @@ def judge_market_condition(df_today):
     total      = up_count + down_count + flat_count
     ad_ratio   = up_count / total if total > 0 else 0.5
 
-    nikkei_change = None
+    # 2026-08-23整理: 日経平均自体を示すcode4=="0000"の行を探す分岐があったが、
+    # code4は個別銘柄のCode由来(東証銘柄コードは1000番台以降)で"0000"には
+    # なり得ず、2年3ヶ月分の実データでも一致例0件と確認済みのデッドコードだった。
+    # 常に全銘柄today_riseの中央値を使う（日経平均の代理指標）。
     try:
-        nk = df_today[df_today["code4"] == "0000"]
-        if nk.empty:
-            nikkei_change = float(df_today["today_rise"].median())
-        else:
-            nikkei_change = float(nk.iloc[0]["today_rise"])
-    except Exception:
         nikkei_change = float(df_today["today_rise"].median())
+    except Exception:
+        nikkei_change = None
 
     is_panic = (
         (nikkei_change is not None and nikkei_change <= PANIC_NIKKEI_THRESHOLD) or
