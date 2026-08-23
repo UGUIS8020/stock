@@ -312,8 +312,13 @@ def verify_candidates_log(df_today, name_dict):
         return
 
     print(f"\n=== 📋 【朝スキャン検証】本日 scan_morning.py 判定の結果 ===")
-    tp_pct = 3.0
-    sl_pct = -1.0  # market_watch.py の SL_PCT と統一
+    # 2026-08-23修正: 従来tp_pct=3.0/sl_pct=-1.0で「market_watch.pyのSL_PCTと統一」と
+    # コメントされていたが、2026-06-10時点で既にmarket_watch.pyの実際の値(5%)と
+    # 食い違っており、値のコピーが同期されず陳腐化していた。以後同じズレを防ぐため
+    # market_watch.pyの定数を直接importして常に同期させる。
+    from market_watch import TP_PCT as _MW_TP_PCT, SL_PCT as _MW_SL_PCT
+    tp_pct = _MW_TP_PCT * 100
+    sl_pct = -_MW_SL_PCT * 100
     updated = 0
     win = loss = tp_hit = sl_hit = 0
     today_results = []  # 当日分の結果を集計用に保持
