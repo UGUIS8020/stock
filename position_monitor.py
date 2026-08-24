@@ -13,11 +13,14 @@ import json
 import os
 import time
 import urllib3
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 import tachibana_order
 import db
+
+_BASE_DIR = Path(__file__).parent
 
 
 def _is_trading_day(d):
@@ -61,6 +64,24 @@ FORCE_CLOSE_MIN    = 15 * 60 + 0   # 2026-08-14: 15:20→15:00に変更。戦略
                                    # ※15:25は東証がオークションモードに切り替わり成行注文不可
                                    # (11481エラー)のため、15:00なら十分な安全マージンがある。
 DASHBOARD_SYNC_INTERVAL_SEC = 600  # ダッシュボード向けに10分おきintraday_prices保存+S3同期
+
+
+def log_exit_detection(code, name, strategy, reason_type, detect_price, target_price, now):
+    """2026-08-24追加: TP/SL条件を検知した瞬間(発注前)の時刻・価格を、
+    実際の約定時刻(positions.sell_time)と突き合わせてスリッページの原因
+    (検知の遅れか、発注〜約定の執行ラグか)を後日切り分けられるよう、
+    複数日分蓄積してlogs/に記録する。"""
+    try:
+        log_dir = _BASE_DIR / "logs"
+        log_dir.mkdir(exist_ok=True)
+        path = log_dir / "exit_detection.log"
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{date_str},{time_str},{code},{name},{strategy},"
+                    f"{reason_type},{detect_price},{target_price}\n")
+    except Exception:
+        pass
 
 
 def load_positions():
@@ -460,6 +481,8 @@ def main():
                 reason = f"TP({tp_px:.0f}円)" if hit_tp else f"SL({sl_px:.0f}円)"
                 print(f"  {'🎯' if hit_tp else '🛑'} {code} {name}: "
                       f"{reason} 到達 ({current}円 {chg:+.2f}%) → 売り発注")
+                log_exit_detection(code, name, strategy, "TP" if hit_tp else "SL",
+                                    current, tp_px if hit_tp else sl_px, now)
                 mkt_code = db.get_market_code_db(code)
                 acct = pos.get("account_type") or "genbutsu"
                 zc   = pos.get("zyoutoeki_c") or None
