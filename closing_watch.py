@@ -235,6 +235,21 @@ def get_today_condition():
     return db.get_today_condition_db(TODAY)
 
 
+def log_condition_change(morning_cond, scanned_cond, ad_ratio, nikkei_change):
+    """2026-08-24追加: 15:00時点の地合い実測(朝予測との差)を、closing_watch_live.txt
+    (当日上書き)とは別に複数日分蓄積してlogs/に記録する。daytime.pyのnoon_ad_observation.log
+    と同じ方式(朝STRONG→日中軟化パターンの後日検証用)。"""
+    try:
+        log_dir = _BASE_DIR / "logs"
+        log_dir.mkdir(exist_ok=True)
+        path = log_dir / "condition_1500_observation.log"
+        nikkei_str = f"{nikkei_change:.2f}" if nikkei_change is not None else "NA"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{TODAY},{morning_cond},{scanned_cond},{ad_ratio:.3f},{nikkei_str}\n")
+    except Exception:
+        pass
+
+
 def _fetch_nikkei_change(url_price, http):
     """日経225の当日騰落率(%)を取得。取得失敗時は None を返す。"""
     NIKKEI_CODE = "101"   # 立花API: 998407は無効。101が正しい日経225コード
@@ -539,6 +554,7 @@ def main(start_now=False, manual=False):
     # 朝の予測よりリアルタイムの指標の方が正確なため常に上書き
     if condition != scanned_cond:
         print(f"  ⚠️  地合い変化: {condition}（朝予測）→ {scanned_cond}（実測AD+日経）")
+    log_condition_change(condition, scanned_cond, ad_ratio, nikkei_change)
     condition = scanned_cond
     nikkei_info = f"  日経{nikkei_change:+.2f}%" if nikkei_change is not None else ""
     print(f"  地合い（スキャン補正後）: {condition}  AD比率: {ad_ratio:.2f}{nikkei_info}")
