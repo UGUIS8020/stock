@@ -122,15 +122,26 @@ CHEAP_THRESHOLD  = 1_000   # この価格未満は最大株数モード（2026-0
 MAX_ORDER_AMOUNT = 300_000  # 安い株の1発注上限額（30万円のまま変更なし。
                             # 30万円/300株/閾値1,000円の組み合わせで境界の断層を回避）
 
+# 戦略A本体・順張り(entry_change_pct>=0)専用の縮小建玉（2026-08-25導入）。
+# 順張りn=10(STRONG regime)が平均-1.29%・-47,535円と一貫して不振なため、
+# 損失を抑えつつサンプルを増やす目的で「1,000円未満は10万円まで、
+# 1,000円以上は100株」に縮小。逆張り(entry_change_pct<0)は対象外
+# （逆張りは順張りと異なり地合い持続に依存せず健全に推移しているため）。
+FORWARD_A_DEFAULT_SHARES   = 100
+FORWARD_A_MAX_ORDER_AMOUNT = 100_000
 
-def calc_shares(price, strategy="A"):
+
+def calc_shares(price, strategy="A", is_forward=False):
     """価格に応じた発注株数を返す（100株単位）。
     CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
-    strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。"""
+    strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。
+    is_forward=True（戦略A本体の順張りのみ）は縮小建玉を使う。"""
     if strategy == "AN":
         default_shares, max_order_amount = AN_DEFAULT_SHARES, AN_MAX_ORDER_AMOUNT
     elif strategy == "AS":
         default_shares, max_order_amount = AS_DEFAULT_SHARES, AS_MAX_ORDER_AMOUNT
+    elif strategy == "A" and is_forward:
+        default_shares, max_order_amount = FORWARD_A_DEFAULT_SHARES, FORWARD_A_MAX_ORDER_AMOUNT
     else:
         default_shares, max_order_amount = DEFAULT_SHARES, MAX_ORDER_AMOUNT
     if price and price < CHEAP_THRESHOLD:
@@ -741,7 +752,8 @@ def confirm_and_order(candidate, price, url_request, condition=None, entry_chang
     sell_p    = round(price * (1 + tp_pct)) if price else None
     stop_p    = round(price * (1 - sl_pct)) if price else None
 
-    shares    = calc_shares(rec_price or price, strategy=strat)
+    is_forward = strat == "A" and entry_change_pct is not None and entry_change_pct >= 0
+    shares    = calc_shares(rec_price or price, strategy=strat, is_forward=is_forward)
     estimated = int((rec_price or price or 0) * shares)
 
     # 買い余力確認
