@@ -75,6 +75,11 @@ MAX_POSITIONS    = 15  # 戦略A（2026-08-14: 7→15。scoreランク別のwalk
                         #   合計は超過するが、利益率改善を優先する方針でユーザー承認済み）
 MAX_POSITIONS_AN = 5   # 戦略AN（2026-08-10: 3→5。テスト運用中は建玉半分(AN_DEFAULT_SHARES等)で
                         #   資金拘束を抑えつつ枠を広げる。戦略Dの「建玉半分でテスト運用」と同じ方式）
+MAX_POSITIONS_A_FORWARD = 5   # 戦略A本体・順張り(entry_change_pct>=0)専用の内枠（2026-08-25導入）。
+                        #   MAX_POSITIONS=15は順張り/逆張り共通の枠のため、順張りが埋まると
+                        #   実績良好な逆張り(46件+87,845円)の枠を圧迫しうる。テスト運用中で
+                        #   利益率の低い順張りに歯止めをかけ、逆張りに常に10件分の枠を
+                        #   残すためこの内枠を新設（MAX_POSITIONS内でのみ機能、独立枠ではない）
 MAX_POSITIONS_AS = 5   # 戦略AS（2026-08-14: 10→5に一時的に引き下げ。8/13の実額検証で
                         #   ASの銘柄選定ロジック自体は健全(勝率64.3%、バックテスト66.4%と
                         #   ほぼ一致)と確認済みで、質を理由にした引き下げではない。
@@ -150,6 +155,17 @@ def calc_shares(price, strategy="A", is_forward=False):
         lots = int(max_order_amount / price / 100)
         return max(lots, 1) * 100
     return default_shares
+
+
+def forward_a_limit_reached():
+    """戦略A本体・順張りの内枠(MAX_POSITIONS_A_FORWARD)に達しているか返す。
+    MAX_POSITIONS(15件)とは別に、順張り(entry_change_pct>=0)の同時保有数だけを
+    数える。逆張りに常に枠を残すための追加チェック（2026-08-25導入）。"""
+    open_pos_a = db.load_open_positions(strategy="A")
+    if open_pos_a.empty:
+        return False
+    n_forward = (open_pos_a["entry_change_pct"] >= 0).sum()
+    return n_forward >= MAX_POSITIONS_A_FORWARD
 
 
 # ══════════════════════════════════════════════
@@ -1152,6 +1168,15 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 ordered[code] = True
                 results[code] = f"見送り(上限{max_pos}件)"
                 print(f"\n  ⚠️ {code} {c['name']}: 戦略{strat_c}上限({max_pos}件)到達 → 見送り")
+                continue
+            # 戦略A本体・順張りの内枠（2026-08-25導入、[[strategy_a_2026-08-24_live_monitoring]]参照）。
+            # この分岐に来る戦略A候補はlatest_chg>=正の閾値のため常に順張り。
+            # MAX_POSITIONS(15件)を順張りだけで埋めて逆張りの枠を圧迫しないよう、
+            # 順張りの同時保有をMAX_POSITIONS_A_FORWARD(5件)までに制限する。
+            if strat_c == "A" and forward_a_limit_reached():
+                ordered[code] = True
+                results[code] = f"見送り(順張り上限{MAX_POSITIONS_A_FORWARD}件)"
+                print(f"\n  ⚠️ {code} {c['name']}: 順張り内枠({MAX_POSITIONS_A_FORWARD}件)到達 → 見送り（逆張り枠を確保）")
                 continue
             ordered[code] = True
             results[code] = "発注"
