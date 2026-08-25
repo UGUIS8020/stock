@@ -432,11 +432,13 @@ def stage2_order(url_price=None, url_request=None):
         result = tachibana_order.place_buy_order(url_request, code, DEFAULT_SHARES_W, market_code=mkt_code)
         if result["success"]:
             print(f"  ✅ [{code}] 買い成功: {DEFAULT_SHARES_W}株 gap{gap_pct:+.2f}%  {result['message']}")
+            eigyou_day = (result.get("raw") or {}).get("sEigyouDay")
             tachibana_order.save_position(
                 code, code, DEFAULT_SHARES_W, open_p, strategy="W_OVERSTAY",
                 tp_pct=TP_PCT, sl_pct=SL_PCT,
                 entry_change_pct=r["today_rise"], rb_score=r["rb_score"],
                 condition="WEAK", url_request=url_request,
+                order_no=result.get("order_no"), eigyou_day=eigyou_day,
             )
             order_count += 1
         else:

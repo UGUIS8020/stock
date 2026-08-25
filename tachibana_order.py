@@ -528,7 +528,8 @@ def get_true_execution_price(url_request, order_no, eigyou_day, max_retry=3, wai
 
 def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0.05,
                   entry_change_pct=None, rb_score=None, condition=None,
-                  url_request=None, account_type="genbutsu"):
+                  url_request=None, account_type="genbutsu",
+                  order_no=None, eigyou_day=None):
     """買い成功後にポジションを DB へ記録する。
 
     url_request指定時は、発注直前の気配値ではなく実際の約定平均単価で
@@ -536,6 +537,14 @@ def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0
     当日完結取引（戦略A/AN/AS/D）はこれまで気配値のまま記録され、実額と
     ズレていた（[[bug_buy_price_inaccuracy]]参照）。補正に失敗しても
     本体の発注処理は継続する（気配値のまま記録・従来動作にフォールバック）。
+
+    order_no指定時は、CLMKabuZanList（保有残高照会、get_true_buy_price）ではなく
+    CLMOrderListDetail（注文明細照会、get_true_execution_price）で補正する
+    （2026-08-25修正）。CLMKabuZanListは取引時間中は使用不可（p_errno=8）と
+    実機で確認されたため、Fix②は8/17のデプロイ以来一度も補正に成功していなかった。
+    CLMOrderListDetailは売り側のFix③で取引時間中の動作が実証済みのため、
+    買い側もこちらに統一する。order_no未指定時（呼び出し元が未対応）は
+    従来のget_true_buy_price（日をまたいだポジション向け）にフォールバックする。
     """
     db.init_db()
     db.save_position_db(
@@ -549,7 +558,11 @@ def save_position(code, name, shares, buy_price, strategy, tp_pct=0.03, sl_pct=0
 
     if url_request:
         try:
-            true_price = get_true_buy_price(url_request, code, account_type=account_type)
+            if order_no:
+                eday = eigyou_day or datetime.now().strftime("%Y%m%d")
+                true_price = get_true_execution_price(url_request, order_no, eday)
+            else:
+                true_price = get_true_buy_price(url_request, code, account_type=account_type)
             if true_price and abs(true_price - float(buy_price)) >= 0.5:
                 today  = datetime.now().strftime("%Y-%m-%d")
                 new_tp = round(true_price * (1 + tp_pct))

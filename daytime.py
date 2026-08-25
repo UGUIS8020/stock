@@ -756,7 +756,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                         code, name, r["filled"], r["fill_price"], "D",
                         tp_pct=TP_PCT, sl_pct=SL_PCT,
                         entry_change_pct=sig["change_pct"],
-                        url_request=url_request,
+                        url_request=url_request, order_no=r.get("order_no"),
                     )
                     ordered_today.add(code)
                     signaled.add(code)
@@ -770,11 +770,13 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             else:
                 result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
                 if result["success"]:
+                    eigyou_day = (result.get("raw") or {}).get("sEigyouDay")
                     tachibana_order.save_position(
                         code, name, shares, sig["price"], "D",
                         tp_pct=TP_PCT, sl_pct=SL_PCT,
                         entry_change_pct=sig["change_pct"],
-                        url_request=url_request,
+                        url_request=url_request, order_no=result.get("order_no"),
+                        eigyou_day=eigyou_day,
                     )
                     ordered_today.add(code)
                     signaled.add(code)

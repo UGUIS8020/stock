@@ -831,7 +831,7 @@ def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=No
             tachibana_order.save_position(code, name, r["filled"], r["fill_price"],
                                           strategy=_strategy, tp_pct=_tp, sl_pct=_sl,
                                           condition=condition, entry_change_pct=entry_change_pct,
-                                          url_request=url_request)
+                                          url_request=url_request, order_no=r.get("order_no"))
         else:
             print(f"  ❌ 発注失敗: {r['message']}")
     else:
@@ -842,10 +842,12 @@ def _do_order(code, name, shares, buy_price, url_request, tp_pct=None, sl_pct=No
             if buy_px <= 0:
                 buy_px = int(result.get("fill_price") or result.get("price") or buy_price or 0)
             if buy_px > 0:
+                eigyou_day = (result.get("raw") or {}).get("sEigyouDay")
                 tachibana_order.save_position(code, name, shares, buy_px,
                                               strategy=_strategy, tp_pct=_tp, sl_pct=_sl,
                                               condition=condition, entry_change_pct=entry_change_pct,
-                                              url_request=url_request)
+                                              url_request=url_request, order_no=result.get("order_no"),
+                                              eigyou_day=eigyou_day)
             else:
                 print(f"  ⚠️  買値が取得できないためDBへの記録をスキップしました（手動で register_positions.py を実行してください）")
         else:

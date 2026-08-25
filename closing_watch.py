@@ -460,7 +460,7 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
                 entry_change_pct=candidate.get("change_pct"),
                 rb_score=candidate.get("rb_score"),
                 condition=condition,
-                url_request=url_request,
+                url_request=url_request, order_no=r.get("order_no"),
             )
             ordered_today.add(str(code))
             return True
@@ -471,13 +471,15 @@ def auto_order(candidate, url_request, ordered_today, condition="STRONG"):
         result = tachibana_order.place_buy_order(url_request, code, shares, market_code=mkt_code)
         if result["success"]:
             print(f"  ✅ {result['message']}")
+            eigyou_day = (result.get("raw") or {}).get("sEigyouDay")
             tachibana_order.save_position(
                 code, name, shares, price,
                 strategy="B", tp_pct=TP_PCT, sl_pct=SL_PCT,
                 entry_change_pct=candidate.get("change_pct"),
                 rb_score=candidate.get("rb_score"),
                 condition=condition,
-                url_request=url_request,
+                url_request=url_request, order_no=result.get("order_no"),
+                eigyou_day=eigyou_day,
             )
             ordered_today.add(str(code))
             return True
