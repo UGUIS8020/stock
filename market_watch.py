@@ -137,10 +137,19 @@ MAX_ORDER_AMOUNT = 500_000  # 安い株の1発注上限額（2026-08-25: 逆張�
 FORWARD_A_DEFAULT_SHARES   = 100
 FORWARD_A_MAX_ORDER_AMOUNT = 100_000
 
+HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天井問題を受けて再導入。
+                            # AIメカテック(6,480円→194万円)のような高値株で建玉が過大化し
+                            # 損失を増幅させていた(-119,945円、通常サイズなら約-8万円相当)。
+                            # default_shares×priceが100万円を超える場合のみ、金額ベースで
+                            # 株数を縮小する（300株換算で約3,333円が実質的な切替点。
+                            # AN/AS/順張りは100株のため約10,000円が切替点となり、
+                            # 既存のMAX_PRICE_A/AS候補フィルターとほぼ整合するため実質影響小）。
+
 
 def calc_shares(price, strategy="A", is_forward=False):
     """価格に応じた発注株数を返す（100株単位）。
     CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
+    HIGH_PRICE_CAP_AMOUNTを超える高値株は金額ベースで株数を縮小する。
     strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。
     is_forward=True（戦略A本体の順張りのみ）は縮小建玉を使う。"""
     if strategy == "AN":
@@ -153,6 +162,9 @@ def calc_shares(price, strategy="A", is_forward=False):
         default_shares, max_order_amount = DEFAULT_SHARES, MAX_ORDER_AMOUNT
     if price and price < CHEAP_THRESHOLD:
         lots = int(max_order_amount / price / 100)
+        return max(lots, 1) * 100
+    if price and price * default_shares > HIGH_PRICE_CAP_AMOUNT:
+        lots = int(HIGH_PRICE_CAP_AMOUNT / price / 100)
         return max(lots, 1) * 100
     return default_shares
 

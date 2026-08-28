@@ -83,6 +83,10 @@ DAYTIME_TRADING       = True      # False にすると監視のみ（発注な�
 MAX_ORDER_AMOUNT      = 300_000   # 安い株の1発注上限額（戦略Bと同水準）
 DEFAULT_SHARES        = 200       # 高値株のデフォルト株数（戦略Bと同水準）
 CHEAP_THRESHOLD       = 1_500     # この価格未満は金額ベースで株数計算（戦略Bと同水準）
+HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天井問題を受けて再導入。
+                    # ニッポン高度紙工業(6,735円→135万円)・芝浦メカトロニクス(4,130円→82.6万円)
+                    # のような高値株で建玉が過大化していた。200株×価格が100万円を超える場合のみ、
+                    # 金額ベースで株数を縮小する（200株換算で約5,000円が実質的な切替点）。
 MAX_DAYTIME_POSITIONS = 5         # 日中最大ポジション数（戦略A とは別カウント。2026-08-05: 保有過多につき10→5）
 MIN_VOLUME            = 50_000    # 前日出来高フィルター（5万株未満は除外）
 LIMIT_ORDER           = False     # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
@@ -742,6 +746,8 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 continue
             if sig["price"] < CHEAP_THRESHOLD:
                 shares = max(100, int(MAX_ORDER_AMOUNT / sig["price"] / 100) * 100)
+            elif sig["price"] * DEFAULT_SHARES > HIGH_PRICE_CAP_AMOUNT:
+                shares = max(100, int(HIGH_PRICE_CAP_AMOUNT / sig["price"] / 100) * 100)
             else:
                 shares = DEFAULT_SHARES
             mkt_code = db.get_market_code_db(code)

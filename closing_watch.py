@@ -108,6 +108,13 @@ MIN_PRICE = 1_000  # 2026-08-13新設: 1,000円未満は勝率43.9%・平均-0.1
                     # 1,000円未満を除外することにした。これに伴いCHEAP_THRESHOLD/
                     # MAX_ORDER_AMOUNTによる金額ベースの株数分岐は廃止。
 
+HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天井問題を受けて再導入。
+                    # 「価格に関係なく300株固定」のため、サン電子(7,630円→229万円)のような
+                    # 高値株で建玉が過大化し損失を増幅させていた(-99,114円、通常サイズなら
+                    # 約-66,000円相当)。300株×価格が100万円を超える場合のみ、金額ベースで
+                    # 株数を縮小する（300株換算で約3,333円が実質的な切替点）。
+                    # W_OVERSTAY戦略のMAX_PRICE設計と同じ考え方。
+
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
 SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
 
@@ -116,7 +123,12 @@ LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
 
 def calc_shares(price):
-    """発注株数を返す。MIN_PRICE未満は候補から除外済みのため、常に固定株数。"""
+    """発注株数を返す。MIN_PRICE未満は候補から除外済みのため、通常は固定株数。
+    ただしDEFAULT_SHARES×priceがHIGH_PRICE_CAP_AMOUNTを超える高値株のみ、
+    金額ベースで株数を縮小する（2026-08-28導入）。"""
+    if price and price * DEFAULT_SHARES > HIGH_PRICE_CAP_AMOUNT:
+        lots = int(HIGH_PRICE_CAP_AMOUNT / price / 100)
+        return max(lots, 1) * 100
     return DEFAULT_SHARES
 
 PANIC_NIKKEI  = -2.0;  PANIC_AD  = 0.20
