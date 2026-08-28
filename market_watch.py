@@ -70,6 +70,12 @@ SL_PCT = 0.06   # 損切 -6%（変更なし / 同GA結果でもSL-5〜-7%が中�
 STRONG_GAP_TP_PCT = 0.10   # 利確 +10%（2026-08-28: 4%→10%）
 STRONG_GAP_SL_PCT = 0.06   # 損切 -6%
 
+GAP_DEPTH_THRESHOLD = -1.5  # 2026-08-28新設: STRONG逆張りのエントリー条件を「gap<0」から
+                            # 「gap<=-1.5%」に変更。n=118の全候補プールで検証した結果、
+                            # 深いgapほど成績が良好(gap<=-1.5%: n=62 平均+2.186% /
+                            # gap>-1.5%: n=56 平均+0.606%、ブートストラップ95%信頼区間
+                            # [+0.229%,+2.878%])。候補数は約半減するが質を優先。
+
 # 最大ポジション数（daytime.py の MAX_DAYTIME_POSITIONS と共有）
 MAX_POSITIONS    = 15  # 戦略A（2026-08-14: 7→15。scoreランク別のwalk-forward検証(4分割点×
                         #   train/test)で、rank11-15がむしろrank1-10より高勝率・高平均
@@ -1118,7 +1124,7 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                 continue
 
             # STRONG日ギャップダウン逆張りパス（戦略A本体専用）
-            # gap<0（寄り付きが前日終値割れ）を強い地合いで拾う
+            # gap<=GAP_DEPTH_THRESHOLD（寄り付きが前日終値から一定以上下落）を強い地合いで拾う
             # OOS根拠: STRONG gap<0 score≥3 → wr=64.5% avg=+0.818% n=1,277（2026-07-12）
             # このバックテストはscore≥3（戦略A本体の対象帯）に基づくもので、score<3の
             # 戦略ASでは未検証。2026-08-13: strat_c=="A"の条件が無かったため、AS候補も
@@ -1132,10 +1138,14 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
             #   「実運用で効果を確認する」目的の未検証フォワードテストとして投入されていた）。
             # 2026-08-05: 全体の勝率がバックテスト実績(64.5%)を下回っていることの一因と判断し、
             #   本来のバックテスト条件（latest_chgのみ判定、V字回復確認なし）に戻した。
+            # 2026-08-28: n=118の全候補プールでgapの深さとpnlの関係をtrain/test分割・
+            #   ブートストラップ(2000回、95%信頼区間[+0.229%,+2.878%]、プラス割合98.9%)で
+            #   検証した結果、gap<=-1.5%の方がgap>-1.5%より明確に良好(+2.186% vs +0.606%)
+            #   と判明。単純なgap<0からgap<=GAP_DEPTH_THRESHOLDに閾値を追加。
             if (condition == "STRONG"
                     and timing["style"] == "WAIT_CONFIRM"
                     and not ordered[code]
-                    and latest_chg < 0.0
+                    and latest_chg <= GAP_DEPTH_THRESHOLD
                     and c.get("strategy", "A") == "A"):
                 open_pos = db.load_open_positions(strategy="A")
                 if len(open_pos) >= MAX_POSITIONS:
