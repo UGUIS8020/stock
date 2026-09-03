@@ -52,6 +52,10 @@ EXIT_MIN           = 28
 JST                = timezone(timedelta(hours=9))
 GAP_SELL_THRESHOLD = 1.0   # 翌朝始値が買値より+1%超 → 即売り
 GAP_CHECK_END_MIN  = 9 * 60 + 15   # 9:15までギャップチェック
+# 一回限りの手動早期決済リスト（2026-09-03: 戦略Bが 9983 ファストリ 100株@¥68,000=約¥680万を
+# 建玉。週末を跨いで¥680万を保有するのは不安、とユーザー判断。通常の2泊満了(月曜)を待たず
+# FORCE_CLOSE_MIN(15:00)で引け成行決済する。約定確認後、このセットは空に戻すこと）。
+MANUAL_CLOSE_CODES = {"9983"}
 FORCE_CLOSE_MIN    = 15 * 60 + 0   # 2026-08-14: 15:20→15:00に変更。戦略B(引け前15:05スキャン
                                    # →15:13-15:20発注)が、A/AN/AS/D当日分の強制決済(同じ仕組み
                                    # で処理される2泊満了のB自身の決済も含む)と資金を取り合わない
@@ -361,7 +365,9 @@ def main():
             prev_trading_day = _prev_trading_day(TODAY)
             prev_positions = [
                 p for p in load_positions()
-                if p["date"] < prev_trading_day or (p["date"] == TODAY and p.get("strategy") in ("A", "D", "AN", "AS"))
+                if p["date"] < prev_trading_day
+                or (p["date"] == TODAY and p.get("strategy") in ("A", "D", "AN", "AS"))
+                or p["code"] in MANUAL_CLOSE_CODES
             ]
             if prev_positions:
                 print(f"\n  ⏰ 15:00 引け決済開始（{len(prev_positions)}件）")
