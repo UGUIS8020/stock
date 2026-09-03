@@ -114,6 +114,10 @@ HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天�
                     # 約-66,000円相当)。300株×価格が100万円を超える場合のみ、金額ベースで
                     # 株数を縮小する（300株換算で約3,333円が実質的な切替点）。
                     # W_OVERSTAY戦略のMAX_PRICE設計と同じ考え方。
+MAX_PRICE_B = 10_000  # 2026-09-03新設: 戦略Bには候補の価格上限が無く、HIGH_PRICE_CAP_AMOUNTも
+                    # 単元株100株の下限があるため¥10,000/株超で無力（ファストリ68,000円→100株680万円が発生）。
+                    # 戦略A(MAX_PRICE_A)・AS・W_OVERSTAY と同じく候補段階で¥10,000以上を除外する。
+                    # ¥10,000なら100株=¥100万でHIGH_PRICE_CAP_AMOUNTと整合。
 
 TP_PCT = 0.05    # +5.0%（2026-06-23最適化: 2泊×TP5%×SL4% 合計+16.59% / 旧: TP+1.9% 合計-55.50%）
 SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
@@ -622,12 +626,13 @@ def main(start_now=False, manual=False):
     for c in candidates:
         c["name"] = code_names.get(c["code"], c.get("name") or c["code"])
 
-    # ── 異常フラグ除外 + 低位株除外（コードで処理）──
+    # ── 異常フラグ除外 + 低位株除外 + 高値株除外（コードで処理）──
     before = len(candidates)
-    candidates = [c for c in candidates if c["change_pct"] > -15 and c["price"] >= MIN_PRICE]
+    candidates = [c for c in candidates if c["change_pct"] > -15
+                  and MIN_PRICE <= c["price"] < MAX_PRICE_B]
     removed = before - len(candidates)
     if removed > 0:
-        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価{MIN_PRICE:,}円未満）")
+        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価{MIN_PRICE:,}円未満 or {MAX_PRICE_B:,}円以上）")
 
     if not candidates:
         print(f"  異常フラグ除外後、該当銘柄なし")
