@@ -281,17 +281,20 @@ def _classify_condition(ad_ratio, nikkei_change=None):
 
     STRONG: AD >= 0.60 かつ 日経 >= +0.5%（大型株も堅調）
     PANIC:  AD <= 0.20 かつ 日経 <= -2.0%（全面安）
-    nikkei_change=None の場合はAD比率のみで判定。
+    2026-09-05: 日経取得失敗(None)時は極値(STRONG/PANIC)を確定させない。
+      以前は「None または 閾値超え」で、日経が取れないのにAD高→STRONG、AD低→PANIC と
+      両極に寄せていた。scan_daily.judge_market_condition と同じ「日経が確認できたときだけ
+      極値」の対称ロジックに統一（AD高＋日経不明 → NORMAL、AD低＋日経不明 → WEAK）。
     """
     if ad_ratio <= PANIC_AD:
-        if nikkei_change is None or nikkei_change <= PANIC_NIKKEI:
+        if nikkei_change is not None and nikkei_change <= PANIC_NIKKEI:
             return "PANIC"
-        return "WEAK"  # 小型株は崩れているが日経はPANICほどでない
+        return "WEAK"  # 小型株は崩れているが日経はPANICほどでない/未確認
 
     if ad_ratio >= STRONG_AD:
-        if nikkei_change is None or nikkei_change >= STRONG_NIKKEI:
+        if nikkei_change is not None and nikkei_change >= STRONG_NIKKEI:
             return "STRONG"
-        return "NORMAL"  # 小型株は堅調だが大型株（日経）が弱い
+        return "NORMAL"  # 小型株は堅調だが大型株（日経）が弱い/未確認
 
     if ad_ratio <= WEAK_AD:
         return "WEAK"
