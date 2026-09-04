@@ -161,50 +161,87 @@ def load_url_request():
         return None
 
 
-def check_kisoku_before_order(url_request, code):
-    """
-    発注前に立花APIで取引規制を確認する。
+def load_url_master():
+    """tachibana_login_response.json からマスタ問合せURLを読み込む（v4r10）。"""
+    try:
+        with open(LOGIN_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        url = data.get("sUrlMaster", "")
+        return url if url else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
-    Returns:
-        {"blocked": bool, "reason": str}
-        APIエラー時は blocked=False（確認できなかった旨のみ警告）
-    """
+
+# 規制情報は v4r10 で銘柄指定不可の全銘柄一括取得になったため、
+# closing_watch が複数銘柄を連続発注する間だけ結果をキャッシュする。
+_KISEI_CACHE = {"ts": 0.0, "by_code": None}
+_KISEI_TTL_SEC = 120
+
+
+def _fetch_kisei_map():
+    """CLMStkGetIssueSizyouKiseiKabu（全銘柄・市場別規制情報）を取得し
+    {code: {...}} を返す。取得失敗時は None。"""
+    now = time.time()
+    if _KISEI_CACHE["by_code"] is not None and now - _KISEI_CACHE["ts"] < _KISEI_TTL_SEC:
+        return _KISEI_CACHE["by_code"]
+    url_master = load_url_master()
+    if not url_master:
+        return None
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
-        '"sCLMID":"CLMIssueSizyouKiseiKabu",'
-        f'"sIssueCode":"{code}",'
+        '"sCLMID":"CLMStkGetIssueSizyouKiseiKabu",'
         '"sJsonOfmt":"5"'
         "}"
     )
     try:
-        result = _api_get(url_request + "?" + params)
-        p_errno = result.get("p_errno", "")
-        if p_errno != "0":
-            # APIが使用不可（p_errno=8: 時刻制限 / p_errno=6: p_no競合 等）
-            # scan_daily.pyのJPX増担保規制除外で既に対処済みのため発注を許可
-            print(f"  [規制チェック] {code}: API使用不可(p_errno={p_errno}) → 発注許可")
-            return {"blocked": False, "reason": f"規制チェックAPI使用不可(p_errno={p_errno})"}
+        result = _api_get(url_master + "?" + params, source="tachibana_order.check_kisoku")
+        if result.get("p_errno", "0") != "0":
+            return None
+        by_code = {}
+        for item in result.get("aCLMStkIssueSizyouKiseiKabu", []):
+            c = str(item.get("sIssueCode", "")).strip('"')
+            if c:
+                by_code[c] = item
+        _KISEI_CACHE.update(ts=now, by_code=by_code)
+        return by_code
+    except Exception:
+        return None
 
-        # トップレベルの sTeisiKubun
-        teisi = result.get("sTeisiKubun", "0") or "0"
-        if teisi != "0":
-            return {"blocked": True, "reason": f"取引停止・制限中 (sTeisiKubun={teisi})"}
 
-        # リスト形式で返ってくる場合
-        items = result.get("aCLMIssueSizyouKiseiKabu", [])
-        for item in items:
-            teisi_i = item.get("sTeisiKubun", "0") or "0"
-            if teisi_i != "0":
-                return {"blocked": True, "reason": f"取引停止・制限中 (sTeisiKubun={teisi_i})"}
+def check_kisoku_before_order(url_request, code):
+    """
+    発注前に立花APIで現物買付の取引規制を確認する。
 
-        print(f"  [規制チェック] {code}: 規制なし ✅")
-        return {"blocked": False, "reason": "規制なし"}
+    v4r10: CLMIssueSizyouKiseiKabu（銘柄指定）→ CLMStkGetIssueSizyouKiseiKabu
+    （全銘柄一括・マスタURL）。応答の該当銘柄行の現物買付区分を見る。
 
-    except Exception as e:
-        print(f"  [規制チェック] {code}: 通信エラー({e}) → 発注許可")
-        return {"blocked": False, "reason": f"規制チェック通信エラー（発注許可）"}
+    Returns:
+        {"blocked": bool, "reason": str}
+        API取得失敗時は blocked=False（確認できなかった旨のみ警告）
+    """
+    code = str(code)
+    kisei = _fetch_kisei_map()
+    if kisei is None:
+        print(f"  [規制チェック] {code}: 規制情報取得不可 → 発注許可")
+        return {"blocked": False, "reason": "規制情報取得不可（発注許可）"}
+
+    row = kisei.get(code)
+    if row is None:
+        print(f"  [規制チェック] {code}: 規制情報に該当なし → 発注許可")
+        return {"blocked": False, "reason": "規制情報に該当なし（発注許可）"}
+
+    # sTeisiKubun: 0=通常 1=取引禁止 2=成行禁止 3=端株禁止
+    # 発注はすべて成行買いのため、現物買付が 1（禁止）または 2（成行禁止）なら中止。
+    genbutu_kai = str(row.get("sGenbutuKaituke", "0") or "0")
+    teisi       = str(row.get("sTeisiKubun", "0") or "0")
+    if genbutu_kai in ("1", "2") or teisi in ("1", "2"):
+        return {"blocked": True,
+                "reason": f"取引停止・制限中 (sTeisiKubun={teisi} sGenbutuKaituke={genbutu_kai})"}
+
+    print(f"  [規制チェック] {code}: 規制なし ✅")
+    return {"blocked": False, "reason": "規制なし"}
 
 
 def get_buying_power(url_request):
@@ -231,12 +268,16 @@ def get_buying_power(url_request):
 def get_positions(url_request):
     """現物保有株一覧を照会して返す。
     戻り値: [{"code", "name", "shares", "buy_price", "current_price", "pnl_pct"}, ...]
+
+    v4r10: CLMKabuZanList → CLMGenbutuKabuList（配列 aGenbutuKabuList）。
+    項目も sUriOrder* prefix に変更。銘柄名は応答に含まれないため "" を返す。
     """
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
-        '"sCLMID":"CLMKabuZanList",'
+        '"sCLMID":"CLMGenbutuKabuList",'
+        '"sIssueCode":"",'
         '"sJsonOfmt":"5"'
         "}"
     )
@@ -245,7 +286,7 @@ def get_positions(url_request):
         if result.get("p_errno", "0") != "0":
             return []
         positions = []
-        for item in result.get("aCLMKabuZanList", []):
+        for item in result.get("aGenbutuKabuList", []):
             def _f(k):
                 v = item.get(k, "")
                 if isinstance(v, str):
@@ -254,11 +295,11 @@ def get_positions(url_request):
                     return float(v)
                 except (ValueError, TypeError):
                     return None
-            code        = str(item.get("sIssueCode", "")).strip('"')
-            name        = str(item.get("sIssueName", "")).strip('"')
-            shares      = int(_f("sZansuuKabu") or 0)
-            buy_price   = _f("sHiritsuTanka")
-            current     = _f("sGenzaiTanka") or _f("sHiritsuTanka")
+            code        = str(item.get("sUriOrderIssueCode", "")).strip('"')
+            name        = ""
+            shares      = int(_f("sUriOrderZanKabuSuryou") or 0)
+            buy_price   = _f("sUriOrderGaisanBokaTanka")
+            current     = _f("sUriOrderHyoukaTanka") or buy_price
             pnl_pct     = round((current - buy_price) / buy_price * 100, 2) if (buy_price and current) else None
             if code and shares > 0:
                 positions.append({
@@ -276,14 +317,18 @@ def get_positions(url_request):
 
 def get_margin_positions(url_request):
     """信用建玉一覧を照会して返す。
-    戻り値: [{"code", "name", "shares", "buy_price", "current_price", "pnl_pct", "account_type"}, ...]
+    戻り値: [{"code", "name", "shares", "buy_price", "current_price", "pnl_pct", "account_type", "tategyoku_no"}, ...]
     account_type は常に "shinyou"。
+
+    v4r10: CLMShinyouZanList → CLMShinyouTategyokuList（配列 aShinyouTategyokuList）。
+    項目も sOrder* prefix に変更。銘柄名は応答に含まれないため "" を返す。
     """
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
-        '"sCLMID":"CLMShinyouZanList",'
+        '"sCLMID":"CLMShinyouTategyokuList",'
+        '"sIssueCode":"",'
         '"sJsonOfmt":"5"'
         "}"
     )
@@ -292,7 +337,7 @@ def get_margin_positions(url_request):
         if result.get("p_errno", "0") != "0":
             return []
         positions = []
-        for item in result.get("aCLMShinyouZanList", []):
+        for item in result.get("aShinyouTategyokuList", []):
             def _f(k):
                 v = item.get(k, "")
                 if isinstance(v, str):
@@ -301,11 +346,12 @@ def get_margin_positions(url_request):
                     return float(v)
                 except (ValueError, TypeError):
                     return None
-            code      = str(item.get("sIssueCode", "")).strip('"')
-            name      = str(item.get("sIssueName", "")).strip('"')
-            shares    = int(_f("sZandakaZansuuKabu") or 0)
-            buy_price = _f("sTategyokuTanka")
-            current   = _f("sGenzaiTanka") or buy_price
+            code      = str(item.get("sOrderIssueCode", "")).strip('"')
+            name      = ""
+            shares    = int(_f("sOrderTategyokuSuryou") or 0)
+            buy_price = _f("sOrderTategyokuTanka")
+            current   = _f("sOrderHyoukaTanka") or buy_price
+            tategyoku_no = str(item.get("sOrderTategyokuNumber", "")).strip('"')
             pnl_pct   = round((current - buy_price) / buy_price * 100, 2) if (buy_price and current) else None
             if code and shares > 0:
                 positions.append({
@@ -316,6 +362,7 @@ def get_margin_positions(url_request):
                     "current_price": current,
                     "pnl_pct":       pnl_pct,
                     "account_type":  "shinyou",
+                    "tategyoku_no":  tategyoku_no,
                 })
         return positions
     except Exception:
@@ -430,10 +477,11 @@ def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, 
     ままフォールバックする（[[bug_buy_price_inaccuracy]]のFix①と同じ仕組みを
     日中の発注直後にも適用したもの）。
     """
-    clm_id, list_key, price_key = (
-        ("CLMShinyouZanList", "aCLMShinyouZanList", "sTategyokuTanka")
+    # v4r10: CLMKabuZanList→CLMGenbutuKabuList / CLMShinyouZanList→CLMShinyouTategyokuList
+    clm_id, list_key, code_key, price_key = (
+        ("CLMShinyouTategyokuList", "aShinyouTategyokuList", "sOrderIssueCode", "sOrderTategyokuTanka")
         if account_type == "shinyou" else
-        ("CLMKabuZanList", "aCLMKabuZanList", "sHiritsuTanka")
+        ("CLMGenbutuKabuList", "aGenbutuKabuList", "sUriOrderIssueCode", "sUriOrderGaisanBokaTanka")
     )
     for attempt in range(max_retry):
         if attempt > 0:
@@ -445,6 +493,7 @@ def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, 
             f'"p_no":"{_next_p_no()}",'
             f'"p_sd_date":"{_p_sd_date()}",'
             f'"sCLMID":"{clm_id}",'
+            '"sIssueCode":"",'
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -453,7 +502,7 @@ def get_true_buy_price(url_request, code, account_type="genbutsu", max_retry=3, 
             if result.get("p_errno", "0") != "0":
                 continue
             for item in result.get(list_key, []):
-                item_code = str(item.get("sIssueCode", "")).strip('"')
+                item_code = str(item.get(code_key, "")).strip('"')
                 if item_code != str(code):
                     continue
                 v = item.get(price_key, "")
@@ -656,26 +705,33 @@ def place_sell_order(url_request, code, shares, price=None, market_code=None,
 
 
 def check_order(url_request, order_no):
-    """注文照会（約定確認）。約定済みなら True を返す。"""
+    """注文照会（約定確認）。約定済みなら True を返す。
+
+    v4r10: CLMKabuOrderList → CLMOrderList（配列 aOrderList）。
+    注文番号での絞り込み引数が無くなったため全件取得し
+    sOrderOrderNumber で突き合わせる。
+    """
     params = (
         "{"
         f'"p_no":"{_next_p_no()}",'
         f'"p_sd_date":"{_p_sd_date()}",'
-        '"sCLMID":"CLMKabuOrderList",'
-        '"sTargetOrderNo":' + f'"{order_no}",'
+        '"sCLMID":"CLMOrderList",'
+        '"sIssueCode":"",'
+        '"sSikkouDay":"",'
+        '"sOrderSyoukaiStatus":"",'
         '"sJsonOfmt":"5"'
         "}"
     )
     try:
         result = _api_get(url_request + "?" + params)
-        orders = result.get("aCLMKabuOrderList", [])
+        orders = result.get("aOrderList", [])
         for o in orders:
-            if o.get("sOrderNo", "") == order_no:
+            if str(o.get("sOrderOrderNumber", "")).strip('"') == str(order_no):
                 status = o.get("sOrderStatus", "")
-                yakujо = o.get("sYakujosu", "0")
+                yakujo = str(o.get("sOrderYakuzyouSuryo", "0")).strip('"')
                 return {
                     "status":   status,
-                    "filled":   int(yakujо) if yakujо else 0,
+                    "filled":   int(float(yakujo)) if yakujo else 0,
                     "raw":      o,
                 }
     except Exception:
@@ -683,9 +739,15 @@ def check_order(url_request, order_no):
     return {"status": "不明", "filled": 0, "raw": {}}
 
 
-def cancel_order(url_request, order_no, max_retry=5):
+def cancel_order(url_request, order_no, max_retry=5, eigyou_day=None):
     """注文取消。p_errno=8（タイムスタンプ競合）は最大 max_retry 回リトライ。
-    戻り値: {"success": bool, "message": str, "raw": dict}"""
+    戻り値: {"success": bool, "message": str, "raw": dict}
+
+    v4r10: CLMKabuCancel → CLMKabuCancelOrder。sEigyouDay が必須になったため
+    指定が無ければ当日（JST）を使う（指値フォールバックは当日中の取消のみ）。
+    """
+    if not eigyou_day:
+        eigyou_day = datetime.now(JST).strftime("%Y%m%d")
     for attempt in range(max_retry):
         if attempt > 0:
             time.sleep(2.0)   # position_monitor(60秒ループ)との競合を回避するため2秒待機
@@ -693,8 +755,9 @@ def cancel_order(url_request, order_no, max_retry=5):
             "{"
             f'"p_no":"{_next_p_no()}",'
             f'"p_sd_date":"{_p_sd_date()}",'
-            '"sCLMID":"CLMKabuCancel",'
+            '"sCLMID":"CLMKabuCancelOrder",'
             f'"sOrderNumber":"{order_no}",'
+            f'"sEigyouDay":"{eigyou_day}",'
             f'"sSecondPassword":"{SECOND_PASSWORD}",'
             '"sJsonOfmt":"5"'
             "}"
@@ -729,6 +792,7 @@ def place_buy_limit_with_fallback(url_request, code, shares, price, market_code,
                 "filled": 0, "order_no": "", "message": r["message"]}
 
     order_no = r.get("order_no", "")
+    eigyou_day = (r.get("raw") or {}).get("sEigyouDay") or None
     print(f"     指値発注: 注文番号 {order_no}  {wait_secs}秒後に約定確認...")
     time.sleep(wait_secs)
 
@@ -748,7 +812,7 @@ def place_buy_limit_with_fallback(url_request, code, shares, price, market_code,
     # ── 未約定 → 取消して成行フォールバック ──────────────
     order_status = check.get("status", "")
     print(f"     {wait_secs}秒経過しても未約定（sOrderStatus={order_status!r}）→ 取消して成行に切り替え")
-    cancel = cancel_order(url_request, order_no)
+    cancel = cancel_order(url_request, order_no, eigyou_day=eigyou_day)
     if not cancel["success"]:
         # キャンセル失敗時は注文状態を再確認する
         # 受付エラー・既取消など「非アクティブ」ならそのまま成行発注して問題ない

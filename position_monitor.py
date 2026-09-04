@@ -130,7 +130,7 @@ def fetch_prices(url_price, codes):
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(chunk)}",'
-            '"sTargetColumn":"pDPP,pPRP,pOP",'
+            '"sTargetColumn":"pDPP,pPRP,pDOP",'   # v4r10: pOP→pDOP（始値）
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -148,7 +148,7 @@ def fetch_prices(url_price, codes):
                     except (ValueError, TypeError):
                         return None
                 px   = _f("pDPP") or _f("pPRP")
-                open_px = _f("pOP")
+                open_px = _f("pDOP")
                 if px and code:
                     prices[code] = {"price": px, "open": open_px}
         except Exception as e:
@@ -196,9 +196,11 @@ def fetch_api_holdings(url_request):
     http = urllib3.PoolManager()
     holdings = {}
 
-    for clm_id, list_key, shares_key, price_key, acct in [
-        ("CLMKabuZanList",     "aCLMKabuZanList",     "sZansuuKabu",       "sHiritsuTanka",   "genbutsu"),
-        ("CLMShinyouZanList",  "aCLMShinyouZanList",  "sZandakaZansuuKabu","sTategyokuTanka", "shinyou"),
+    # v4r10: CLMKabuZanList→CLMGenbutuKabuList / CLMShinyouZanList→CLMShinyouTategyokuList。
+    # 配列名・項目名も変更。銘柄名は応答に含まれなくなったため "" とする。
+    for clm_id, list_key, code_key, shares_key, price_key, acct in [
+        ("CLMGenbutuKabuList",     "aGenbutuKabuList",     "sUriOrderIssueCode", "sUriOrderZanKabuSuryou",   "sUriOrderGaisanBokaTanka", "genbutsu"),
+        ("CLMShinyouTategyokuList", "aShinyouTategyokuList", "sOrderIssueCode",   "sOrderTategyokuSuryou",    "sOrderTategyokuTanka",     "shinyou"),
     ]:
         time.sleep(0.6)   # p_sd_date競合（p_errno=6/8）を避けるため他プロセスと時間をずらす
         t = datetime.now(JST)
@@ -210,6 +212,7 @@ def fetch_api_holdings(url_request):
             f'"p_no":"{tachibana_order._next_p_no()}",'
             f'"p_sd_date":"{p_sd}",'
             f'"sCLMID":"{clm_id}",'
+            '"sIssueCode":"",'
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -227,8 +230,8 @@ def fetch_api_holdings(url_request):
                     if isinstance(v, str): v = v.strip('"')
                     try: return float(v)
                     except: return None
-                code   = str(item.get("sIssueCode","")).strip('"')
-                name   = str(item.get("sIssueName","")).strip('"')
+                code   = str(item.get(code_key, "")).strip('"')
+                name   = ""
                 shares = int(_f(shares_key) or 0)
                 price  = _f(price_key)
                 if code and shares > 0:

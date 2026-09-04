@@ -366,7 +366,7 @@ def fetch_prices(url_price, codes):
             f'"p_sd_date":"{p_sd}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{",".join(str(c) for c in chunk)}",'
-            '"sTargetColumn":"pDPP,pPRP,pOP,pDV",'
+            '"sTargetColumn":"pDPP,pPRP,pDOP,pDV",'   # v4r10: pOP→pDOP（始値）
             '"sJsonOfmt":"5"'
             "}"
         )
@@ -381,7 +381,7 @@ def fetch_prices(url_price, codes):
                     continue
                 price  = _parse_price_field(item, "pDPP") or _parse_price_field(item, "pPRP")
                 prev   = _parse_price_field(item, "pPRP")
-                open_p = _parse_price_field(item, "pOP")
+                open_p = _parse_price_field(item, "pDOP")
                 vol    = int(_parse_price_field(item, "pDV") or 0)
                 if price:
                     result[code] = {"price": price, "prev_close": prev,
