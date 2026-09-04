@@ -37,7 +37,9 @@ def _run_script_teed(script, log_name, timeout_sec, label):
     import subprocess
     import threading
 
-    log_path = _BASE_DIR / "out" / log_name
+    out_dir = _BASE_DIR / "out"
+    out_dir.mkdir(exist_ok=True)
+    log_path = out_dir / log_name
     print(f"  ログ: out/{log_name}", flush=True)
     try:
         proc = subprocess.Popen(
@@ -53,14 +55,22 @@ def _run_script_teed(script, log_name, timeout_sec, label):
 
     def _tee():
         try:
-            with open(log_path, "w", encoding="utf-8") as lf:
-                for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    lf.write(line)
-                    lf.flush()
+            lf = open(log_path, "w", encoding="utf-8")
         except Exception:
-            pass
+            lf = None
+        try:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if lf is not None:
+                    try:
+                        lf.write(line)
+                        lf.flush()
+                    except Exception:
+                        lf = None
+        finally:
+            if lf is not None:
+                lf.close()
 
     t = threading.Thread(target=_tee, daemon=True)
     t.start()
