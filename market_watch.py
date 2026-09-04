@@ -20,6 +20,7 @@ import sys
 import json
 import time
 import argparse
+import concurrent.futures
 import requests
 import urllib3
 import pandas as pd
@@ -408,8 +409,16 @@ def _fetch_nikkei_905(url_price):
 
 
 def _get_nikkei_prev_close():
-    """yfinance ^N225 で前日終値を返す。取得失敗時は None。"""
-    try:
+    """yfinance ^N225 で前日終値を返す。取得失敗・タイムアウト時は None。
+
+    yfinance の .history() はタイムアウト指定が効かず、Yahoo が不調だと
+    無限にハングする。2026-09-04: この呼び出しが 09:03 の地合い再判定で固まり、
+    scan_morning パイプライン全体が 7.5 時間フリーズ（flock を握ったまま翌営業日の
+    cron がスキップされる寸前）になった。別スレッドで実行して 15 秒で見切る。
+    見切ったスレッドは残るが、market_watch で yfinance を呼ぶのはここだけ。
+    None を返すと呼び出し側は「地合い再判定スキップ」で安全に続行する。
+    """
+    def _fetch():
         hist = yf.Ticker("^N225").history(period="5d")
         today_str = datetime.now(JST).strftime("%Y-%m-%d")
         closes = []
@@ -421,8 +430,14 @@ def _get_nikkei_prev_close():
             if date_str < today_str:
                 closes.append(float(close))
         return closes[-1] if closes else None
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(_fetch).result(timeout=15)
     except Exception:
         return None
+    finally:
+        ex.shutdown(wait=False)   # ハングしたスレッドの回収は待たない
 
 
 def _refresh_condition_905(current_condition, market_info, url_price):

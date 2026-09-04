@@ -24,33 +24,56 @@ sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
 
 
-class _Tee:
-    """標準出力を画面とログファイルの両方へ同時出力する。"""
-    def __init__(self, *streams):
-        self._streams = streams
+def _run_script_teed(script, log_name, timeout_sec, label):
+    """script を別プロセスで実行し、出力を画面と out/<log_name> へ1行ごとにティーする。
 
-    def write(self, data):
-        for s in self._streams:
-            s.write(data)
-
-    def flush(self):
-        for s in self._streams:
-            s.flush()
-
-
-def _run_with_log(fn, log_path):
-    """fn()実行中の標準出力を画面とlog_pathの両方に書き出す。
-    market_watch.py / closing_watch.py はscan_morning.pyの中で直接関数呼び出しされ
-    （daytime.py/position_monitor.pyのようなsubprocess経由ではないため）、
-    それらの出力が今までファイルに残らず後から確認できない問題があった。
+    以前は `import market_watch; market_watch.main()` のように scan_morning の中で
+    直接ブロッキング呼び出ししていたが、2026-09-04 に market_watch 内の yfinance
+    呼び出しが Yahoo 不調で無限ハングし、scan_morning パイプライン全体が 7.5 時間
+    フリーズした（例外も飛ばず、flock を握ったまま翌営業日の cron がスキップされる
+    寸前だった）。別プロセス化 + 実時間タイムアウトで、単一のハングが
+    パイプライン全体を固めないようにする。timeout_sec 超過で強制終了して次へ進む。
     """
-    orig_stdout = sys.stdout
-    with open(log_path, "w", encoding="utf-8") as f:
-        sys.stdout = _Tee(orig_stdout, f)
+    import subprocess
+    import threading
+
+    log_path = _BASE_DIR / "out" / log_name
+    print(f"  ログ: out/{log_name}", flush=True)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(_BASE_DIR / script)],
+            cwd=str(_BASE_DIR),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except Exception as e:
+        print(f"⚠️  {label} の起動に失敗しました: {e}")
+        print(f"   → python {script} を手動で実行してください")
+        return
+
+    def _tee():
         try:
-            fn()
-        finally:
-            sys.stdout = orig_stdout
+            with open(log_path, "w", encoding="utf-8") as lf:
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    lf.write(line)
+                    lf.flush()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_tee, daemon=True)
+    t.start()
+    try:
+        proc.wait(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        print(f"\n⚠️  {label} が {timeout_sec // 60}分でタイムアウト → 強制終了して次の処理へ進みます")
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+    t.join(timeout=5)
 
 import db as _db
 _db.init_db()
@@ -666,13 +689,10 @@ def main():
             for r in candidate_rows)
     )
     if (has_buy or has_pending_weak) and condition != "PANIC":
-        try:
-            import market_watch
-            print(f"  ログ: out/market_watch_live.txt")
-            _run_with_log(market_watch.main, str(_OUT_DIR / "market_watch_live.txt"))
-        except Exception as e:
-            print(f"⚠️  リアルタイム監視でエラーが発生しました: {e}")
-            print("   → python market_watch.py を手動で実行してください")
+        # market_watch は 09:00〜09:30 稼働。起動〜09:30 で最長 ~50分なので
+        # 75分でハード打ち切り（ハング時に closing_watch / scan_daily をブロックしない）。
+        _run_script_teed("market_watch.py", "market_watch_live.txt", 75 * 60,
+                         "リアルタイム監視(戦略A)")
 
     # ── closing_watch（ブロッキング）──
     # 朝の予測がPANICでも常に起動する（2026-08-19変更）。closing_watch.py内部で
@@ -682,13 +702,10 @@ def main():
     # うち2日(2026-03-27→STRONG、2026-07-08→NORMAL)は実際には回復しており、
     # 従来はこの機会を丸ごと逃していた。A本体/AN/AS/Dは同様の自己修正の仕組みを
     # 持たない（または9:03再判定の実測検証ができない）ため、今回は対象外。
-    try:
-        import closing_watch
-        print(f"  ログ: out/closing_watch_live.txt")
-        _run_with_log(closing_watch.main, str(_OUT_DIR / "closing_watch_live.txt"))
-    except Exception as e:
-        print(f"⚠️  引け前スキャンでエラーが発生しました: {e}")
-        print("   → python closing_watch.py を手動で実行してください")
+    # closing_watch は 09:30〜15:20 稼働。7時間でハード打ち切り（16:45 の scan_daily
+    # 実行前・翌営業日 cron 前に必ず抜けるように）。
+    _run_script_teed("closing_watch.py", "closing_watch_live.txt", 7 * 60 * 60,
+                     "引け前スキャン(戦略B)")
 
     # ── closing_watch 終了後、16:45 に scan_daily.py を自動実行（データ未取得時は15分おきにリトライ）──
     _run_scan_daily_at_1640()
