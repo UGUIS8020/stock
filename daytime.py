@@ -523,6 +523,11 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     ROUTINE_LOG_INTERVAL = 300   # 「監視中」の定型メッセージは5分に1回だけ出力（ノイズ削減）
     last_routine_print   = None
     last_lunch_print      = None
+    NIKKEI_LOG_INTERVAL   = 300   # 日経225の日中値記録間隔（秒）。APIへの負荷配慮のため
+                                   # 個別銘柄ポーリング(30秒)より粗く、5分間隔にとどめる。
+                                   # 地合い予測(STRONG判定など)と実際の値動きがズレた日の
+                                   # 事後検証用データを蓄積する目的で、発注判断には使わない。
+    last_nikkei_log       = None
 
     # 曜日別パラメータ上書き（月曜は構造的に弱いため制限付き発注）
     is_monday     = (datetime.now(JST).weekday() == 0)
@@ -675,6 +680,20 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             if c not in first_prices or (gap_min <= first_prices[c] <= gap_max)
         ]
         quotes = fetch_prices(url_price, watch_codes) if url_price else {}
+
+        # 日経225の日中値を5分おきに記録（発注判断には使わない、事後検証用）
+        if url_price and (last_nikkei_log is None or
+                           (now - last_nikkei_log).total_seconds() >= NIKKEI_LOG_INTERVAL):
+            last_nikkei_log = now
+            try:
+                nk_quote = fetch_prices(url_price, ["101"]).get("101")
+                if nk_quote and nk_quote.get("price") and nk_quote.get("prev_close"):
+                    nk_price  = nk_quote["price"]
+                    nk_prev   = nk_quote["prev_close"]
+                    nk_change = (nk_price - nk_prev) / nk_prev * 100 if nk_prev else None
+                    db.save_nikkei_intraday_log(TODAY, now_str, nk_price, nk_change)
+            except Exception as e:
+                print(f"  ⚠️  日経225記録に失敗（継続に影響なし）: {e}")
 
         # ── Step1: このポーリングで出たシグナルを全件収集 ──
         new_signals = []
