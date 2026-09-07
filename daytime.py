@@ -49,6 +49,7 @@ load_dotenv()
 import db
 import tachibana_order
 import closing_watch
+import market_watch
 
 JST      = timezone(timedelta(hours=9))
 TODAY    = datetime.now(JST).strftime("%Y-%m-%d")
@@ -592,6 +593,15 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                                    # 観測目的のみで記録する（[[entry_timing_review_plan]]と同じ考え方）
     observed_1240 = False
 
+    # 日経225の前日終値（日中値記録の変化率計算用）。ループ内で毎回取得すると
+    # Tachibana API側のprev_closeが常にNoneで使えない上、yfinance版は
+    # 2026-09-04にハングして7.5時間パイプラインを止めた実績があるため、
+    # ここで一度だけ・タイムアウト付きの安全な関数(market_watch側)で取得する。
+    # 取得失敗時はNoneのままとし、以降は価格のみ記録してchange_pctは空にする。
+    nikkei_prev_close = market_watch._get_nikkei_prev_close()
+    if nikkei_prev_close is None:
+        print("  ⚠️  日経225前日終値の取得に失敗（日中値は価格のみ記録）")
+
     while True:
         now     = datetime.now(JST)
         now_min = now.hour * 60 + now.minute
@@ -687,10 +697,12 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             last_nikkei_log = now
             try:
                 nk_quote = fetch_prices(url_price, ["101"]).get("101")
-                if nk_quote and nk_quote.get("price") and nk_quote.get("prev_close"):
+                # Tachibana APIはコード101(指数)のprev_closeを返さないため、
+                # ループ開始前に一度だけ取得したnikkei_prev_closeを使う。
+                if nk_quote and nk_quote.get("price"):
                     nk_price  = nk_quote["price"]
-                    nk_prev   = nk_quote["prev_close"]
-                    nk_change = (nk_price - nk_prev) / nk_prev * 100 if nk_prev else None
+                    nk_change = ((nk_price - nikkei_prev_close) / nikkei_prev_close * 100
+                                 if nikkei_prev_close else None)
                     db.save_nikkei_intraday_log(TODAY, now_str, nk_price, nk_change)
             except Exception as e:
                 print(f"  ⚠️  日経225記録に失敗（継続に影響なし）: {e}")
