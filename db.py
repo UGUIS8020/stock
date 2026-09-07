@@ -180,6 +180,15 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_ds_date ON daytime_signals(date);
 
+        CREATE TABLE IF NOT EXISTS nikkei_intraday_log (
+            date        TEXT NOT NULL,
+            time        TEXT NOT NULL,
+            price       REAL,
+            change_pct  REAL,
+            PRIMARY KEY (date, time)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nil_date ON nikkei_intraday_log(date);
+
         CREATE TABLE IF NOT EXISTS restriction_list (
             code             TEXT PRIMARY KEY,
             restricted_date  TEXT NOT NULL,
@@ -883,6 +892,24 @@ def save_daytime_signal(row):
                 :conditions_met, :breakout, :volume_surge, :momentum,
                 :volume_pace_ratio, :tp_price, :sl_price)
     """, row)
+    conn.commit()
+    conn.close()
+
+
+# ══════════════════════════════════════════════════════
+# nikkei_intraday_log（日経225の日中値動き）
+# ══════════════════════════════════════════════════════
+
+def save_nikkei_intraday_log(date, time, price, change_pct):
+    """日経225の日中値を記録する（同日同時刻は上書き）。
+    地合い予測(STRONG判定など)と実際の日中値動きがズレた日を後からバックテスト
+    できるようにするための記録用ログ。発注判断には使わない。
+    """
+    conn = get_conn()
+    conn.execute("""
+        INSERT OR REPLACE INTO nikkei_intraday_log (date, time, price, change_pct)
+        VALUES (?, ?, ?, ?)
+    """, (date, time, price, change_pct))
     conn.commit()
     conn.close()
 

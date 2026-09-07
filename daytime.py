@@ -49,6 +49,7 @@ load_dotenv()
 import db
 import tachibana_order
 import closing_watch
+import market_watch
 
 JST      = timezone(timedelta(hours=9))
 TODAY    = datetime.now(JST).strftime("%Y-%m-%d")
@@ -523,6 +524,11 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
     ROUTINE_LOG_INTERVAL = 300   # 「監視中」の定型メッセージは5分に1回だけ出力（ノイズ削減）
     last_routine_print   = None
     last_lunch_print      = None
+    NIKKEI_LOG_INTERVAL   = 300   # 日経225の日中値記録間隔（秒）。APIへの負荷配慮のため
+                                   # 個別銘柄ポーリング(30秒)より粗く、5分間隔にとどめる。
+                                   # 地合い予測(STRONG判定など)と実際の値動きがズレた日の
+                                   # 事後検証用データを蓄積する目的で、発注判断には使わない。
+    last_nikkei_log       = None
 
     # 曜日別パラメータ上書き（月曜は構造的に弱いため制限付き発注）
     is_monday     = (datetime.now(JST).weekday() == 0)
@@ -586,6 +592,15 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                                    # 検証するため、12:40時点のAD比率を発注判断に使わず
                                    # 観測目的のみで記録する（[[entry_timing_review_plan]]と同じ考え方）
     observed_1240 = False
+
+    # 日経225の前日終値（日中値記録の変化率計算用）。ループ内で毎回取得すると
+    # Tachibana API側のprev_closeが常にNoneで使えない上、yfinance版は
+    # 2026-09-04にハングして7.5時間パイプラインを止めた実績があるため、
+    # ここで一度だけ・タイムアウト付きの安全な関数(market_watch側)で取得する。
+    # 取得失敗時はNoneのままとし、以降は価格のみ記録してchange_pctは空にする。
+    nikkei_prev_close = market_watch._get_nikkei_prev_close()
+    if nikkei_prev_close is None:
+        print("  ⚠️  日経225前日終値の取得に失敗（日中値は価格のみ記録）")
 
     while True:
         now     = datetime.now(JST)
@@ -675,6 +690,22 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             if c not in first_prices or (gap_min <= first_prices[c] <= gap_max)
         ]
         quotes = fetch_prices(url_price, watch_codes) if url_price else {}
+
+        # 日経225の日中値を5分おきに記録（発注判断には使わない、事後検証用）
+        if url_price and (last_nikkei_log is None or
+                           (now - last_nikkei_log).total_seconds() >= NIKKEI_LOG_INTERVAL):
+            last_nikkei_log = now
+            try:
+                nk_quote = fetch_prices(url_price, ["101"]).get("101")
+                # Tachibana APIはコード101(指数)のprev_closeを返さないため、
+                # ループ開始前に一度だけ取得したnikkei_prev_closeを使う。
+                if nk_quote and nk_quote.get("price"):
+                    nk_price  = nk_quote["price"]
+                    nk_change = ((nk_price - nikkei_prev_close) / nikkei_prev_close * 100
+                                 if nikkei_prev_close else None)
+                    db.save_nikkei_intraday_log(TODAY, now_str, nk_price, nk_change)
+            except Exception as e:
+                print(f"  ⚠️  日経225記録に失敗（継続に影響なし）: {e}")
 
         # ── Step1: このポーリングで出たシグナルを全件収集 ──
         new_signals = []
