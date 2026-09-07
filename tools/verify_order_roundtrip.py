@@ -82,6 +82,11 @@ result = to.place_buy_order(url_request, CODE, SHARES, price=safe_price)
 print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
 order_no = result.get("order_no")
+# cancel_orderはsEigyouDay必須(v4r10)。未指定だと当日日付にフォールバックするが、
+# 深夜に発注すると実際のsEigyouDay(翌営業日)とズレて取消が失敗する
+# (2026-09-07 23時台に実地で確認済み: sResultCode=13100「株式サマリにデータがありません」)。
+# 本番のplace_buy_limit_with_fallbackと同様、買い注文のraw応答から取得して明示的に渡す。
+eigyou_day = (result.get("raw") or {}).get("sEigyouDay") or None
 if not result.get("success") or not order_no:
     print("\n発注失敗のためテスト終了")
     sys.exit(0)
@@ -92,7 +97,7 @@ check = to.check_order(url_request, order_no)
 print(json.dumps(check, ensure_ascii=False, indent=2, default=str))
 
 print(f"\n=== 4. 取消 ===")
-cancel = to.cancel_order(url_request, order_no)
+cancel = to.cancel_order(url_request, order_no, eigyou_day=eigyou_day)
 print(json.dumps(cancel, ensure_ascii=False, indent=2, default=str))
 
 print(f"\n=== 5. 取消後の注文照会（再確認） ===")

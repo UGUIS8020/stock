@@ -401,12 +401,15 @@ def place_buy_order(url_request, code, shares, price=None, market_code=None):
         }
 
     # 成行: sCondition="0", sOrderPrice="0"
-    # 指値: sCondition="1", sOrderPrice=str(price)
+    # 指値: sCondition="0", sOrderPrice=str(price)（v4r10、下記コメント参照）
     if price is None:
         condition   = "0"
         order_price = "0"
     else:
-        condition   = "1"
+        # v4r10: sCondition="1"(指値)は無効(sResultCode=11010「執行条件に誤りがあります」)。
+        # 2026-09-07実地検証で判明。sCondition="0"+価格指定が正しい指定方法（成行との
+        # 違いはsOrderPriceが"0"か実価格かのみ）。
+        condition   = "0"
         order_price = str(int(price))
 
     params = (
@@ -644,7 +647,10 @@ def place_sell_order(url_request, code, shares, price=None, market_code=None,
         condition   = "0"
         order_price = "0"
     else:
-        condition   = "1"
+        # v4r10: sCondition="1"(指値)は無効(sResultCode=11010「執行条件に誤りがあります」)。
+        # 2026-09-07実地検証で判明。sCondition="0"+価格指定が正しい指定方法（成行との
+        # 違いはsOrderPriceが"0"か実価格かのみ）。
+        condition   = "0"
         order_price = str(int(price))
 
     # 現物="0", 信用返済="2"
