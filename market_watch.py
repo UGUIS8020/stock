@@ -113,6 +113,15 @@ MAX_WATCH_AS = 20   # 戦略AS（2026-08-10新設。1日25〜500件超と候補�
 AN_TP_PCT = 0.015
 AN_SL_PCT = 0.059
 
+# 戦略AN 寄りギャップアップ上限（2026-09-08検証・ドラフト）。
+#   simulate/simulate_an_gapband.py: NORMAL日692トレードを9分割点WF＋OOSブロック
+#   ブートストラップ(2000回)で検証。エントリー時の前日比が +1.0% を超える候補は
+#   落とすと、件数を18%減らして test平均 +0.240%→+0.368% / test Sharpe +3.14→+4.70 /
+#   OOS最終赤字確率 5.1%→1.6% と一貫改善（全9分割で test Sharpe≥+3.3）。
+#   +1.5%上限では効果が弱く(+1.0〜+1.5%帯が既に劣化)、+1.0%が最適。
+#   ※横ばい(|gap|<0.1%)除外(R2)はさらに良いが n=85 と薄いため今回は見送り。
+AN_SURGE_LIMIT_PCT = 1.0
+
 # 戦略AS 専用TP/SL（2026-08-10検証: score0〜3×ratio0〜4×前日騰落-1.8〜+7.6%×RBスコア≥2.7、
 #   STRONG日、2年 N=7,028 勝率66.4% avg+0.832%。GA探索(196/200が安定基準クリア)でも再現済み）
 AS_TP_PCT = 0.048
@@ -232,8 +241,10 @@ def decide_timing(condition, judgment, ai_recommendation="", strategy="A"):
                 "style":                 "WAIT_CONFIRM",
                 "ai_trigger_min":        CONDITION_REFRESH_MIN,
                 "confirm_threshold_pct": -99.0,
-                "surge_limit_pct":       None,
-                "description":           "戦略AN NORMAL日 → 9:03の地合い確定後に即エントリー",
+                # 2026-09-08(ドラフト): 寄りギャップアップ +1.0% 超は出尽くし扱いで除外
+                #   （AN_SURGE_LIMIT_PCT のコメント参照）。従来は None＝上限なし。
+                "surge_limit_pct":       AN_SURGE_LIMIT_PCT,
+                "description":           "戦略AN NORMAL日 → 9:03の地合い確定後に即エントリー（寄り+1.0%超は除外）",
             }
         return {
             "style":                 "SKIP",
@@ -1191,7 +1202,16 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                     continue
 
                 # CMEが正の日は個別株がCMEを超過上昇していないと発注しない（案1+3）
-                eff_thr = max(threshold, cme_chg) if cme_chg > 0 else threshold
+                # ── 戦略ANは対象外（2026-09-08 ドラフト）────────────────────────
+                #   このCMEゲートは戦略A本体のPass-2共有による副作用で、ANの
+                #   2026-08-12検証には無かった条件。simulate/simulate_an_gapband.py の
+                #   9分割WF＋OOSブートストラップで、ANにゲートを効かせても OOS改善が
+                #   確認できなかった（train +0.43% / test +0.20% と乖離、最終赤字率は
+                #   無ゲートと同等）。ANは確定条件で寄りエントリーする設計に戻す。
+                if c.get("strategy", "A") == "AN":
+                    eff_thr = threshold
+                else:
+                    eff_thr = max(threshold, cme_chg) if cme_chg > 0 else threshold
                 if latest_chg >= eff_thr:
                     wait_confirm_ready.append((latest_chg, c, latest_px, eff_thr))
                 continue
