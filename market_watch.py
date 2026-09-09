@@ -994,8 +994,14 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
                     c["judgment"] = new_judgment
                     c["reason"]   = new_reason
 
+                # 全候補を再構築する（L946の初回構築と同じ網羅性を保つ）。
+                # 2026-09-09: `if not ordered[c["code"]]` を付けていたため、9:03前に
+                # 見送り/発注済みの銘柄が timings から抜け、直後のループ L1094
+                # `timing = timings[code]` が KeyError で落ちた（WEAK→PANIC 再判定 ×
+                # 9:03前に見送り確定した戦略A候補、で初発火）。ordered済み銘柄は
+                # 各利用箇所（L1096 等）で continue されるので、timings に残っていても無害。
                 timings = {c["code"]: decide_timing(condition, c["judgment"], "", c.get("strategy", "A"))
-                           for c in candidates if not ordered[c["code"]]}
+                           for c in candidates}
                 try:
                     db.update_condition_in_candidates_log(TODAY, new_cond)
                 except Exception:
