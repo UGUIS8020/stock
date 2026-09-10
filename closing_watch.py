@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import argparse
+import concurrent.futures
 import urllib3
 import pandas as pd
 import numpy as np
@@ -272,14 +273,54 @@ def log_condition_change(morning_cond, scanned_cond, ad_ratio, nikkei_change):
         pass
 
 
+def _nikkei_prev_close_yf():
+    """yfinance ^N225 で日経225の前日終値を返す。失敗・タイムアウト時は None。
+
+    立花API(code=101)は指数だと pPRP(前日終値)を空文字で返すため、前日終値だけ
+    yfinance で補う（現在値 pDPP は立花から取れる）。2026-09-09/10 に closing_watch の
+    地合い判定が「日経取得失敗 → AD比率のみ」に連日劣化していた原因がこれ。
+    yfinance の .history() はタイムアウトが効かず Yahoo 不調時に無限ハングするため、
+    market_watch._get_nikkei_prev_close と同じく別スレッドで15秒で見切る。
+    """
+    def _fetch():
+        import yfinance as yf
+        hist = yf.Ticker("^N225").history(period="5d")
+        today_str = datetime.now(JST).strftime("%Y-%m-%d")
+        closes = []
+        for ts, close in zip(hist.index, hist["Close"]):
+            try:
+                date_str = ts.tz_convert("Asia/Tokyo").strftime("%Y-%m-%d")
+            except Exception:
+                date_str = str(ts)[:10]
+            if date_str < today_str:
+                closes.append(float(close))
+        return closes[-1] if closes else None
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(_fetch).result(timeout=15)
+    except Exception:
+        return None
+    finally:
+        ex.shutdown(wait=False)
+
+
 def _fetch_nikkei_change(url_price, http):
-    """日経225の当日騰落率(%)を取得。取得失敗時は None を返す。"""
-    NIKKEI_CODE = "101"   # 立花API: 998407は無効。101が正しい日経225コード
+    """日経225の当日騰落率(%)を取得。取得失敗時は None を返す。
+
+    現在値: 立花API code=101 の pDPP（998407 は無効、101 が正）
+    前日終値: yfinance ^N225（立花は指数だと pPRP を空で返すため）
+    """
+    NIKKEI_CODE = "101"
     quotes = _fetch_price_batch(url_price, [NIKKEI_CODE], http)
     q = quotes.get(NIKKEI_CODE)
-    if not q or not q.get("price") or not q.get("prev_close") or q["prev_close"] <= 0:
+    cur = q.get("price") if q else None
+    if not cur:
         return None
-    return (q["price"] - q["prev_close"]) / q["prev_close"] * 100
+    prev = _nikkei_prev_close_yf()
+    if not prev or prev <= 0:
+        return None
+    return (cur - prev) / prev * 100
 
 
 def _classify_condition(ad_ratio, nikkei_change=None):
