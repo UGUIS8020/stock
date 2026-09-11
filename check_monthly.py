@@ -85,6 +85,24 @@ def main():
             print(f"    {ym}  n={int(r['n']):>3}  勝率{r['win_rate']:>5.1f}%  "
                   f"平均{r['avg_pct']:>+6.2f}%  損益{r['total_yen']:>+11,.0f}円")
 
+        # 2026-09-11: SL率と建玉サイズの月次推移を追加。ユーザー観察（「最近SLが多い／
+        # 金額も大きい」）から、SL円損失は-4%固定×建玉サイズにほぼ比例するため、
+        # SL率だけでなく建玉サイズ自体の推移も定点観測する価値があると判明。
+        print("\n  月別 SL率・建玉サイズ")
+        pos["notional"] = pos["shares"] * pos["buy_price"]
+        gsl = pos.groupby("ym").apply(
+            lambda d: pd.Series({
+                "sl_pct": (d["exit_reason"] == "SL").mean() * 100,
+                "sl_avg_yen": d.loc[d["exit_reason"] == "SL", "pnl_yen"].mean(),
+                "avg_notional": d["notional"].mean(),
+                "max_notional": d["notional"].max(),
+            }), include_groups=False,
+        )
+        for ym, r in gsl.iterrows():
+            sl_yen = f"{r['sl_avg_yen']:+,.0f}円" if pd.notna(r["sl_avg_yen"]) else "  -  "
+            print(f"    {ym}  SL率{r['sl_pct']:>5.1f}%  SL平均{sl_yen:>10}  "
+                  f"建玉平均¥{r['avg_notional']:>10,.0f}  建玉最大¥{r['max_notional']:>10,.0f}")
+
     # 現在の保有
     openp = pd.read_sql("SELECT date, code, name, strategy, shares, buy_price FROM positions WHERE status='open'", conn)
     print(f"\n  現在の保有: {len(openp)}件" + (f"（{', '.join(openp['code'])}）" if len(openp) else ""))
@@ -176,6 +194,14 @@ def main():
                          f"（直近{recent_wp:.0f}% vs 期間平均{base_wp:.0f}%）")
     if any(n > 0 for n in err_by_month.values()):
         flags.append("期間中にエラー（Traceback/KeyError）が発生した月がある。上記②で内容確認")
+    if not pos.empty and "notional" in pos.columns and len(yms := sorted(pos["ym"].unique())) >= 2:
+        recent_n = pos[pos["ym"] == yms[-1]]
+        prior_n = pos[pos["ym"].isin(yms[:-1])]
+        if len(recent_n) >= 3 and len(prior_n) >= 3:
+            if recent_n["notional"].mean() > prior_n["notional"].mean() * 1.5:
+                flags.append(f"直近月の平均建玉サイズが以前より1.5倍以上に拡大"
+                             f"（直近¥{recent_n['notional'].mean():,.0f} vs 以前¥{prior_n['notional'].mean():,.0f}）"
+                             f"。SLの円損失もこれに比例するため意図的なサイジングか確認")
     if flags:
         for f in flags:
             print(f"  ⚠️ {f}")
