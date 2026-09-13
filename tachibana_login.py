@@ -1,7 +1,7 @@
 """
-tachibana_login.py - 立花証券API v4r9 ログイン
+tachibana_login.py - 立花証券API v4r10 ログイン
 
-v4r9認証フロー（2026-06-27以降）:
+認証フロー（v4r9 と同一、2026-06-27以降）:
   - 電話認証: 不要（v4r8廃止と同時に廃止）
   - CLMAuthLoginRequest with sAuthId（設定画面で取得した認証ID）
   - レスポンスのURLは公開鍵暗号化済み → 秘密鍵で復号して保存
@@ -23,7 +23,7 @@ load_dotenv()
 _BASE_DIR        = Path(__file__).parent
 LOGIN_FILE       = _BASE_DIR / "tachibana_login_response.json"
 PRIVATE_KEY_FILE = _BASE_DIR / "tatibana_key" / "e_api_private_key.pem"
-API_BASE         = "https://kabuka.e-shiten.jp/e_api_v4r9/"
+API_BASE         = "https://kabuka.e-shiten.jp/e_api_v4r10/"
 AUTH_ID          = os.getenv("TACHIBANA_AUTH_ID", "")
 
 
@@ -120,7 +120,7 @@ def do_login() -> bool:
 
 
 if __name__ == "__main__":
-    print("=== 立花証券e支店API v4r9 ログイン ===")
+    print("=== 立花証券e支店API v4r10 ログイン ===")
     print()
 
     if not AUTH_ID:

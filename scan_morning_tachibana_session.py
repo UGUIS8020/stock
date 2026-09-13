@@ -21,7 +21,9 @@ from pathlib import Path
 
 _BASE_DIR            = Path(__file__).parent
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
-TACHIBANA_API_BASE   = "https://kabuka.e-shiten.jp/e_api_v4r9/"
+# v4r10。※ _tachibana_login()（ID/パスワード＋電話認証）は旧仕様の残置コードで
+# 現行フローでは未使用（実ログインは tachibana_login.py の sAuthId＋秘密鍵）。
+TACHIBANA_API_BASE   = "https://kabuka.e-shiten.jp/e_api_v4r10/"
 TACHIBANA_USER_ID    = os.getenv("TACHIBANA_LOGIN_ID")
 TACHIBANA_PASSWORD   = os.getenv("TACHIBANA_LOGIN_PASS")
 
