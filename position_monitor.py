@@ -367,10 +367,17 @@ def main():
         if not force_closed and now_min >= FORCE_CLOSE_MIN:
             force_closed = True
             prev_trading_day = _prev_trading_day(TODAY)
+            # 2026-09-14: 単日戦略(A/D/AN/AS)が当日の引け決済に失敗すると
+            # （p_no競合等のAPIエラーで実例あり）、翌営業日は
+            # 「date==TODAY」でも「date<prev_trading_day」でもない1日分の
+            # 隙間に落ちて自動救済されず、さらに1日持ち越されていた
+            # （7453は2泊保有のBなのでprev_trading_day条件で翌日に救済される一方、
+            # 同日発注の3182はAS＝単日戦略のため救済条件に当たらなかった）。
+            # 単日戦略はそもそも当日限りが前提なので、日付を問わず対象に含める。
             prev_positions = [
                 p for p in load_positions()
                 if p["date"] < prev_trading_day
-                or (p["date"] == TODAY and p.get("strategy") in ("A", "D", "AN", "AS"))
+                or p.get("strategy") in ("A", "D", "AN", "AS")   # 単日戦略は日付を問わず対象（取り残し救済込み）
                 or p["code"] in MANUAL_CLOSE_CODES
             ]
             if prev_positions:
