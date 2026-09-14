@@ -75,12 +75,9 @@ def _check_tachibana_session(url_request):
         p_sd = (f"{t.year}.{t.month:02}.{t.day:02}"
                 f"-{t.hour:02}:{t.minute:02}:{t.second:02}"
                 f".{t.microsecond // 1000:03}")
-        try:
-            p_no_file = Path(TACHIBANA_LOGIN_FILE).parent / "out" / "last_p_no.txt"
-            p_no = str(int(p_no_file.read_text().strip()) + 1)
-            p_no_file.write_text(p_no)
-        except Exception:
-            p_no = str(int(time.time()))
+        # 2026-09-14: ロック無しの直接read/writeはp_no競合(p_errno=6)の原因になるため
+        # tachibana_order の排他制御付き採番に統一。
+        p_no = tachibana_order._next_p_no()
         params = (
             '{'
             f'"p_no":"{p_no}",'
@@ -216,11 +213,11 @@ def fetch_tachibana_prices(url_price, codes):
     batch_size = 120
     http = urllib3.PoolManager()
     quotes = {}
-    p_no_file = Path("out/last_p_no.txt")
-    try:
-        p_no_base = int(p_no_file.read_text().strip()) + 1
-    except Exception:
-        p_no_base = int(time.time())
+    # 2026-09-14: バッチ分割ごとにロック無しでout/last_p_no.txtを直接read/write
+    # していたため、他プロセスとの並走時にp_no競合(p_errno=6)を起こしていた。
+    # ロックを1回だけ取得してチャンク数分をまとめて確保する方式に変更。
+    n_chunks = (len(codes) + batch_size - 1) // batch_size
+    p_nos = tachibana_order._next_p_no_batch(n_chunks)
     for i, start in enumerate(range(0, len(codes), batch_size)):
         batch     = codes[start:start + batch_size]
         code_list = ",".join(str(c) for c in batch)
@@ -230,7 +227,7 @@ def fetch_tachibana_prices(url_price, codes):
                      f".{t.microsecond // 1000:03}")
         params = (
             "{"
-            f'"p_no":"{p_no_base + i}",'
+            f'"p_no":"{p_nos[i]}",'
             f'"p_sd_date":"{p_sd_date}",'
             '"sCLMID":"CLMMfdsGetMarketPrice",'
             f'"sTargetIssueCode":"{code_list}",'
@@ -239,7 +236,6 @@ def fetch_tachibana_prices(url_price, codes):
             "}"
         )
         try:
-            p_no_file.write_text(str(p_no_base + i))
             resp = http.request("GET", url_price + "?" + params,
                                 timeout=urllib3.Timeout(connect=3, read=5))
             tachibana_order.log_api_call("scan_morning_session.fetch_prices")

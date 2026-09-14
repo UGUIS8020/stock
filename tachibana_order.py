@@ -117,6 +117,45 @@ def _next_p_no():
     return str(_p_no)
 
 
+def _next_p_no_batch(n):
+    """n個の連番p_noを一括予約する（バッチAPI呼び出し用）。
+
+    2026-09-14: market_watch.py/scan_morning_tachibana_session.py の
+    fetch_tachibana_prices 系がバッチ分割ごとに out/last_p_no.txt を
+    ロック無しで直接read→+1→writeしていたため、position_monitor/closing_watch
+    が同時にAPIを叩く時間帯（引け前後）に p_no 競合(p_errno=6
+    「引数(p_no:[X] <= 前要求.p_no:[Y])エラー」)で発注が失敗する事象が発生
+    （2026-09-14実弾、7453・3182の引け決済2件が失敗し持ち越しになった）。
+    ロックを1回だけ取得してn個分をまとめて確保することで、ループ内で
+    毎回ロックを取り直すオーバーヘッドを避けつつ排他性を保つ。
+    戻り値: str のリスト、長さn（先頭が最小のp_no）。
+    """
+    global _p_no
+    if n <= 0:
+        return []
+    got_lock = _acquire_p_no_lock(timeout=5.0)
+    try:
+        if got_lock:
+            try:
+                saved = int(_P_NO_FILE.read_text().strip())
+                _p_no = max(_p_no, saved) + 1
+            except Exception:
+                _p_no += 1
+            base = _p_no
+            _p_no += (n - 1)
+            try:
+                _P_NO_FILE.write_text(str(_p_no))
+            except Exception:
+                pass
+        else:
+            base = max(_p_no + 1, int(time.time() * 1000))
+            _p_no = base + (n - 1)
+    finally:
+        if got_lock:
+            _release_p_no_lock()
+    return [str(base + i) for i in range(n)]
+
+
 def _p_sd_date():
     t = datetime.now()
     return (f"{t.year}.{t.month:02}.{t.day:02}"
