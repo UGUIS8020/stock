@@ -1354,9 +1354,14 @@ def main(start_now=False):
     seen_codes: set = set()
     candidates = [c for c in candidates if not (c["code"] in seen_codes or seen_codes.add(c["code"]))]
 
+    # 2026-09-15修正: 以前はここで「朝の予測」がPANICなら即終了していたため、
+    # watch_loop内部の9:03実測再判定（_refresh_condition_905、PANIC→NORMAL/STRONGへの
+    # 補正も可能）に一度も到達できなかった（8/19, 8/31, 9/15で実際に発生）。
+    # closing_watch.py（戦略B）は2026-08-19に同じ理由でPANIC予測でも常時実行する設計へ
+    # 修正済み。decide_timing()はPANIC地合いのcandidateには「全見送り」を返す安全設計なので、
+    # 実測でもPANICが確定した場合は自然に何も発注せず9:30まで監視するだけで終わる。
     if condition == "PANIC":
-        print("  🚨 地合いPANIC → 監視を終了します")
-        return
+        print("  🚨 朝の予測地合いはPANICですが、9:03の実測再判定まで監視を継続します")
 
     market_info = load_market_info()
 

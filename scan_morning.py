@@ -692,13 +692,26 @@ def main():
     # 9:03の実測地合い補正でNORMAL/STRONGに上方修正されるケースが多いため
     # （market_watch.py の load_candidates が保留銘柄として拾い、9:03に再判定する）。
     # BUY/CAUTIONが既にある、またはWEAK日でスコア5.0以上のA候補がいれば起動する。
+    #
+    # 2026-09-15修正: 以前は `and condition != "PANIC"` でPANIC予測の朝は
+    # market_watch.py自体を起動しなかった。しかしAN/AS候補（scan_an_candidates/
+    # scan_as_candidates）は地合いを問わず judgment="BUY" で保存され、「実際の
+    # 発注可否は発注側（market_watch.pyの9:03実測再判定）で確認する」設計に
+    # なっている。closing_watch（戦略B）は2026-08-19に同じ理由でPANIC予測でも
+    # 常時起動する設計へ修正済み（実際8/31はPANIC予測→実測NORMALだった）が、
+    # market_watch.py側はPANICのときだけ起動自体をスキップしており、AN/AS/戦略Aが
+    # 9:03の実測補正のチャンスを一切得られないまま丸1日不戦敗になっていた
+    # （8/19, 8/31, 9/15の3回確認）。closing_watchと同じ考え方に揃え、起動判定から
+    # PANIC除外を外す。実測でPANICが確定した場合はmarket_watch.py内部の
+    # 9:03再判定（decide_timing / 1357行目付近の condition=="PANIC" 監視終了）が
+    # 安全側に倒す。
     has_buy = any(r["judgment"] in ("BUY", "CAUTION") for r in candidate_rows)
     has_pending_weak = (
         condition == "WEAK" and
         any(r["judgment"] == "PASS" and r.get("strategy") == "A" and float(r.get("score") or 0) >= 5.0
             for r in candidate_rows)
     )
-    if (has_buy or has_pending_weak) and condition != "PANIC":
+    if has_buy or has_pending_weak:
         # market_watch は 09:00〜09:30 稼働。起動〜09:30 で最長 ~50分なので
         # 75分でハード打ち切り（ハング時に closing_watch / scan_daily をブロックしない）。
         _run_script_teed("market_watch.py", "market_watch_live.txt", 75 * 60,
