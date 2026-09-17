@@ -166,12 +166,24 @@ HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天�
                             # 株数を縮小する（300株換算で約3,333円が実質的な切替点。
                             # AN/AS/順張りは100株のため約10,000円が切替点となり、
                             # 既存のMAX_PRICE_A/AS候補フィルターとほぼ整合するため実質影響小）。
+                            # 2026-09-17判明: 上記の縮小は`max(lots,1)*100`という除算方式で、
+                            # price>10,000円ではint()が0にfloorし下限100株が常に優先されるため
+                            # 上限が機能しなくなるバグがあった。daytime.py(戦略D)で堀場製作所
+                            # (22,220円→100株×22,220円=222.2万円、意図の2.2倍)の実発注が発生し
+                            # 発覚・修正済み。A本体/ASは候補側にMAX_PRICE_A/AS=10,000の上限
+                            # フィルターがあるため実際には未到達だったが、AN候補には価格上限
+                            # フィルターが無く、この関数の判定が唯一の安全弁だった。closing_watch.py
+                            # (戦略B)の2026-09-05修正と同じ固定株数テーブル方式に統一する。
+MAX_PRICE_HIGH_CAP = 20_000  # 100株の最低ロットでも建玉が過大になる価格帯(¥20,000以上)は
+                            # 発注対象外(None)にする（closing_watch.py MAX_PRICE_B、
+                            # daytime.py MAX_PRICE_D と同じ考え方）。
 
 
 def calc_shares(price, strategy="A", is_forward=False):
-    """価格に応じた発注株数を返す（100株単位）。
+    """価格に応じた発注株数を返す（100株単位）。None なら発注対象外（MAX_PRICE_HIGH_CAP以上）。
     CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
-    HIGH_PRICE_CAP_AMOUNTを超える高値株は金額ベースで株数を縮小する。
+    HIGH_PRICE_CAP_AMOUNTを超える高値株は固定株数テーブルで縮小する
+    （closing_watch.py/daytime.pyと同方式、2026-09-17統一）。
     strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。
     is_forward=True（戦略A本体の順張りのみ）は縮小建玉を使う。"""
     if strategy == "AN":
@@ -182,13 +194,22 @@ def calc_shares(price, strategy="A", is_forward=False):
         default_shares, max_order_amount = FORWARD_A_DEFAULT_SHARES, FORWARD_A_MAX_ORDER_AMOUNT
     else:
         default_shares, max_order_amount = DEFAULT_SHARES, MAX_ORDER_AMOUNT
+
     if price and price < CHEAP_THRESHOLD:
         lots = int(max_order_amount / price / 100)
         return max(lots, 1) * 100
-    if price and price * default_shares > HIGH_PRICE_CAP_AMOUNT:
-        lots = int(HIGH_PRICE_CAP_AMOUNT / price / 100)
-        return max(lots, 1) * 100
-    return default_shares
+
+    if not price or price >= MAX_PRICE_HIGH_CAP:
+        return None
+
+    if price * default_shares <= HIGH_PRICE_CAP_AMOUNT:
+        return default_shares
+
+    # 固定株数テーブルで縮小。AN/AS/順張り(default_shares=100)は既に最低ロットのため
+    # このテーブルに来ても不変（100株のまま、MAX_PRICE_HIGH_CAPが唯一の安全弁）。
+    if default_shares >= 300 and price < 10_000:
+        return 200
+    return 100
 
 
 def forward_a_limit_reached():
@@ -818,6 +839,10 @@ def confirm_and_order(candidate, price, url_request, condition=None, entry_chang
 
     is_forward = strat == "A" and entry_change_pct is not None and entry_change_pct >= 0
     shares    = calc_shares(rec_price or price, strategy=strat, is_forward=is_forward)
+    if shares is None:
+        print(f"  ⚠️  [{code}] {name}: 価格{(rec_price or price):,.0f}円が上限"
+              f"{MAX_PRICE_HIGH_CAP:,}円以上 → 発注スキップ")
+        return
     estimated = int((rec_price or price or 0) * shares)
 
     # 買い余力確認
