@@ -84,14 +84,30 @@ DAYTIME_TRADING       = True      # False にすると監視のみ（発注な�
 MAX_ORDER_AMOUNT      = 300_000   # 安い株の1発注上限額（戦略Bと同水準）
 DEFAULT_SHARES        = 200       # 高値株のデフォルト株数（戦略Bと同水準）
 CHEAP_THRESHOLD       = 1_500     # この価格未満は金額ベースで株数計算（戦略Bと同水準）
-HIGH_PRICE_CAP_AMOUNT = 1_000_000  # 2026-08-28新設: 高値株の建玉青天井問題を受けて再導入。
-                    # ニッポン高度紙工業(6,735円→135万円)・芝浦メカトロニクス(4,130円→82.6万円)
-                    # のような高値株で建玉が過大化していた。200株×価格が100万円を超える場合のみ、
-                    # 金額ベースで株数を縮小する（200株換算で約5,000円が実質的な切替点）。
+# 2026-08-28、高値株の建玉青天井対策として HIGH_PRICE_CAP_AMOUNT(¥100万)で
+# `max(100, int(cap/price/100)*100)`という除算ベースの株数縮小を導入したが、
+# 2026-09-17判明: price>10,000円ではint()が0にfloorし、max(100,0)の下限が
+# 常に優先されるため上限が機能しなくなっていた（堀場製作所22,220円→100株×
+# 22,220円=222.2万円、意図の2.2倍で発注される事故が発生）。closing_watch.py
+# (戦略B)は2026-09-05に同じ問題を発見し、除算ベースの縮小を廃止して固定株数
+# テーブル+MAX_PRICE上限に切替済み。calc_shares_d()で同じ方式に揃える。
+MAX_PRICE_D = 20_000  # 100株の最低ロットでも建玉が跳ねすぎる価格帯(¥20,000以上)は
+                    # 候補から除外する（closing_watch.pyのMAX_PRICE_Bと同じ考え方）。
 MAX_DAYTIME_POSITIONS = 5         # 日中最大ポジション数（戦略A とは別カウント。2026-08-05: 保有過多につき10→5）
 MIN_VOLUME            = 50_000    # 前日出来高フィルター（5万株未満は除外）
 LIMIT_ORDER           = False     # 成行発注（指値は受付エラー多発・モメンタム戦略には不向きのため 2026-06-25 変更）
 LIMIT_WAIT_SECS       = 30        # 指値約定確認の待機秒数
+
+
+def calc_shares_d(price):
+    """価格帯別の発注株数を返す。None なら発注対象外（MAX_PRICE_D以上）。
+    closing_watch.py の calc_shares と同じ固定株数テーブル方式（2026-09-17導入）。
+    price < CHEAP_THRESHOLD の金額ベース計算は呼び出し側で別途処理する。"""
+    if price is None or price >= MAX_PRICE_D:
+        return None
+    if price < 5_000:
+        return DEFAULT_SHARES   # 200株（建玉 〜¥1.0M）
+    return 100                  # 建玉 ¥0.5M〜¥2.0M
 
 # ── シグナル条件（analyze_a.py 統計分析結果に基づく）──
 # 2026-07-24: evolve_d.py GA検証で上位戦略が軒並みSTRONG限定だった一方、
@@ -777,10 +793,12 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
                 continue
             if sig["price"] < CHEAP_THRESHOLD:
                 shares = max(100, int(MAX_ORDER_AMOUNT / sig["price"] / 100) * 100)
-            elif sig["price"] * DEFAULT_SHARES > HIGH_PRICE_CAP_AMOUNT:
-                shares = max(100, int(HIGH_PRICE_CAP_AMOUNT / sig["price"] / 100) * 100)
             else:
-                shares = DEFAULT_SHARES
+                shares = calc_shares_d(sig["price"])
+                if shares is None:
+                    print(f"     ⚠️  価格{sig['price']:,.0f}円が上限{MAX_PRICE_D:,}円以上 → 発注スキップ")
+                    signaled.add(code)
+                    continue
             mkt_code = db.get_market_code_db(code)
             order_type = "指値" if LIMIT_ORDER else "成行"
             print(f"     発注方式: {order_type} @ {sig['price']:,.0f}円")
