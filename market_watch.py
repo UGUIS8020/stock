@@ -217,9 +217,9 @@ def forward_a_limit_reached():
     MAX_POSITIONS(15件)とは別に、順張り(entry_change_pct>=0)の同時保有数だけを
     数える。逆張りに常に枠を残すための追加チェック（2026-08-25導入）。"""
     open_pos_a = db.load_open_positions(strategy="A")
-    if open_pos_a.empty:
+    if not open_pos_a:
         return False
-    n_forward = (open_pos_a["entry_change_pct"] >= 0).sum()
+    n_forward = sum(1 for p in open_pos_a if p.get("entry_change_pct", 0) >= 0)
     return n_forward >= MAX_POSITIONS_A_FORWARD
 
 
