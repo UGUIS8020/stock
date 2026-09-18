@@ -3,11 +3,13 @@
 毎月チェックするためのスクリーニングツール。オンデマンド実行専用（自動送信はしない）。
 
 方式:
-    1. 直近の全期間データを「選定期間」(古い方、約75%)と「検証期間」(新しい方、約25%)に分割
+    1. 直近の全期間データを「選定期間」(古い方、約40%)と「検証fold1」「検証fold2」
+       (残り60%を2等分)に分割
     2. 選定期間の統計(売買代金・年率ボラティリティ・最大下落率)だけで
-       「大型・購入しやすい価格・低ボラ」上位20銘柄を選ぶ(検証期間のデータは選定に使わない)
-    3. 検証期間でナンピン戦略を実際にシミュレーションし、ROI(投入資金に対する利回り)で
-       ランキングする(選定に使っていない期間での事後検証)
+       「大型・購入しやすい価格・低ボラ」上位20銘柄を選ぶ(検証foldのデータは選定に使わない)
+    3. fold1・fold2それぞれでナンピン戦略を実際にシミュレーションしてROI(投入資金に
+       対する利回り)を計算し、「両fold平均 − fold間のブレ」でランキングする
+       (選定に使っていない2つの独立した期間で一貫して機能するかを見る)
 
 実行方法:
     python analyze/screen_nanpin_candidates.py
@@ -92,9 +94,11 @@ def drawdown_recovery_check(closes):
     }
 
 
-def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0, max_buys=30):
+def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0, max_buys=30, warmup=0):
     """下落トレンド(終値<trend_n日MA)中は buy_interval営業日ごとに買い増し、
-    平均取得単価×(1+tp_pct%)まで戻ったら全株売却する。"""
+    平均取得単価×(1+tp_pct%)まで戻ったら全株売却する。
+    warmup: 先頭warmup件は移動平均の計算(closesへの蓄積)にのみ使い、
+    売買判断の対象外にする(fold境界をまたいだMAの準備用、2026-09-18追加)。"""
     closes = []
     shares_held = 0
     total_cost = 0.0
@@ -106,7 +110,7 @@ def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0
     for i, bar in enumerate(bars):
         closes.append(bar['Close'])
         ma = sma(closes, trend_n)
-        if ma is None:
+        if ma is None or i < warmup:
             continue
         downtrend = bar['Close'] < ma
 
@@ -204,13 +208,23 @@ def main():
           f"→ 低ボラ上位{len(selected)}銘柄を検証\n")
 
     def fold_avg_roi(code, dates):
-        """1つのfoldでTP+1/2/3%を回し、平均ROIと最大投入資金・末端含み損益を返す。"""
-        test_bars = [b for b in by_code[code] if b['Date'] in dates]
+        """1つのfoldでTP+1/2/3%を回し、平均ROIと最大投入資金・末端含み損益を返す。
+        fold開始直前の実データ(最大20営業日)を移動平均のウォームアップとして
+        渡す。渡さないとfold冒頭の約1ヶ月が移動平均未計算で売買判断できなく
+        なってしまうため(2026-09-18修正)。"""
+        all_bars = by_code[code]
+        fold_indices = [i for i, b in enumerate(all_bars) if b['Date'] in dates]
+        if not fold_indices:
+            return 0.0, 0.0, None
+        start_idx, end_idx = fold_indices[0], fold_indices[-1]
+        warmup = min(20, start_idx)
+        test_bars = all_bars[start_idx - warmup: end_idx + 1]
+
         roi_by_tp = {}
         max_cap_by_tp = {}
         unresolved_pct = None
         for tp in (1.0, 2.0, 3.0):
-            cycles, open_pos, max_cap = backtest_nanpin(test_bars, tp_pct=tp)
+            cycles, open_pos, max_cap = backtest_nanpin(test_bars, tp_pct=tp, warmup=warmup)
             pnl = sum(x['pnl_yen'] for x in cycles)
             roi_by_tp[tp] = pnl / max_cap * 100 if max_cap else 0.0
             max_cap_by_tp[tp] = max_cap
