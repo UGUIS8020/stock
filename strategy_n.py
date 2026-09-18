@@ -51,6 +51,10 @@ MAX_CAMPAIGN_CAPITAL = 2_000_000   # 1銘柄あたりの投入上限(円)。ユ�
 MAX_BUYS_HARD_CAP    = 20          # 資金上限とは独立のバックストップ
 
 ACT_HOUR, ACT_MIN = 15, 0   # closing_watch.pyのSCAN_STARTと同じタイミングに合わせる
+SELL_POLL_INTERVAL_SEC = 60  # 2026-09-18追加: 15:00までの間、この間隔で売却判定だけ繰り返す
+                              # （買い判定は引き続き15:00頃の1回のみ。日中の一瞬のTP到達を
+                              # 拾い漏らす既知の制約を緩和するための追加、position_monitor.py
+                              # と同様のポーリング方式）
 
 
 def load_tachibana_url():
@@ -232,20 +236,28 @@ def main(start_now=False):
         print("❌ Tachibana APIにログインしていません。scan_morning.py を先に実行してください。")
         return
 
+    codes = [c for c, _ in CANDIDATES]
     now = datetime.now(JST)
+
     if not start_now and (now.hour < ACT_HOUR or (now.hour == ACT_HOUR and now.minute < ACT_MIN)):
         target = now.replace(hour=ACT_HOUR, minute=ACT_MIN, second=0, microsecond=0)
         wait = int((target - now).total_seconds())
-        print(f"  ⏰ {ACT_HOUR}:{ACT_MIN:02d}まで {wait // 60}分{wait % 60}秒 待機します...")
+        print(f"  ⏰ {ACT_HOUR}:{ACT_MIN:02d}まで {wait // 60}分{wait % 60}秒、"
+              f"{SELL_POLL_INTERVAL_SEC}秒間隔で売却判定のみ実施します...\n")
         while True:
             now = datetime.now(JST)
             if now.hour > ACT_HOUR or (now.hour == ACT_HOUR and now.minute >= ACT_MIN):
                 break
-            time.sleep(10)
+            quotes = fetch_prices(url_price, codes)
+            for code, name in CANDIDATES:
+                price = quotes.get(code)
+                if price:
+                    try_sell(code, name, price, url_request)
+            time.sleep(SELL_POLL_INTERVAL_SEC)
+        print()
 
-    codes = [c for c, _ in CANDIDATES]
+    # ── 15:00頃の最終判定（売却チェック＋買い判定） ──
     quotes = fetch_prices(url_price, codes)
-
     for code, name in CANDIDATES:
         price = quotes.get(code)
         if not price:
