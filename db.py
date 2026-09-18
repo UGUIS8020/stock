@@ -996,17 +996,13 @@ def get_daytime_signals(date=None):
 def get_open_nanpin_campaign(code):
     """指定銘柄のstatus='open'キャンペーンを1件返す（無ければNone）。"""
     conn = get_conn()
+    conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT * FROM nanpin_campaigns WHERE code=? AND status='open' ORDER BY campaign_id DESC LIMIT 1",
         [str(code)]
     ).fetchone()
     conn.close()
-    if row is None:
-        return None
-    cols = ["campaign_id", "code", "name", "status", "opened_date", "shares_held",
-            "total_cost", "closed_date", "sell_price", "sell_time", "sell_order_no",
-            "realized_pnl_yen", "realized_pnl_pct", "account_type", "zyoutoeki_c"]
-    return dict(zip(cols, row))
+    return dict(row) if row is not None else None
 
 
 def create_nanpin_campaign(code, name, opened_date, account_type="genbutsu", zyoutoeki_c="1"):

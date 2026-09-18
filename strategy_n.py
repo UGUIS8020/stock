@@ -10,9 +10,11 @@ strategy_n.py - 戦略N（ナンピン戦略）パイロット: 日本精工・�
     (PRIMARY KEY (date, code)、単発売買前提)には一切触れない。
 
 【既知の制約（パイロット段階での意図的な簡略化）】
-    売却判定は1日1回・実行時点の現在値のみで行う。バックテストは「日中の
-    高値がTP到達したら約定」を前提にしているため、日中に一瞬TPへ到達して
-    その後押し戻された場合はここでは検知できない（保守的な簡略化）。
+    売却判定は市場が開いている間、SELL_POLL_INTERVAL_SEC(15分)間隔で繰り返す。
+    バックテストは「日中の高値がTP到達したら約定」を前提にしているため、
+    ポーリング間隔の間に一瞬TPへ到達してその後押し戻された場合は検知できない
+    （常時監視ではないための保守的な簡略化）。買い判定は終値ベースのため
+    15:00頃の1回のみ。
 
 実行方法:
     python strategy_n.py        # 15:00まで待機して自動開始
@@ -115,10 +117,17 @@ def fetch_prices(url_price, codes):
 
 def calc_ma20(code, current_price):
     """直近19日分の終値(daily_prices)＋当日の現在値の20点で移動平均を出す。
-    データ不足時はNoneを返す。"""
-    hist = db.get_stock_history(code, days=TREND_N - 1 + 5)
-    if hist is None or len(hist) < TREND_N - 1:
+    データ不足時はNoneを返す。
+    2026-09-18修正: 16:45のscan_daily.py実行後(または翌日以降)に本スクリプトを
+    再実行すると、当日の終値がdaily_pricesに既に記録済みのため、それを履歴
+    としてもcurrent_priceとしても二重にカウントしてしまうバグがあった。
+    当日日付の行を明示的に除外することで、実行タイミングに依存せず正しい
+    20日移動平均になるよう修正。"""
+    hist = db.get_stock_history(code, days=TREND_N + 5)
+    if hist is None or hist.empty:
         return None
+    today_str = datetime.now(JST).strftime("%Y-%m-%d")
+    hist = hist[hist["Date"] < today_str]
     closes = hist["Close"].dropna().tolist()[-(TREND_N - 1):]
     if len(closes) < TREND_N - 1:
         return None
