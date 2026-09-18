@@ -160,13 +160,19 @@ def main():
     for r in price_rows:
         by_code[r['code']].append(dict(r))
 
+    # 2026-09-18改善: 検証期間を1つ(直近のみ)から2つ(独立したfold)に分割。
+    # 単一の検証期間だと「たまたまその期間の相場が良かっただけ」を排除できない
+    # ため、時系列で連続する2つのfoldそれぞれでROIを計算し、両方の一貫性を見る。
     all_dates = [r['Date'] for r in max(by_code.values(), key=len)]
     n_total = len(all_dates)
-    split_idx = int(n_total * 0.75)
-    screen_dates = set(all_dates[:split_idx])
-    valid_dates = set(all_dates[split_idx:])
-    print(f"選定期間: {all_dates[0]} 〜 {all_dates[split_idx - 1]} ({split_idx}日)")
-    print(f"検証期間: {all_dates[split_idx]} 〜 {all_dates[-1]} ({n_total - split_idx}日)  ※選定には未使用")
+    split1 = int(n_total * 0.40)   # 選定期間(過去40%)
+    split2 = int(n_total * 0.70)   # 検証fold1(次の30%) / fold2(直近30%)
+    screen_dates = set(all_dates[:split1])
+    fold1_dates = set(all_dates[split1:split2])
+    fold2_dates = set(all_dates[split2:])
+    print(f"選定期間: {all_dates[0]} 〜 {all_dates[split1 - 1]} ({split1}日)")
+    print(f"検証fold1: {all_dates[split1]} 〜 {all_dates[split2 - 1]} ({split2 - split1}日)  ※選定には未使用")
+    print(f"検証fold2: {all_dates[split2]} 〜 {all_dates[-1]} ({n_total - split2}日)  ※選定には未使用")
     print(f"購入上限: 100株あたり{args.max_price:,.0f}円(株価{max_share_price:,.0f}円以下)\n")
 
     candidates = []
@@ -197,10 +203,9 @@ def main():
     print(f"大型株プール: {len(large_cap_pool)}銘柄 → 購入しやすい価格帯: {len(affordable_pool)}銘柄 "
           f"→ 低ボラ上位{len(selected)}銘柄を検証\n")
 
-    results = []
-    for c in selected:
-        code = c['code']
-        test_bars = [b for b in by_code[code] if b['Date'] in valid_dates]
+    def fold_avg_roi(code, dates):
+        """1つのfoldでTP+1/2/3%を回し、平均ROIと最大投入資金・末端含み損益を返す。"""
+        test_bars = [b for b in by_code[code] if b['Date'] in dates]
         roi_by_tp = {}
         max_cap_by_tp = {}
         unresolved_pct = None
@@ -211,20 +216,35 @@ def main():
             max_cap_by_tp[tp] = max_cap
             if open_pos:
                 unresolved_pct = open_pos['unrealized_pnl_pct']
-        avg_roi = sum(roi_by_tp.values()) / len(roi_by_tp)
+        avg = sum(roi_by_tp.values()) / len(roi_by_tp)
+        return avg, max_cap_by_tp[3.0], unresolved_pct
+
+    results = []
+    for c in selected:
+        code = c['code']
+        roi_fold1, cap_fold1, unresolved1 = fold_avg_roi(code, fold1_dates)
+        roi_fold2, cap_fold2, unresolved2 = fold_avg_roi(code, fold2_dates)
+        # 2026-09-18改善: 検証を2fold化し、単純平均ではなく
+        # 「両fold平均 − fold間のブレ」でランキングする(ブレが大きい=再現性が
+        # 低い銘柄を、見かけの平均ROIだけで高評価しないようにするため)。
+        combined_avg = (roi_fold1 + roi_fold2) / 2
+        consistency_penalty = abs(roi_fold1 - roi_fold2) / 2
+        score = combined_avg - consistency_penalty
+        unresolved_pct = min((v for v in (unresolved1, unresolved2) if v is not None), default=None)
         current_price = by_code[code][-1]['Close']
         full_closes = [b['Close'] for b in by_code[code]]
         recovery = drawdown_recovery_check(full_closes)
         results.append({
-            **c, 'current_price': current_price, 'avg_roi': avg_roi,
-            'roi_by_tp': roi_by_tp, 'max_cap': max_cap_by_tp[3.0], 'unresolved_pct': unresolved_pct,
+            **c, 'current_price': current_price,
+            'roi_fold1': roi_fold1, 'roi_fold2': roi_fold2, 'score': score,
+            'max_cap': max(cap_fold1, cap_fold2), 'unresolved_pct': unresolved_pct,
             **recovery,
         })
 
-    results.sort(key=lambda x: -x['avg_roi'])
+    results.sort(key=lambda x: -x['score'])
 
     print(f"{'コード':<6}{'銘柄名':<16}{'現在値':>8}{'Vol':>7}{'最大DD':>8}"
-          f"{'ROI+1%':>8}{'ROI+2%':>8}{'ROI+3%':>8}{'平均ROI':>9}{'必要資金':>10}")
+          f"{'ROI(fold1)':>11}{'ROI(fold2)':>11}{'スコア':>8}{'必要資金':>10}")
     unrecovered = []
     for r in results:
         note = ""
@@ -234,8 +254,8 @@ def main():
             note += f"  ⚠️最大下落から未回復(現在値は過去最高値比{r['off_all_time_high_pct']:.1f}%)"
             unrecovered.append(r)
         print(f"{r['code']:<6}{r['name'][:14]:<16}{r['current_price']:>7,.0f}円{r['vol_annualized']:>6.1f}%"
-              f"{r['max_dd']:>7.1f}%{r['roi_by_tp'][1.0]:>7.1f}%{r['roi_by_tp'][2.0]:>7.1f}%"
-              f"{r['roi_by_tp'][3.0]:>7.1f}%{r['avg_roi']:>8.1f}%{r['max_cap']:>9,.0f}円{note}")
+              f"{r['max_dd']:>7.1f}%{r['roi_fold1']:>10.1f}%{r['roi_fold2']:>10.1f}%"
+              f"{r['score']:>7.1f}%{r['max_cap']:>9,.0f}円{note}")
 
     if unrecovered:
         print(f"\n⚠️ {len(unrecovered)}銘柄が、過去最大の下落からまだ一度も高値を更新できていません"
