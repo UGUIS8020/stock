@@ -56,6 +56,42 @@ def efficiency_ratio_stats(closes):
     return vol_annualized, max_dd
 
 
+def drawdown_recovery_check(closes):
+    """最大下落が「下落前の高値」まで戻ったこと(=循環的な下落)があるかを判定する。
+    トラフ以降ずっと下落前高値を上回れていない銘柄は、構造的な右肩下がりの疑いとして
+    フラグを立てる（2026-09-18追加、日本精工の目視チェックを自動化）。
+    全期間(選定期間+検証期間)の値動きを使う: これは銘柄選定のROIランキングに使う
+    統計とは別の「安全確認」目的のため、選定期間限定にする必要はない。
+    """
+    if len(closes) < 2:
+        return {'recovered_from_max_dd': True, 'days_to_recover': None, 'off_all_time_high_pct': 0.0}
+
+    peak = closes[0]
+    max_dd = 0.0
+    dd_peak_price = closes[0]
+    dd_trough_idx = 0
+    for i, c in enumerate(closes):
+        if c > peak:
+            peak = c
+        dd = (c - peak) / peak * 100
+        if dd < max_dd:
+            max_dd = dd
+            dd_peak_price = peak
+            dd_trough_idx = i
+
+    recovery_idx = next(
+        (i for i in range(dd_trough_idx, len(closes)) if closes[i] >= dd_peak_price), None
+    )
+    all_time_high = max(closes)
+    off_high_pct = (closes[-1] - all_time_high) / all_time_high * 100
+
+    return {
+        'recovered_from_max_dd': recovery_idx is not None,
+        'days_to_recover': (recovery_idx - dd_trough_idx) if recovery_idx is not None else None,
+        'off_all_time_high_pct': off_high_pct,
+    }
+
+
 def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0, max_buys=30):
     """下落トレンド(終値<trend_n日MA)中は buy_interval営業日ごとに買い増し、
     平均取得単価×(1+tp_pct%)まで戻ったら全株売却する。"""
@@ -177,22 +213,35 @@ def main():
                 unresolved_pct = open_pos['unrealized_pnl_pct']
         avg_roi = sum(roi_by_tp.values()) / len(roi_by_tp)
         current_price = by_code[code][-1]['Close']
+        full_closes = [b['Close'] for b in by_code[code]]
+        recovery = drawdown_recovery_check(full_closes)
         results.append({
             **c, 'current_price': current_price, 'avg_roi': avg_roi,
             'roi_by_tp': roi_by_tp, 'max_cap': max_cap_by_tp[3.0], 'unresolved_pct': unresolved_pct,
+            **recovery,
         })
 
     results.sort(key=lambda x: -x['avg_roi'])
 
     print(f"{'コード':<6}{'銘柄名':<16}{'現在値':>8}{'Vol':>7}{'最大DD':>8}"
           f"{'ROI+1%':>8}{'ROI+2%':>8}{'ROI+3%':>8}{'平均ROI':>9}{'必要資金':>10}")
+    unrecovered = []
     for r in results:
         note = ""
         if r['unresolved_pct'] is not None and r['unresolved_pct'] < -5:
-            note = f"  ⚠️未決済{r['unresolved_pct']:.1f}%"
+            note += f"  ⚠️未決済{r['unresolved_pct']:.1f}%"
+        if not r['recovered_from_max_dd']:
+            note += f"  ⚠️最大下落から未回復(現在値は過去最高値比{r['off_all_time_high_pct']:.1f}%)"
+            unrecovered.append(r)
         print(f"{r['code']:<6}{r['name'][:14]:<16}{r['current_price']:>7,.0f}円{r['vol_annualized']:>6.1f}%"
               f"{r['max_dd']:>7.1f}%{r['roi_by_tp'][1.0]:>7.1f}%{r['roi_by_tp'][2.0]:>7.1f}%"
               f"{r['roi_by_tp'][3.0]:>7.1f}%{r['avg_roi']:>8.1f}%{r['max_cap']:>9,.0f}円{note}")
+
+    if unrecovered:
+        print(f"\n⚠️ {len(unrecovered)}銘柄が、過去最大の下落からまだ一度も高値を更新できていません"
+              f"（構造的な右肩下がりの疑い、要個別確認）:")
+        for r in unrecovered:
+            print(f"  {r['code']} {r['name']}: 過去最高値比{r['off_all_time_high_pct']:.1f}%")
 
 
 if __name__ == "__main__":
