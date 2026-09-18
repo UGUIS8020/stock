@@ -200,6 +200,40 @@ def init_db():
             name       TEXT,
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS nanpin_campaigns (
+            campaign_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            code             TEXT NOT NULL,
+            name             TEXT,
+            status           TEXT NOT NULL DEFAULT 'open',
+            opened_date      TEXT NOT NULL,
+            shares_held      INTEGER NOT NULL DEFAULT 0,
+            total_cost       REAL NOT NULL DEFAULT 0.0,
+            closed_date      TEXT,
+            sell_price       REAL,
+            sell_time        TEXT,
+            sell_order_no    TEXT,
+            realized_pnl_yen REAL,
+            realized_pnl_pct REAL,
+            account_type     TEXT DEFAULT 'genbutsu',
+            zyoutoeki_c      TEXT DEFAULT '1'
+        );
+        CREATE INDEX IF NOT EXISTS idx_nc_code_status ON nanpin_campaigns(code, status);
+
+        CREATE TABLE IF NOT EXISTS nanpin_buys (
+            buy_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id INTEGER NOT NULL REFERENCES nanpin_campaigns(campaign_id),
+            code        TEXT NOT NULL,
+            buy_date    TEXT NOT NULL,
+            buy_time    TEXT NOT NULL,
+            iso_year    INTEGER NOT NULL,
+            iso_week    INTEGER NOT NULL,
+            shares      INTEGER NOT NULL,
+            price       REAL NOT NULL,
+            order_no    TEXT,
+            UNIQUE (campaign_id, iso_year, iso_week)
+        );
+        CREATE INDEX IF NOT EXISTS idx_nb_campaign ON nanpin_buys(campaign_id);
     """)
     conn.commit()
     conn.close()
@@ -953,3 +987,98 @@ def get_daytime_signals(date=None):
         )
     conn.close()
     return df
+
+
+# ══════════════════════════════════════════════════════
+# nanpin_campaigns / nanpin_buys（戦略N: ナンピン戦略パイロット）
+# ══════════════════════════════════════════════════════
+
+def get_open_nanpin_campaign(code):
+    """指定銘柄のstatus='open'キャンペーンを1件返す（無ければNone）。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM nanpin_campaigns WHERE code=? AND status='open' ORDER BY campaign_id DESC LIMIT 1",
+        [str(code)]
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    cols = ["campaign_id", "code", "name", "status", "opened_date", "shares_held",
+            "total_cost", "closed_date", "sell_price", "sell_time", "sell_order_no",
+            "realized_pnl_yen", "realized_pnl_pct", "account_type", "zyoutoeki_c"]
+    return dict(zip(cols, row))
+
+
+def create_nanpin_campaign(code, name, opened_date, account_type="genbutsu", zyoutoeki_c="1"):
+    """新規キャンペーンを作成し、campaign_idを返す。"""
+    conn = get_conn()
+    cur = conn.execute("""
+        INSERT INTO nanpin_campaigns (code, name, status, opened_date, account_type, zyoutoeki_c)
+        VALUES (?, ?, 'open', ?, ?, ?)
+    """, [str(code), str(name), str(opened_date), str(account_type), str(zyoutoeki_c)])
+    campaign_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return campaign_id
+
+
+def has_bought_this_iso_week(campaign_id, iso_year, iso_week):
+    """当該キャンペーンが指定ISO週にすでに買い増し済みかを返す。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM nanpin_buys WHERE campaign_id=? AND iso_year=? AND iso_week=?",
+        [campaign_id, iso_year, iso_week]
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def record_nanpin_buy(campaign_id, code, buy_date, buy_time, iso_year, iso_week,
+                       shares, price, order_no=None):
+    """買い増しを記録し、キャンペーンのshares_held/total_costも同時に更新する。
+    同一週の二重登録はUNIQUE制約で防止する（IntegrityErrorは呼び出し側でキャッチする）。
+    """
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO nanpin_buys
+            (campaign_id, code, buy_date, buy_time, iso_year, iso_week, shares, price, order_no)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, [campaign_id, str(code), str(buy_date), str(buy_time), int(iso_year), int(iso_week),
+          int(shares), float(price), order_no])
+    conn.execute("""
+        UPDATE nanpin_campaigns
+        SET shares_held = shares_held + ?, total_cost = total_cost + ?
+        WHERE campaign_id = ?
+    """, [int(shares), float(price) * int(shares), campaign_id])
+    conn.commit()
+    conn.close()
+    print(f"  [DB] ナンピン買い増し記録: campaign_id={campaign_id} {code} "
+          f"{shares}株 @ {price}円 (ISO{iso_year}-W{iso_week:02d})")
+
+
+def close_nanpin_campaign(campaign_id, sell_price, sell_time, sell_order_no,
+                           realized_pnl_yen, realized_pnl_pct):
+    """キャンペーンを全株売却済み(status='closed')にする。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_conn()
+    conn.execute("""
+        UPDATE nanpin_campaigns
+        SET status='closed', closed_date=?, sell_price=?, sell_time=?, sell_order_no=?,
+            realized_pnl_yen=?, realized_pnl_pct=?
+        WHERE campaign_id=?
+    """, [today, float(sell_price), str(sell_time), sell_order_no,
+          float(realized_pnl_yen), float(realized_pnl_pct), campaign_id])
+    conn.commit()
+    conn.close()
+    print(f"  [DB] ナンピンキャンペーン決済: campaign_id={campaign_id} "
+          f"売値{sell_price}円 損益{realized_pnl_yen:,.0f}円({realized_pnl_pct:+.2f}%)")
+
+
+def count_nanpin_buys(campaign_id):
+    """当該キャンペーンの買い増し回数を返す。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM nanpin_buys WHERE campaign_id=?", [campaign_id]
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0
