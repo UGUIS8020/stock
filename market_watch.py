@@ -15,6 +15,7 @@ scan_morning.py → market_watch.py の順で自動起動される。
 """
 
 import os
+import csv
 import re
 import sys
 import json
@@ -40,6 +41,7 @@ CANDIDATES_LOG_CSV   = str(_BASE_DIR / "out" / "candidates_log.csv")
 MORNING_LOG_CSV      = str(_BASE_DIR / "out" / "morning_log.csv")
 TACHIBANA_LOGIN_FILE = str(_BASE_DIR / "tachibana_login_response.json")
 OBSERVE_LOG_CSV      = str(_BASE_DIR / "out" / "observe_log.csv")
+CONDITION_MINUTE_LOG_CSV = str(_BASE_DIR / "out" / "condition_minute_observation.csv")
 JST                = timezone(timedelta(hours=9))
 TODAY              = datetime.now(JST).strftime("%Y-%m-%d")
 # 監視設定
@@ -49,6 +51,10 @@ WATCH_START_MIN    = 0
 AI_JUDGE_MIN       = 5     # 銘柄エントリー判断のデフォルト開始時刻（9:05）
 CONDITION_REFRESH_MIN = 3  # 地合い再判定タイミング（9:03）: 寄り付き初動が落ち着いた直後
 WATCH_END_MIN      = 30    # 監視終了（9:30）
+# 2026-09-18追加: 9:03という判定タイミング自体が適切か検証するための非侵襲的な
+# 観察ログ。発注判断には一切使わず、毎分の日経実値とLayer3判定を記録するだけ。
+# 十分な日数が貯まったら、分ごとの判定の入れ替わり頻度・傾向を後日集計する。
+CONDITION_OBSERVE_MINUTES = (1, 2, 3, 4, 5, 6)
 
 # TP/SL設定
 TP_PCT = 0.06   # 利確 +6%（変更: 4%→6% / evolve.py GA 2026-07-18: A単独型STRONG限定 N=1528 WR=64.9% avg+0.659%
@@ -469,6 +475,33 @@ def _get_nikkei_prev_close():
         ex.shutdown(wait=False)   # ハングしたスレッドの回収は待たない
 
 
+def _l3(chg):
+    """日経前日比(%)をLayer3スコア(-1〜3)に変換する。"""
+    if chg >= 1.0:  return 3
+    if chg >= 0.0:  return 2
+    if chg >= -0.5: return 1
+    if chg >= -1.5: return 0
+    return -1
+
+
+def _log_condition_minute_observation(minute_offset, nikkei_price, prev_close):
+    """9:0X時点の日経実値とLayer3判定を記録する（発注判断には使わない検証用ログ）。
+    9:03の地合い再判定タイミングが妥当かどうかを、後日まとめて集計するための
+    非侵襲的な観察ログ（2026-09-18追加）。"""
+    if nikkei_price is None or not prev_close:
+        return
+    change_pct = (nikkei_price - prev_close) / prev_close * 100
+    pts = _l3(change_pct)
+    exists = os.path.exists(CONDITION_MINUTE_LOG_CSV)
+    with open(CONDITION_MINUTE_LOG_CSV, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow(["date", "minute_offset", "time", "nikkei_price",
+                        "prev_close", "change_pct", "layer3_pts"])
+        w.writerow([TODAY, minute_offset, datetime.now(JST).strftime("%H:%M:%S"),
+                    nikkei_price, prev_close, round(change_pct, 4), pts])
+
+
 def _refresh_condition_905(current_condition, market_info, url_price):
     """9:03に日経実値でLayer3スコアを再計算し、地合いが変われば新しい地合い文字列を返す。
     変化なし or 取得失敗時は None を返す。
@@ -493,13 +526,6 @@ def _refresh_condition_905(current_condition, market_info, url_price):
     saved_nk_available = not pd.isna(raw_saved_nk)
     saved_nk_chg  = float(raw_saved_nk) if saved_nk_available else 0.0
     saved_score   = int(market_info.get("condition_score") or 0)
-
-    def _l3(chg):
-        if chg >= 1.0:  return 3
-        if chg >= 0.0:  return 2
-        if chg >= -0.5: return 1
-        if chg >= -1.5: return 0
-        return -1
 
     old_pts = _l3(saved_nk_chg) if saved_nk_available else 0
     new_pts = _l3(actual_nk_chg)
@@ -969,6 +995,8 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
     ordered   = {c["code"]: False for c in candidates}   # 発注済みフラグ
     results   = {c["code"]: "監視中" for c in candidates}
     condition_refreshed = False  # 9:05 地合い再判定フラグ
+    observed_minutes = set()     # 2026-09-18: 毎分の地合い観察ログ用（発注判断には影響しない）
+    nikkei_prev_close_cache = [None]
 
     # 案1+3: CMEが正の日は個別株がCMEを超過上昇していないと発注しない
     # シミュレーション結果: 現状-51.7% → CME超過フィルタ適用で-0.6%(-51.1pt改善)
@@ -993,6 +1021,17 @@ def watch_loop(candidates, condition, market_info, start_now=False, url_price=No
         market_start    = WATCH_START_HOUR * 60 + WATCH_START_MIN
         refresh_start   = WATCH_START_HOUR * 60 + CONDITION_REFRESH_MIN
         watch_end       = WATCH_START_HOUR * 60 + WATCH_END_MIN
+
+        # 2026-09-18: 毎分の地合い観察ログ（発注判断には一切使わない）。
+        # 9:03の判定タイミングが妥当かどうかを後日検証するためのデータ収集のみ。
+        for om in CONDITION_OBSERVE_MINUTES:
+            if om in observed_minutes or now_min < market_start + om:
+                continue
+            observed_minutes.add(om)
+            if nikkei_prev_close_cache[0] is None:
+                nikkei_prev_close_cache[0] = _get_nikkei_prev_close()
+            nk = _fetch_nikkei_905(url_price)
+            _log_condition_minute_observation(om, nk, nikkei_prev_close_cache[0])
 
         # 9:03 地合い再判定（初回のみ）: 寄り付き初動が落ち着いた直後
         if not condition_refreshed and now_min >= refresh_start:
