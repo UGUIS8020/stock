@@ -219,7 +219,7 @@ def forward_a_limit_reached():
     open_pos_a = db.load_open_positions(strategy="A")
     if not open_pos_a:
         return False
-    n_forward = sum(1 for p in open_pos_a if p.get("entry_change_pct", 0) >= 0)
+    n_forward = sum(1 for p in open_pos_a if (p.get("entry_change_pct") or 0) >= 0)
     return n_forward >= MAX_POSITIONS_A_FORWARD
 
 
