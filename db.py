@@ -871,7 +871,9 @@ def migrate_nanpin_slot_columns():
         if col not in existing:
             conn.execute(f"ALTER TABLE nanpin_campaigns ADD COLUMN {col} {coltype}")
     if is_new_tp_pct_col:
-        conn.execute("UPDATE nanpin_campaigns SET tp_pct = 3.0 WHERE tp_pct IS NULL")
+        # status='open'限定: 過去の決済済みキャンペーンは当時実際に使われたTP%の
+        # 記録なので、列追加後の既定値で上書きしてはいけない。
+        conn.execute("UPDATE nanpin_campaigns SET tp_pct = 3.0 WHERE tp_pct IS NULL AND status='open'")
     conn.commit()
     conn.close()
 
