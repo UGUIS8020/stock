@@ -16,9 +16,11 @@
     python analyze/screen_nanpin_candidates.py --max-price 200000  # 100株あたりの上限金額(円)
 """
 import argparse
+import json
 import sqlite3
 import statistics
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "out" / "stock.db"
@@ -94,15 +96,18 @@ def drawdown_recovery_check(closes):
     }
 
 
-def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0, max_buys=30, warmup=0):
-    """下落トレンド(終値<trend_n日MA)中は buy_interval営業日ごとに買い増し、
+def backtest_nanpin(bars, trend_n=20, buy_shares=100, tp_pct=2.0, max_buys=30, warmup=0):
+    """下落トレンド(終値<trend_n日MA)中は暦週1回(祝日で営業日が減っても週1回)買い増し、
     平均取得単価×(1+tp_pct%)まで戻ったら全株売却する。
+    2026-09-18改善: 営業日を5回数える方式(buy_interval)から暦週ベースに変更。
+    祝日を挟むたびに次の買いタイミングが暦上ずれていく問題があり、暦週で
+    リセットする方式の方が実測で良好だったため(4銘柄中3銘柄でROI改善)。
     warmup: 先頭warmup件は移動平均の計算(closesへの蓄積)にのみ使い、
     売買判断の対象外にする(fold境界をまたいだMAの準備用、2026-09-18追加)。"""
     closes = []
     shares_held = 0
     total_cost = 0.0
-    last_buy_idx = None
+    last_buy_week = None
     cycles = []
     max_capital_used = 0.0
     buys_in_cycle = 0
@@ -113,6 +118,7 @@ def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0
         if ma is None or i < warmup:
             continue
         downtrend = bar['Close'] < ma
+        week_key = date.fromisoformat(bar['Date']).isocalendar()[:2]  # (年, 週番号)
 
         if shares_held > 0:
             avg_cost = total_cost / shares_held
@@ -122,15 +128,15 @@ def backtest_nanpin(bars, trend_n=20, buy_interval=5, buy_shares=100, tp_pct=2.0
                 cycles.append({'pnl_yen': pnl, 'capital_used': total_cost})
                 shares_held = 0
                 total_cost = 0.0
-                last_buy_idx = None
+                last_buy_week = None
                 buys_in_cycle = 0
                 continue
 
         if downtrend and buys_in_cycle < max_buys:
-            if last_buy_idx is None or i - last_buy_idx >= buy_interval:
+            if last_buy_week is None or week_key != last_buy_week:
                 total_cost += bar['Close'] * buy_shares
                 shares_held += buy_shares
-                last_buy_idx = i
+                last_buy_week = week_key
                 buys_in_cycle += 1
                 max_capital_used = max(max_capital_used, total_cost)
 
@@ -248,10 +254,17 @@ def main():
         current_price = by_code[code][-1]['Close']
         full_closes = [b['Close'] for b in by_code[code]]
         recovery = drawdown_recovery_check(full_closes)
+        # 2026-09-20追加: 記録用のトレンド参考情報(stock_usa側と同じ、[[stock_usa_nanpin_rotation]]
+        # 参照)。実際の売買判断はstrategy_n.py側でローテーション実行時点の最新データを見て
+        # 別途行う。ここでのtrend値はランキング作成時点のスナップショットで、時間経過とともに
+        # 古くなる。
+        ma20 = sma(full_closes, 20)
+        trend = ("down" if current_price < ma20 else "up") if ma20 else None
         results.append({
             **c, 'current_price': current_price,
             'roi_fold1': roi_fold1, 'roi_fold2': roi_fold2, 'score': score,
             'max_cap': max(cap_fold1, cap_fold2), 'unresolved_pct': unresolved_pct,
+            'trend': trend,
             **recovery,
         })
 
@@ -276,6 +289,41 @@ def main():
               f"（構造的な右肩下がりの疑い、要個別確認）:")
         for r in unrecovered:
             print(f"  {r['code']} {r['name']}: 過去最高値比{r['off_all_time_high_pct']:.1f}%")
+
+    # 2026-09-20追加: strategy_n.pyの新規キャンペーン銘柄ローテーションが読み込む
+    # 機械可読な最新ランキング(stock_usa側と同じ設計、[[stock_usa_nanpin_rotation]]参照)。
+    # healthy(過去最大下落から回復済みの候補)のみを対象にし、毎月上書きする。
+    healthy = [r for r in results if r['recovered_from_max_dd']]
+    out_dir = Path(__file__).parent.parent / "out"
+    ranking_path = out_dir / "nanpin_candidates_ranking_latest.json"
+    ranking_path.write_text(
+        json.dumps(
+            [{"code": r["code"], "name": r["name"], "score": r["score"],
+              "current_price": r["current_price"], "trend": r["trend"]}
+             for r in healthy],
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"\n(機械可読ランキングを{ranking_path}に出力しました)")
+
+    # 事後評価用に、上位10銘柄のスコア・株価・トレンドを月ごとに上書きされない形で記録する。
+    archive_dir = out_dir / "nanpin_candidates_ranking_archive"
+    archive_dir.mkdir(exist_ok=True)
+    archive_path = archive_dir / f"{date.today().strftime('%Y%m')}.json"
+    archive_path.write_text(
+        json.dumps(
+            {
+                "generated_date": date.today().isoformat(),
+                "top10": [{"code": r["code"], "name": r["name"], "score": r["score"],
+                           "current_price": r["current_price"], "trend": r["trend"]}
+                          for r in healthy[:10]],
+            },
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"(上位10銘柄の記録を{archive_path}に保存しました)")
 
 
 if __name__ == "__main__":
