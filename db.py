@@ -216,7 +216,11 @@ def init_db():
             realized_pnl_yen REAL,
             realized_pnl_pct REAL,
             account_type     TEXT DEFAULT 'genbutsu',
-            zyoutoeki_c      TEXT DEFAULT '1'
+            zyoutoeki_c      TEXT DEFAULT '1',
+            slot                  TEXT,
+            shares_per_buy        INTEGER,
+            max_campaign_capital  REAL,
+            tp_pct                REAL
         );
         CREATE INDEX IF NOT EXISTS idx_nc_code_status ON nanpin_campaigns(code, status);
 
@@ -240,6 +244,7 @@ def init_db():
     migrate_candidates_log_columns()
     migrate_daily_prices_market_code()
     migrate_positions_account_type()
+    migrate_nanpin_slot_columns()
 
 
 # ══════════════════════════════════════════════════════
@@ -851,6 +856,26 @@ def migrate_positions_account_type():
     conn.close()
 
 
+def migrate_nanpin_slot_columns():
+    """nanpin_campaigns に slot/shares_per_buy/max_campaign_capital/tp_pct列が
+    未追加の場合のみ追加する（冪等）。2026-09-20: stock_usa側で「手動UPDATEに
+    頼って一時的に二重発注リスクを生んだ」反省を踏まえ、列追加と同時にこの場で
+    自動補完する（列追加前のopenキャンペーンをNULLのまま残さない）。ただし
+    このパイロットはまだ建玉ゼロの状態でこの列を追加しているため、実質的には
+    影響を受ける既存行は無い想定。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(nanpin_campaigns)").fetchall()}
+    is_new_tp_pct_col = "tp_pct" not in existing
+    for col, coltype in (("slot", "TEXT"), ("shares_per_buy", "INTEGER"),
+                         ("max_campaign_capital", "REAL"), ("tp_pct", "REAL")):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE nanpin_campaigns ADD COLUMN {col} {coltype}")
+    if is_new_tp_pct_col:
+        conn.execute("UPDATE nanpin_campaigns SET tp_pct = 3.0 WHERE tp_pct IS NULL")
+    conn.commit()
+    conn.close()
+
+
 
 # JQuants Mkt コード → Tachibana sMarketCode マッピング
 # 00111/00102/00104 いずれも11008エラーのため、全銘柄 "00101"（東証）で統一
@@ -1005,17 +1030,45 @@ def get_open_nanpin_campaign(code):
     return dict(row) if row is not None else None
 
 
-def create_nanpin_campaign(code, name, opened_date, account_type="genbutsu", zyoutoeki_c="1"):
-    """新規キャンペーンを作成し、campaign_idを返す。"""
+def create_nanpin_campaign(code, name, opened_date, account_type="genbutsu", zyoutoeki_c="1",
+                            slot=None, shares_per_buy=None, max_campaign_capital=None, tp_pct=None):
+    """新規キャンペーンを作成し、campaign_idを返す。slot/shares_per_buy/
+    max_campaign_capital/tp_pctは開始時点のスナップショットとして保存する。
+    これにより後で月次ランキングやTP%のデフォルト値が変わっても、保有中の間は
+    自分の設定を自分で覚えている（stock_usa側と同じ設計、[[stock_usa_nanpin_rotation]]参照）。"""
     conn = get_conn()
     cur = conn.execute("""
-        INSERT INTO nanpin_campaigns (code, name, status, opened_date, account_type, zyoutoeki_c)
-        VALUES (?, ?, 'open', ?, ?, ?)
-    """, [str(code), str(name), str(opened_date), str(account_type), str(zyoutoeki_c)])
+        INSERT INTO nanpin_campaigns
+            (code, name, status, opened_date, account_type, zyoutoeki_c,
+             slot, shares_per_buy, max_campaign_capital, tp_pct)
+        VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
+    """, [str(code), str(name), str(opened_date), str(account_type), str(zyoutoeki_c),
+          slot, shares_per_buy, max_campaign_capital, tp_pct])
     campaign_id = cur.lastrowid
     conn.commit()
     conn.close()
     return campaign_id
+
+
+def get_open_nanpin_campaign_by_slot(slot):
+    """指定スロットのstatus='open'キャンペーンを1件返す（無ければNone）。"""
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM nanpin_campaigns WHERE slot=? AND status='open' ORDER BY campaign_id DESC LIMIT 1",
+        [slot]
+    ).fetchone()
+    conn.close()
+    return dict(row) if row is not None else None
+
+
+def get_all_open_nanpin_campaigns():
+    """status='open'の全キャンペーンを返す(スロットに関わらず全件)。"""
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM nanpin_campaigns WHERE status='open'").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def has_bought_this_iso_week(campaign_id, iso_year, iso_week):
