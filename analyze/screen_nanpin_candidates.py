@@ -184,6 +184,17 @@ def main():
     print(f"検証fold2: {all_dates[split2]} 〜 {all_dates[-1]} ({n_total - split2}日)  ※選定には未使用")
     print(f"購入上限: 100株あたり{args.max_price:,.0f}円(株価{max_share_price:,.0f}円以下)\n")
 
+    # 2026-09-20改善: 「購入しやすい価格」の判定に選定期間終値(screen_end_price、
+    # 5年データだと約3年前の株価)を使っていたため、実際には値上がりして買いにくく
+    # なった銘柄が「買いやすい」と判定され続ける、あるいはその逆のズレが生じていた。
+    # 過学習防止のため大型株・低ボラの「ランキング」は選定期間のデータのみで計算する
+    # 必要があるが、「今いくらで買えるか」は実務上の制約であってランキング計算には
+    # 混ざらないため、最新日1日分だけの安いクエリで最新株価を取得し、これで判定する。
+    latest_date = all_dates[-1]
+    latest_prices = {r['code']: r['Close'] for r in conn.execute(
+        "SELECT code, Close FROM daily_prices WHERE Date=?", [latest_date]
+    )}
+
     # 銘柄ごとの完全性(全期間分のデータが揃っていて欠損が無いか)をSQL集計だけで判定する
     # (以前のhas_nulls()相当の判定を、個々の行を読まずに済むよう書き換えたもの)。
     completeness = conn.execute("""
@@ -219,15 +230,18 @@ def main():
         vol_annualized, max_dd = efficiency_ratio_stats(closes)
         if vol_annualized is None:
             continue
+        latest_price = latest_prices.get(code)
+        if latest_price is None:
+            continue
         candidates.append({
-            'code': code, 'name': names[code], 'screen_end_price': closes[-1],
+            'code': code, 'name': names[code], 'latest_price': latest_price,
             'avg_turnover': avg_turnover, 'vol_annualized': vol_annualized, 'max_dd': max_dd,
         })
     del by_code_screen
 
     candidates.sort(key=lambda x: -x['avg_turnover'])
     large_cap_pool = candidates[:len(candidates) // 5]  # 売買代金上位20% = 大型株の代理指標
-    affordable_pool = [c for c in large_cap_pool if c['screen_end_price'] <= max_share_price]
+    affordable_pool = [c for c in large_cap_pool if c['latest_price'] <= max_share_price]
     affordable_pool.sort(key=lambda x: x['vol_annualized'])
     selected = affordable_pool[:args.top_n]
 
