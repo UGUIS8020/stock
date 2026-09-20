@@ -177,7 +177,6 @@ def main():
     split1 = int(n_total * 0.40)   # 選定期間(過去40%)
     split2 = int(n_total * 0.70)   # 検証fold1(次の30%) / fold2(直近30%)
     screen_start, screen_end = all_dates[0], all_dates[split1 - 1]
-    screen_dates = set(all_dates[:split1])
     fold1_dates = set(all_dates[split1:split2])
     fold2_dates = set(all_dates[split2:])
     print(f"選定期間: {screen_start} 〜 {screen_end} ({split1}日)")

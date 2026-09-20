@@ -243,6 +243,18 @@ def resolve_slot_candidates(get_price_and_trend_fn):
             open_by_slot[sc["slot"]] = oc
             held_codes.add(oc["code"])
 
+    # 2026-09-20追加: 複数スロットが同時に空いた場合、_pick_candidate_for_slot()が
+    # スロットごとに独立してget_price_and_trend_fn()(Tachibana APIへの実際の
+    # 問い合わせ)をランキング上位から再試行するため、同じ銘柄への重複問い合わせが
+    # 発生していた(stock_usa側で既に修正済み[commit 81afe3d]だったが、JP移植時に
+    # 移植し忘れていた)。この実行内で一度取得した結果は使い回す。
+    price_trend_cache = {}
+
+    def cached_get_price_and_trend(code):
+        if code not in price_trend_cache:
+            price_trend_cache[code] = get_price_and_trend_fn(code)
+        return price_trend_cache[code]
+
     ranking = load_ranking()
     candidates = []
     for sc in SLOT_CONFIGS:
@@ -257,11 +269,11 @@ def resolve_slot_candidates(get_price_and_trend_fn):
             })
             continue
 
-        chosen = _pick_candidate_for_slot(sc, ranking, held_codes, get_price_and_trend_fn)
+        chosen = _pick_candidate_for_slot(sc, ranking, held_codes, cached_get_price_and_trend)
         if chosen is None:
             code, name = FALLBACK_CANDIDATES[slot]
             print(f"  ⚠️ slot {slot}: 月次ランキングから選定不可のためフォールバック({code} {name})を使用")
-            info = get_price_and_trend_fn(code)
+            info = cached_get_price_and_trend(code)
             price = info[0] if info else None
             shares_per_buy = (max(MIN_UNIT_SHARES,
                                    round(sc["target_buy_yen"] / price / MIN_UNIT_SHARES) * MIN_UNIT_SHARES)
@@ -402,15 +414,20 @@ def main(start_now=False):
 
     # 2026-09-20追加: slot列を追加した際、それ以前に作られたキャンペーン行のslotを
     # 自動補完し忘れると、ローテーションロジックが「空きスロット」と誤認し重複して
-    # 新規建玉を開始するおそれがある(stock_usa側の教訓と同じガード)。
-    orphaned = [c for c in db.get_all_open_nanpin_campaigns() if not c.get("slot")]
+    # 新規建玉を開始するおそれがある(stock_usa側の教訓と同じガード)。slotがNULLの
+    # ケースに加え、SLOT_CONFIGSに存在しない値(手動編集ミス等)も同様に検知する
+    # (get_open_nanpin_campaign_by_slot()はslot=?の完全一致検索のため、未知の値
+    # だとNULLの場合と同じく「空きスロット」と誤認されてしまうため)。
+    valid_slots = {sc["slot"] for sc in SLOT_CONFIGS}
+    orphaned = [c for c in db.get_all_open_nanpin_campaigns() if c.get("slot") not in valid_slots]
     if orphaned:
-        codes_str = ", ".join(f"{c['code']}{c['name']}(campaign_id={c['campaign_id']})" for c in orphaned)
-        print(f"  🛑 異常検知: slot情報の無いopenキャンペーンがあります({codes_str})。"
+        codes_str = ", ".join(f"{c['code']}{c['name']}(campaign_id={c['campaign_id']}, "
+                               f"slot={c.get('slot')!r})" for c in orphaned)
+        print(f"  🛑 異常検知: slot情報が不正なopenキャンペーンがあります({codes_str})。"
               f"このまま進めるとローテーションロジックが「空きスロット」と誤認し、"
               f"重複して新規建玉を開始するおそれがあるため、安全のため処理を中断します。"
-              f"nanpin_campaignsのslot/shares_per_buy/max_campaign_capital/tp_pctを"
-              f"手動で補完してから再実行してください。")
+              f"nanpin_campaignsのslot(有効な値: {sorted(valid_slots)})/shares_per_buy/"
+              f"max_campaign_capital/tp_pctを手動で補完してから再実行してください。")
         return
 
     url_price = load_tachibana_url()
