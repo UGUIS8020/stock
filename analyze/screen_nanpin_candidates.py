@@ -36,10 +36,6 @@ def is_etf_like(name):
     return any(kw in name for kw in ETF_KEYWORDS)
 
 
-def has_nulls(bars, keys=('Open', 'High', 'Low', 'Close')):
-    return any(any(b[k] is None for k in keys) for b in bars)
-
-
 def sma(closes, n):
     if len(closes) < n:
         return None
@@ -163,36 +159,61 @@ def main():
     conn.row_factory = sqlite3.Row
 
     names = {r['code']: r['name'] for r in conn.execute("SELECT code, name FROM stock_master")}
-    price_rows = conn.execute(
-        "SELECT code, Date, Open, High, Low, Close, Volume FROM daily_prices ORDER BY code, Date"
-    ).fetchall()
-    by_code = defaultdict(list)
-    for r in price_rows:
-        by_code[r['code']].append(dict(r))
 
-    # 2026-09-18改善: 検証期間を1つ(直近のみ)から2つ(独立したfold)に分割。
-    # 単一の検証期間だと「たまたまその期間の相場が良かっただけ」を排除できない
-    # ため、時系列で連続する2つのfoldそれぞれでROIを計算し、両方の一貫性を見る。
-    all_dates = [r['Date'] for r in max(by_code.values(), key=len)]
+    # 2026-09-20改善: 以前は全銘柄・全期間のデータ(約493万行)を丸ごとメモリに読み込んで
+    # から絞り込んでいたため、EC2(RAM3.7GB)でピーク約1.46GBまで膨張していた
+    # (stock_usa側で実際にフリーズ事故を起こした構造と同じ、[[stock_usa_ec2_freeze_incident]])。
+    # 大型株・低ボラの絞り込みは「選定期間(全体の約40%)だけのデータ」で完結できるため、
+    # まず日付範囲・銘柄の完全性をSQL側の集計だけで確認し(個々の行はPython側に読み込まない)、
+    # 選定期間分のデータだけで絞り込みを行い、最終候補(上位N銘柄)だけ改めてfold検証用の
+    # 全期間データを取得する2段階方式に変更した。
+    max_code_row = conn.execute(
+        "SELECT code FROM daily_prices GROUP BY code ORDER BY COUNT(*) DESC LIMIT 1"
+    ).fetchone()
+    all_dates = [r[0] for r in conn.execute(
+        "SELECT DISTINCT Date FROM daily_prices WHERE code=? ORDER BY Date", [max_code_row['code']]
+    )]
     n_total = len(all_dates)
     split1 = int(n_total * 0.40)   # 選定期間(過去40%)
     split2 = int(n_total * 0.70)   # 検証fold1(次の30%) / fold2(直近30%)
+    screen_start, screen_end = all_dates[0], all_dates[split1 - 1]
     screen_dates = set(all_dates[:split1])
     fold1_dates = set(all_dates[split1:split2])
     fold2_dates = set(all_dates[split2:])
-    print(f"選定期間: {all_dates[0]} 〜 {all_dates[split1 - 1]} ({split1}日)")
+    print(f"選定期間: {screen_start} 〜 {screen_end} ({split1}日)")
     print(f"検証fold1: {all_dates[split1]} 〜 {all_dates[split2 - 1]} ({split2 - split1}日)  ※選定には未使用")
     print(f"検証fold2: {all_dates[split2]} 〜 {all_dates[-1]} ({n_total - split2}日)  ※選定には未使用")
     print(f"購入上限: 100株あたり{args.max_price:,.0f}円(株価{max_share_price:,.0f}円以下)\n")
 
+    # 銘柄ごとの完全性(全期間分のデータが揃っていて欠損が無いか)をSQL集計だけで判定する
+    # (以前のhas_nulls()相当の判定を、個々の行を読まずに済むよう書き換えたもの)。
+    completeness = conn.execute("""
+        SELECT code, COUNT(*) as cnt,
+               SUM(CASE WHEN Open IS NULL OR High IS NULL OR Low IS NULL
+                          OR Close IS NULL OR Volume IS NULL THEN 1 ELSE 0 END) as null_cnt
+        FROM daily_prices GROUP BY code
+    """).fetchall()
+    complete_codes = {
+        row['code'] for row in completeness
+        if row['cnt'] == n_total and row['null_cnt'] == 0
+    }
+    # ETF等・マスタ未登録銘柄はここで既に除外できる(価格データを見る必要が無いため)
+    complete_codes = {c for c in complete_codes if names.get(c) and not is_etf_like(names[c])}
+
+    # 選定期間分のデータだけを取得する(SQLiteのIN句パラメータ上限を避けるため、
+    # 銘柄コードでの絞り込みはSQLではなくPython側の集合判定で行う)。
+    screen_rows = conn.execute(
+        "SELECT code, Date, Close, Volume FROM daily_prices WHERE Date BETWEEN ? AND ? ORDER BY code, Date",
+        [screen_start, screen_end]
+    ).fetchall()
+    by_code_screen = defaultdict(list)
+    for r in screen_rows:
+        if r['code'] in complete_codes:
+            by_code_screen[r['code']].append(r)
+    del screen_rows
+
     candidates = []
-    for code, bars in by_code.items():
-        name = names.get(code, '')
-        if not name or is_etf_like(name):
-            continue
-        if len(bars) != n_total or has_nulls(bars) or any(b['Volume'] is None for b in bars):
-            continue
-        screen_bars = [b for b in bars if b['Date'] in screen_dates]
+    for code, screen_bars in by_code_screen.items():
         closes = [b['Close'] for b in screen_bars]
         vols = [b['Volume'] for b in screen_bars]
         avg_turnover = sum(c * v for c, v in zip(closes, vols)) / len(closes)
@@ -200,9 +221,10 @@ def main():
         if vol_annualized is None:
             continue
         candidates.append({
-            'code': code, 'name': name, 'screen_end_price': closes[-1],
+            'code': code, 'name': names[code], 'screen_end_price': closes[-1],
             'avg_turnover': avg_turnover, 'vol_annualized': vol_annualized, 'max_dd': max_dd,
         })
+    del by_code_screen
 
     candidates.sort(key=lambda x: -x['avg_turnover'])
     large_cap_pool = candidates[:len(candidates) // 5]  # 売買代金上位20% = 大型株の代理指標
@@ -212,6 +234,20 @@ def main():
 
     print(f"大型株プール: {len(large_cap_pool)}銘柄 → 購入しやすい価格帯: {len(affordable_pool)}銘柄 "
           f"→ 低ボラ上位{len(selected)}銘柄を検証\n")
+
+    # ここでようやく、最終候補(上位N銘柄、通常20件程度)だけ全期間のデータを取得する。
+    # 件数が少ないためIN句のパラメータ数は問題にならない。
+    selected_codes = [c['code'] for c in selected]
+    placeholders = ",".join("?" * len(selected_codes))
+    full_rows = conn.execute(
+        f"SELECT code, Date, Open, High, Low, Close, Volume FROM daily_prices "
+        f"WHERE code IN ({placeholders}) ORDER BY code, Date",
+        selected_codes,
+    ).fetchall()
+    by_code = defaultdict(list)
+    for r in full_rows:
+        by_code[r['code']].append(dict(r))
+    del full_rows
 
     def fold_avg_roi(code, dates):
         """1つのfoldでTP+1/2/3%を回し、平均ROIと最大投入資金・末端含み損益を返す。
