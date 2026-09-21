@@ -238,6 +238,24 @@ def init_db():
             UNIQUE (campaign_id, iso_year, iso_week)
         );
         CREATE INDEX IF NOT EXISTS idx_nb_campaign ON nanpin_buys(campaign_id);
+
+        CREATE TABLE IF NOT EXISTS ai_sl_checks (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            date           TEXT NOT NULL,
+            code           TEXT NOT NULL,
+            name           TEXT,
+            strategy       TEXT,
+            checked_at     TEXT,
+            buy_price      REAL,
+            price_at_check REAL,
+            sl_price       REAL,
+            judgment       TEXT,
+            confidence     TEXT,
+            reason         TEXT,
+            acted          INTEGER DEFAULT 0,
+            sell_price     REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_asc_date_code ON ai_sl_checks(date, code);
     """)
     conn.commit()
     conn.close()
@@ -245,6 +263,7 @@ def init_db():
     migrate_daily_prices_market_code()
     migrate_positions_account_type()
     migrate_nanpin_slot_columns()
+    migrate_ai_sl_checks_checkpoint()
 
 
 # ══════════════════════════════════════════════════════
@@ -878,6 +897,20 @@ def migrate_nanpin_slot_columns():
     conn.close()
 
 
+def migrate_ai_sl_checks_checkpoint():
+    """ai_sl_checks に checkpoint 列が未追加の場合のみ追加する（冪等）。
+    2026-09-22: 50%地点に加えて90%地点（最終判断・現状は観察のみ）の
+    チェックを追加したため、どちらの地点での判定かを区別できるようにする。
+    既存行（列追加前に記録された分）は全て旧仕様の50%地点なので'50%'で埋める。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(ai_sl_checks)").fetchall()}
+    if "checkpoint" not in existing:
+        conn.execute("ALTER TABLE ai_sl_checks ADD COLUMN checkpoint TEXT DEFAULT '50%'")
+        conn.execute("UPDATE ai_sl_checks SET checkpoint = '50%' WHERE checkpoint IS NULL")
+    conn.commit()
+    conn.close()
+
+
 
 # JQuants Mkt コード → Tachibana sMarketCode マッピング
 # 00111/00102/00104 いずれも11008エラーのため、全銘柄 "00101"（東証）で統一
@@ -971,6 +1004,23 @@ def save_nikkei_intraday_log(date, time, price, change_pct):
         INSERT OR REPLACE INTO nikkei_intraday_log (date, time, price, change_pct)
         VALUES (?, ?, ?, ?)
     """, (date, time, price, change_pct))
+    conn.commit()
+    conn.close()
+
+
+def save_ai_sl_check(date, code, name, strategy, checked_at, buy_price, price_at_check,
+                      sl_price, judgment, confidence, reason, acted=0, sell_price=None,
+                      checkpoint="50%"):
+    """SL接近時のAIニュースチェック結果をai_sl_checksへ記録する。
+    checkpoint: "50%"（早期損切り判断用）または "90%"（底値判断用、2026-09-22追加）。"""
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO ai_sl_checks
+            (date, code, name, strategy, checked_at, buy_price, price_at_check,
+             sl_price, judgment, confidence, reason, acted, sell_price, checkpoint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (date, code, name, strategy, checked_at, buy_price, price_at_check,
+          sl_price, judgment, confidence, reason, int(acted), sell_price, checkpoint))
     conn.commit()
     conn.close()
 

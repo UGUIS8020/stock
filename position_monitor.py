@@ -12,6 +12,7 @@ import sys
 import json
 import os
 import time
+import threading
 import urllib3
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -69,6 +70,122 @@ FORCE_CLOSE_MIN    = 15 * 60 + 0   # 2026-08-14: 15:20→15:00に変更。戦略
                                    # ※15:25は東証がオークションモードに切り替わり成行注文不可
                                    # (11481エラー)のため、15:00なら十分な安全マージンがある。
 DASHBOARD_SYNC_INTERVAL_SEC = 600  # ダッシュボード向けに10分おきintraday_prices保存+S3同期
+
+# ── SL接近時のAIニュースチェック（2026-09-21追加、2026-09-22にGeminiへ切替） ──
+# 過去の損切り124件を検証した結果、78〜93%が後日買値まで回復していた一方、
+# 悪材料が原因の下落は戻りにくい傾向があった（サブエージェント34件のブラインド
+# テストで「悪材料あり(STRUCTURAL)」判定の的中率77.8%）。この非対称性を踏まえ、
+# 現状の判定は「早期に損切りする」方向にのみ使う（保有継続・買い増しには使わない）。
+# Claude(web_search)とGeminiを実ケースで比較した結果、判定精度は同等だったが
+# Geminiの方が2〜5倍高速・安定（Claudeはcode_execution経由の検索バッチングで
+# max_uses上限に達すると待機リトライを繰り返し数分単位で遅延することがあった）
+# だったためGeminiを採用した。
+# 2026-09-22: SL到達間際(90%地点)での「最終判断」チェックポイントを追加。
+# 本番投入時は「底値と判断したら追加購入(ナンピン)する」用途を想定しているが、
+# 売買ロジックはまだ変更しない。しばらくは50%と同じSTRUCTURAL/TEMPORARY/UNCLEAR
+# の枠組みのままcheckpoint別にDB記録してデータを蓄積し、判断材料が溜まってから
+# 実際の売買(追加購入)へ反映するかどうかを改めて検討する。
+SL_WARNING_RATIO       = 0.5   # buy_priceからsl_priceまでの50%下落で警戒ラインに到達したとみなす（2026-09-22: 0.7→0.5、フェーズAでのデータ収集を早めるため）
+SL_WARNING_RATIO_FINAL = 0.9   # 90%地点＝SL到達間際の「最終判断」チェックポイント（観察のみ、売買ロジックには未反映）
+AI_SL_MODEL         = "gemini-2.5-flash"
+GOOGLE_API_KEY      = os.getenv("GOOGLE_API_KEY", "")
+AI_SL_CHECK_ENABLED = bool(GOOGLE_API_KEY)   # APIキー未設定なら機能自体を無効化（安全側）
+# フェーズA(デフォルト): 判定結果をDBへ記録するのみ。フェーズB: STRUCTURAL判定で実際に早期売りを実行。
+AI_SL_CHECK_ACTIVE  = os.getenv("AI_SL_CHECK_ACTIVE", "false").strip().lower() in ("1", "true", "yes")
+
+
+def ask_ai_sl_check(code, name, strategy, buy_px, price_at_check, sl_px):
+    """SLに接近したポジションについて、直近の悪材料（構造的な下落要因）の
+    有無をWeb検索付きでGeminiに判定させる。API呼び出し自体の失敗は
+    呼び出し元でUNCLEAR扱いにするため、ここでは例外をそのまま投げる。"""
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=GOOGLE_API_KEY)
+    decline_pct = (price_at_check - buy_px) / buy_px * 100
+
+    prompt = f"""あなたは日本株の損切り判断を補助するアナリストです。
+以下の保有銘柄が損切りライン（SL）に接近しています。Web検索で直近のニュース・
+適時開示を調べ、この下落が「構造的な悪材料によるもの」か「一時的な変動」かを
+判定してください。
+
+## 銘柄情報
+- コード: {code}  銘柄名: {name}
+- 戦略: {strategy}
+- 買値: {buy_px:,.0f}円  現在値: {price_at_check:,.0f}円（{decline_pct:+.2f}%）
+- 損切りライン: {sl_px:,.0f}円
+
+## 判定基準
+- STRUCTURAL: 決算の下方修正、不祥事、大幅な業績悪化、アナリストの格下げなど、
+  株価の戻りが期待しにくい具体的な悪材料が見つかった場合
+- TEMPORARY: 悪材料が見つからない、または全体相場の地合い悪化・一時的な
+  需給要因など、業績自体は健全と考えられる場合
+- UNCLEAR: 材料の有無を十分に確認できなかった場合（無理に判定しない）
+
+## お願い
+Web検索でこの銘柄の直近のニュース・適時開示を確認したうえで、
+以下のJSON形式のみで回答してください（他の文章は不要）：
+{{
+  "判定": "STRUCTURAL" or "TEMPORARY" or "UNCLEAR",
+  "確信度": "高" or "中" or "低",
+  "理由": "判断の根拠（1〜2文）"
+}}"""
+
+    from google.genai import errors
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model=AI_SL_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                ),
+            )
+            return resp.text or ""
+        except errors.ServerError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(10)
+            else:
+                raise
+    raise last_err
+
+
+def parse_ai_sl_judgment(text):
+    """AIの回答をパースしてdictで返す（解析失敗時はUNCLEAR扱い）。"""
+    t = (text or "").strip()
+    if "```" in t:
+        t = t.split("```")[1]
+        if t.startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        data = json.loads(t)
+        judgment = data.get("判定", "UNCLEAR")
+        if judgment not in ("STRUCTURAL", "TEMPORARY", "UNCLEAR"):
+            judgment = "UNCLEAR"
+        return {
+            "judgment":   judgment,
+            "confidence": data.get("確信度", ""),
+            "reason":     data.get("理由", ""),
+        }
+    except Exception:
+        return {"judgment": "UNCLEAR", "confidence": "", "reason": f"解析失敗: {text[:200]}"}
+
+
+def run_ai_sl_check_async(code, name, strategy, buy_px, price_at_check, sl_px, results, checkpoint="50%"):
+    """バックグラウンドスレッドで実行し、既存の15秒監視ループをブロックしない。
+    結果はresults[(code, checkpoint)]へ書き込む（未設定=まだ結果待ち）。50%地点と
+    90%地点を同一コードで独立に扱えるようcheckpointをキーに含める。API失敗時も
+    UNCLEARとして書き込み、SL監視自体は今まで通り継続させる（安全側）。"""
+    try:
+        text   = ask_ai_sl_check(code, name, strategy, buy_px, price_at_check, sl_px)
+        parsed = parse_ai_sl_judgment(text)
+    except Exception as e:
+        parsed = {"judgment": "UNCLEAR", "confidence": "", "reason": f"APIエラー: {e}"}
+    parsed["price_at_check"] = price_at_check
+    parsed["checkpoint"]     = checkpoint
+    results[(code, checkpoint)] = parsed
 
 
 def log_exit_detection(code, name, strategy, reason_type, detect_price, target_price, now):
@@ -336,6 +453,11 @@ def main():
     url_request = tachibana_order.load_url_request()
     mode_str    = "本番" if tachibana_order.LIVE_TRADING else "モック"
     print(f"  モード: {mode_str}  |  価格取得: {'Tachibana' if url_price else '価格なし（要ログイン）'}")
+    if AI_SL_CHECK_ENABLED:
+        ai_mode = "フェーズB(有効・早期売り実行)" if AI_SL_CHECK_ACTIVE else "フェーズA(観察モード・DB記録のみ)"
+        print(f"  SL接近AIチェック: 有効  {ai_mode}")
+    else:
+        print(f"  SL接近AIチェック: 無効（GOOGLE_API_KEY未設定）")
 
     if not url_request:
         print("  ⚠️ 業務URLが取得できません。タスクを終了します。")
@@ -346,6 +468,9 @@ def main():
     TODAY       = datetime.now(JST).strftime("%Y-%m-%d")
     gap_checked  = set()   # 当日ギャップチェック済みのcode
     force_closed = False   # 15:25 引け決済実施フラグ
+    ai_checked         = set()   # SL接近AIチェックを起動済みの(code, checkpoint)（1回限り）
+    ai_check_results   = {}      # (code, checkpoint) -> AIチェック結果dict（スレッドが書き込む）
+    ai_result_consumed = set()   # 結果を既に処理済み（DB記録・早期売り判定済み）の(code, checkpoint)
     ROUTINE_LOG_INTERVAL   = 300   # 通常ステータス（価格・TP/SL・価格取得失敗）は5分に1回だけ出力（ノイズ削減）
     last_routine_print     = {}    # code -> 直近出力時刻（監視自体は15秒間隔のまま変更なし）
     last_no_position_print = None  # 「ポジションなし」待機メッセージの直近出力時刻
@@ -489,6 +614,73 @@ def main():
                 else:
                     print(f"  [{now.strftime('%H:%M:%S')}] {code} {name}: "
                           f"ギャップ{gap_pct:+.2f}% → 閾値以下、通常監視へ")
+
+            # ── SL接近AIニュースチェック（50%地点・90%地点、それぞれ1回だけ非同期で起動） ──
+            if AI_SL_CHECK_ENABLED:
+                for checkpoint, ratio in (("50%", SL_WARNING_RATIO), ("90%", SL_WARNING_RATIO_FINAL)):
+                    ck_key = (code, checkpoint)
+                    if ck_key in ai_checked:
+                        continue
+                    warning_price = buy_px - (buy_px - sl_px) * ratio
+                    if current <= warning_price:
+                        ai_checked.add(ck_key)
+                        print(f"  🔎 {code} {name}: SL接近{checkpoint}地点（{current}円 ≤ {warning_price:.0f}円）"
+                              f"→ AIニュースチェック開始（バックグラウンド）")
+                        threading.Thread(
+                            target=run_ai_sl_check_async,
+                            args=(code, name, strategy, buy_px, current, sl_px, ai_check_results, checkpoint),
+                            daemon=True,
+                        ).start()
+
+            # ── AIチェック結果の反映（届いていれば1回だけ処理、checkpointごと） ──
+            sold_early = False
+            for checkpoint in ("50%", "90%"):
+                ck_key = (code, checkpoint)
+                ai_result = ai_check_results.get(ck_key)
+                if not ai_result or ck_key in ai_result_consumed:
+                    continue
+                ai_result_consumed.add(ck_key)
+                judgment = ai_result["judgment"]
+                print(f"  🤖 {code} {name}[{checkpoint}]: AI判定={judgment}（確信度:{ai_result.get('confidence')}）"
+                      f" 理由: {ai_result.get('reason')}")
+                acted_now = False
+                if checkpoint == "50%" and judgment == "STRUCTURAL" and AI_SL_CHECK_ACTIVE:
+                    print(f"  🛑 {code} {name}: AI判定STRUCTURAL → SL到達を待たず早期売り発注")
+                    mkt_code = db.get_market_code_db(code)
+                    acct = pos.get("account_type") or "genbutsu"
+                    zc   = pos.get("zyoutoeki_c") or None
+                    result = tachibana_order.place_sell_order(url_request, code, int(pos["shares"]), market_code=mkt_code, account_type=acct, zyoutoeki_c=zc)
+                    if result["success"]:
+                        pos["status"]      = "closed"
+                        pos["sell_price"]  = str(current)
+                        pos["sell_time"]   = now.strftime("%H:%M:%S")
+                        pos["pnl_pct"]     = str(round((current - buy_px) / buy_px * 100, 2))
+                        pos["exit_reason"] = "ai_structural"
+                        changed = True
+                        acted_now = True
+                        sold_early = True
+                        print(f"  ✅ {result['message']}  損益: {float(pos['pnl_pct']):+.2f}%（AI早期売り）")
+                        _confirm_sell_price(url_request, pos, result, buy_px, now)
+                    else:
+                        print(f"  ❌ AI早期売り失敗: {result['message']}")
+                elif checkpoint == "50%" and judgment == "STRUCTURAL":
+                    print(f"  📝 [フェーズA・観察モード] 早期売りは実行しません（AI_SL_CHECK_ACTIVE=False）")
+                elif checkpoint == "90%":
+                    print(f"  📝 [90%地点・観察のみ] 現時点では売買（追加購入等）には反映しません")
+                db.save_ai_sl_check(
+                    date=TODAY, code=code, name=name, strategy=strategy,
+                    checked_at=now.strftime("%H:%M:%S"), buy_price=buy_px,
+                    price_at_check=ai_result.get("price_at_check", current), sl_price=sl_px,
+                    judgment=judgment, confidence=ai_result.get("confidence", ""),
+                    reason=ai_result.get("reason", ""),
+                    acted=1 if acted_now else 0,
+                    sell_price=current if acted_now else None,
+                    checkpoint=checkpoint,
+                )
+                if sold_early:
+                    break
+            if sold_early:
+                continue
 
             chg    = (current - buy_px) / buy_px * 100
             hit_tp = current >= tp_px
