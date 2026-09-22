@@ -125,6 +125,141 @@ SL_PCT = 0.04    # -4.0%（2026-06-23最適化: 旧: SL-5.6%）
 LIMIT_ORDER     = False  # 成行発注（指値はsResultCode=11010エラー多発のため 2026-06-25 変更）
 LIMIT_WAIT_SECS = 30     # 指値約定確認の待機秒数
 
+# ── 戦略B候補のAI悪材料チェック（2026-09-22追加、観察のみ・買い判断には未反映） ──
+# position_monitor.pyのSL接近AIチェックと同じ発想を買い判断側にも展開。「この下落は
+# 構造的な悪材料によるものか、単なる地合い・需給要因か」をGeminiに判定させ、既存の
+# 定量フィルター（RB/連続下落/落ちるナイフ等）とは独立にDBへ記録する。データが溜まって
+# から、既存フィルターの精度向上（追加除外条件）に使えるかを検証する。発注タイミングを
+# 妨げないよう、候補確定後すぐバックグラウンド並列起動し、発注ループ完了後に回収する
+# （15:00スキャン開始→15:13発注待機の間に十分完了する想定）。
+GOOGLE_API_KEY_B   = os.getenv("GOOGLE_API_KEY", "")
+AI_B_CHECK_ENABLED = bool(GOOGLE_API_KEY_B)
+AI_B_MODEL         = "gemini-2.5-flash"
+
+
+def ask_ai_b_check(code, name, change_pct, price, rb_score):
+    """戦略B候補について、下落が構造的な悪材料によるものか単なる地合い/需給要因かを
+    Web検索付きでGeminiに判定させる。観察用（買い判断には使わない）。"""
+    from google import genai
+    from google.genai import types
+    from google.genai import errors
+    client = genai.Client(api_key=GOOGLE_API_KEY_B)
+
+    prompt = f"""あなたは日本株の押し目買い（逆張り）判断を補助するアナリストです。
+以下の銘柄は本日{change_pct:+.2f}%下落し、戦略Bの押し目買い候補に挙がっています。
+Web検索で直近のニュース・適時開示を調べ、この下落が「構造的な悪材料によるもの」か
+「一時的な変動（地合い・需給要因）」かを判定してください。
+
+## 銘柄情報
+- コード: {code}  銘柄名: {name}
+- 本日の下落率: {change_pct:+.2f}%
+- 現在値: {price:,.0f}円
+- リバウンドスコア: {rb_score}点
+
+## 判定基準
+- STRUCTURAL: 決算の下方修正、不祥事、大幅な業績悪化、アナリストの格下げなど、
+  株価の戻りが期待しにくい具体的な悪材料が見つかった場合
+- TEMPORARY: 悪材料が見つからない、または全体相場の地合い悪化・一時的な
+  需給要因など、業績自体は健全と考えられる場合（＝押し目買いに適する）
+- UNCLEAR: 材料の有無を十分に確認できなかった場合（無理に判定しない）
+
+## お願い
+Web検索でこの銘柄の直近のニュース・適時開示を確認したうえで、
+以下のJSON形式のみで回答してください（他の文章は不要）：
+{{
+  "判定": "STRUCTURAL" or "TEMPORARY" or "UNCLEAR",
+  "確信度": "高" or "中" or "低",
+  "理由": "判断の根拠（1〜2文）"
+}}"""
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model=AI_B_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                ),
+            )
+            return resp.text or ""
+        except errors.ServerError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(10)
+            else:
+                raise
+    raise last_err
+
+
+def parse_ai_b_judgment(text):
+    """AIの回答をパースしてdictで返す（解析失敗時はUNCLEAR扱い）。position_monitor.pyと同形式。"""
+    t = (text or "").strip()
+    if "```" in t:
+        t = t.split("```")[1]
+        if t.startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        data = json.loads(t)
+        judgment = data.get("判定", "UNCLEAR")
+        if judgment not in ("STRUCTURAL", "TEMPORARY", "UNCLEAR"):
+            judgment = "UNCLEAR"
+        return {
+            "judgment":   judgment,
+            "confidence": data.get("確信度", ""),
+            "reason":     data.get("理由", ""),
+        }
+    except Exception:
+        return {"judgment": "UNCLEAR", "confidence": "", "reason": f"解析失敗: {text[:200]}"}
+
+
+def _ai_b_check_one(c):
+    try:
+        text = ask_ai_b_check(c["code"], c.get("name", c["code"]), c["change_pct"], c["price"], c["rb_score"])
+        return parse_ai_b_judgment(text)
+    except Exception as e:
+        return {"judgment": "UNCLEAR", "confidence": "", "reason": f"APIエラー: {e}"}
+
+
+def start_ai_b_checks(candidates):
+    """全候補についてGeminiチェックを並列でバックグラウンド起動する（ノンブロッキング）。
+    戻り値のexecutor/futuresは発注ループ完了後にcollect_and_save_ai_b_resultsで回収する。"""
+    if not AI_B_CHECK_ENABLED or not candidates:
+        return None, {}
+    print(f"\n  🔎 AI悪材料チェック開始（{len(candidates)}件、発注待機中にバックグラウンド実行）...", flush=True)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    futures = {executor.submit(_ai_b_check_one, c): c for c in candidates}
+    return executor, futures
+
+
+def collect_and_save_ai_b_results(executor, futures, ordered_today):
+    """バックグラウンド起動したAIチェックの結果を回収し、DBへ保存する（観察用、買い判断への影響なし）。
+    発注待機中に既に十分な時間が経っているため通常はすぐ揃うが、念のため最大60秒待つ。"""
+    if not executor:
+        return
+    saved = 0
+    try:
+        for fut in concurrent.futures.as_completed(list(futures.keys()), timeout=60):
+            c = futures[fut]
+            try:
+                parsed = fut.result()
+            except Exception as e:
+                parsed = {"judgment": "UNCLEAR", "confidence": "", "reason": f"APIエラー: {e}"}
+            db.save_ai_b_entry_check(
+                date=TODAY, code=c["code"], name=c.get("name", ""),
+                change_pct=c["change_pct"], price=c["price"], rb_score=c["rb_score"],
+                judgment=parsed["judgment"], confidence=parsed.get("confidence", ""),
+                reason=parsed.get("reason", ""),
+                ordered=1 if str(c["code"]) in ordered_today else 0,
+            )
+            saved += 1
+    except concurrent.futures.TimeoutError:
+        print(f"  ⚠️  AI悪材料チェック: 60秒以内に完了しなかった分は未記録です（{saved}/{len(futures)}件記録済み）")
+    finally:
+        executor.shutdown(wait=False)
+    print(f"  💾 AI悪材料チェック結果を記録: {saved}件")
+
 
 def calc_shares(price):
     """価格帯別の発注株数を返す（候補は ¥1,000 ≤ price < ¥20,000 に絞り済み）。
@@ -703,6 +838,9 @@ def main(start_now=False, manual=False):
     # ── 本日すでに発注済みの銘柄を取得（再実行時の重複防止）──
     ordered_today = db.get_today_ordered_codes(TODAY)
 
+    # ── AI悪材料チェック起動（観察用、発注待機中にバックグラウンド実行）──
+    ai_b_executor, ai_b_futures = start_ai_b_checks(candidates)
+
     # ── 発注待機（引けギリギリ約15:15執行）──
     now = datetime.now(JST)
     now_min = now.hour * 60 + now.minute
@@ -753,6 +891,9 @@ def main(start_now=False, manual=False):
                 order_count += 1
 
     print(f"\n  本日の発注件数: {order_count}件")
+
+    # ── AI悪材料チェック結果を回収・記録（観察用、発注結果には影響しない）──
+    collect_and_save_ai_b_results(ai_b_executor, ai_b_futures, ordered_today)
 
     # ── ログ保存 ──
     save_closing_log(candidates)

@@ -256,6 +256,21 @@ def init_db():
             sell_price     REAL
         );
         CREATE INDEX IF NOT EXISTS idx_asc_date_code ON ai_sl_checks(date, code);
+
+        CREATE TABLE IF NOT EXISTS ai_b_entry_checks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            date        TEXT NOT NULL,
+            code        TEXT NOT NULL,
+            name        TEXT,
+            change_pct  REAL,
+            price       REAL,
+            rb_score    REAL,
+            judgment    TEXT,
+            confidence  TEXT,
+            reason      TEXT,
+            ordered     INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_abec_date_code ON ai_b_entry_checks(date, code);
     """)
     conn.commit()
     conn.close()
@@ -1021,6 +1036,21 @@ def save_ai_sl_check(date, code, name, strategy, checked_at, buy_price, price_at
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (date, code, name, strategy, checked_at, buy_price, price_at_check,
           sl_price, judgment, confidence, reason, int(acted), sell_price, checkpoint))
+    conn.commit()
+    conn.close()
+
+
+def save_ai_b_entry_check(date, code, name, change_pct, price, rb_score,
+                           judgment, confidence, reason, ordered=0):
+    """戦略B候補のAI悪材料チェック結果をai_b_entry_checksへ記録する（2026-09-22追加）。
+    買い判断には未反映の観察用データ。orderedは実際にその日買われたかどうか
+    （MAX_POSITIONS_PER_DAYの上限で漏れた候補は0になる）。"""
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO ai_b_entry_checks
+            (date, code, name, change_pct, price, rb_score, judgment, confidence, reason, ordered)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (date, code, name, change_pct, price, rb_score, judgment, confidence, reason, int(ordered)))
     conn.commit()
     conn.close()
 
