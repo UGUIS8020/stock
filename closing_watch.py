@@ -246,14 +246,18 @@ def collect_and_save_ai_b_results(executor, futures, ordered_today):
                 parsed = fut.result()
             except Exception as e:
                 parsed = {"judgment": "UNCLEAR", "confidence": "", "reason": f"APIエラー: {e}"}
-            db.save_ai_b_entry_check(
-                date=TODAY, code=c["code"], name=c.get("name", ""),
-                change_pct=c["change_pct"], price=c["price"], rb_score=c["rb_score"],
-                judgment=parsed["judgment"], confidence=parsed.get("confidence", ""),
-                reason=parsed.get("reason", ""),
-                ordered=1 if str(c["code"]) in ordered_today else 0,
-            )
-            saved += 1
+            try:
+                db.save_ai_b_entry_check(
+                    date=TODAY, code=c["code"], name=c.get("name", ""),
+                    change_pct=c["change_pct"], price=c["price"], rb_score=c["rb_score"],
+                    judgment=parsed["judgment"], confidence=parsed.get("confidence", ""),
+                    reason=parsed.get("reason", ""),
+                    ordered=1 if str(c["code"]) in ordered_today else 0,
+                )
+                saved += 1
+            except Exception as e:
+                # 観察用の記録処理なので、失敗しても以降の候補の記録・本処理は止めない（安全側）。
+                print(f"  ⚠️  ai_b_entry_checks記録失敗（{c['code']}）: {e}")
     except concurrent.futures.TimeoutError:
         print(f"  ⚠️  AI悪材料チェック: 60秒以内に完了しなかった分は未記録です（{saved}/{len(futures)}件記録済み）")
     finally:

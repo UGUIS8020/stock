@@ -667,16 +667,20 @@ def main():
                     print(f"  📝 [フェーズA・観察モード] 早期売りは実行しません（AI_SL_CHECK_ACTIVE=False）")
                 elif checkpoint == "90%":
                     print(f"  📝 [90%地点・観察のみ] 現時点では売買（追加購入等）には反映しません")
-                db.save_ai_sl_check(
-                    date=TODAY, code=code, name=name, strategy=strategy,
-                    checked_at=now.strftime("%H:%M:%S"), buy_price=buy_px,
-                    price_at_check=ai_result.get("price_at_check", current), sl_price=sl_px,
-                    judgment=judgment, confidence=ai_result.get("confidence", ""),
-                    reason=ai_result.get("reason", ""),
-                    acted=1 if acted_now else 0,
-                    sell_price=current if acted_now else None,
-                    checkpoint=checkpoint,
-                )
+                try:
+                    db.save_ai_sl_check(
+                        date=TODAY, code=code, name=name, strategy=strategy,
+                        checked_at=now.strftime("%H:%M:%S"), buy_price=buy_px,
+                        price_at_check=ai_result.get("price_at_check", current), sl_price=sl_px,
+                        judgment=judgment, confidence=ai_result.get("confidence", ""),
+                        reason=ai_result.get("reason", ""),
+                        acted=1 if acted_now else 0,
+                        sell_price=current if acted_now else None,
+                        checkpoint=checkpoint,
+                    )
+                except Exception as e:
+                    # 観察用の記録処理なので、失敗してもTP/SL監視ループ自体は止めない（安全側）。
+                    print(f"  ⚠️  ai_sl_checks記録失敗（監視は継続します）: {e}")
                 if sold_early:
                     break
             if sold_early:
