@@ -10,6 +10,7 @@ run_daily.py - 1日の全スクリプトを順番に起動
                            ↓ scan_morning.py が内部で以下を全起動:
                            - position_monitor.py  9:00〜15:28 TP/SL自動売り（BG）
                            - daytime.py           9:30〜14:30 日中シグナル監視（BG）
+                           - strategy_n.py        9:00〜15:00頃 戦略N(ナンピン)（BG、2026-09-25自動化）
                            - market_watch.py      9:00〜9:30 戦略A発注
                            - closing_watch.py     14:55〜15:15 戦略B発注
                            - scan_daily.py        16:45 本日データ自動取得

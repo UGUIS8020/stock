@@ -34,7 +34,9 @@ strategy_n.py - 戦略N（ナンピン戦略）パイロット: 資金枠2枠(sl
 
 前提:
     - tachibana_login_response.json が存在すること（scan_morning.py 実行後）
-    - パイロット期間中は scan_morning.py からは起動しない。手動実行専用。
+    - 2026-09-25: scan_morning.py がposition_monitor.py等と同じ方式で地合いに
+      関係なく毎営業日自動でバックグラウンド起動するようになった(手動実行専用の
+      パイロット運用は終了)。手動での動作確認・テストには引き続き使える。
 """
 
 import sys

@@ -686,6 +686,24 @@ def main():
         except Exception as e:
             print(f"⚠️  daytime の起動に失敗しました: {e}")
 
+    # ── 戦略N(ナンピン): 地合いに関係なく常に起動 ──
+    # 2026-09-25追加: これまで手動実行専用だったパイロットを自動化。stock_usa側の
+    # strategy_n_us.pyと違い自分ではTachibana認証をせず、scan_morning.py(このスクリプト)
+    # が確立したセッションファイルを読むだけの設計のため、cronで独立に起動するのではなく
+    # position_monitor.pyと同じ方式でこのタイミングでバックグラウンド起動する。地合いに
+    # 依存しない独立の資金枠・判断ロジック(20日MA基準)のため、PANIC日でも起動する。
+    try:
+        subprocess.Popen(
+            [_sys.executable, "-u", str(_BASE_DIR / "strategy_n.py")],
+            stdout=open(str(_OUT_DIR / "strategy_n_live.log"), "w", encoding="utf-8"),
+            stderr=open(str(_OUT_DIR / "strategy_n_err.log"), "w", encoding="utf-8"),
+        )
+        print("  🐌 strategy_n(ナンピン) をバックグラウンドで起動しました（15:00頃に最終判定）")
+        print(f"     ログ: out/strategy_n_live.log")
+    except Exception as e:
+        print(f"⚠️  strategy_n の起動に失敗しました: {e}")
+        print("   → python strategy_n.py を手動で実行してください")
+
     # ── 戦略A：起動判定 ──
     # 朝の判定がWEAKの場合、BUY/CAUTIONが0件でも起動する。
     # WEAK日はPASS判定のスコア閾値(strategy_a_thr)が高く設定されているだけで、
