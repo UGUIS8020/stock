@@ -721,10 +721,12 @@ def main(start_now=False, manual=False):
     print(f"=== 📉 引け前スキャン（{TODAY}）{mode_label}===\n")
 
     # 金曜日チェック（データ検証済み：金曜引け買いは週末リスクで負け越し）
-    if datetime.now(JST).weekday() == 4:  # 0=月 … 4=金
-        print("  ⛔  本日は金曜日のため引け前買いを見送ります。")
-        print("     （理由：翌月曜のギャップアップ後下落が多く、勝率44.7% / 平均-0.21%）")
-        return
+    # 2026-09-26: 発注だけ見送り、候補スキャン・AI悪材料チェックは継続する（観察データ蓄積のため）
+    is_friday = datetime.now(JST).weekday() == 4  # 0=月 … 4=金
+    if is_friday:
+        print("  ⛔  本日は金曜日のため引け前買いは見送りますが、")
+        print("     候補スキャン・AI悪材料チェックは観察目的で継続します。")
+        print("     （見送り理由：翌月曜のギャップアップ後下落が多く、勝率44.7% / 平均-0.21%）")
 
     # Tachibana API 確認
     url_price   = load_tachibana_url()
@@ -871,6 +873,10 @@ def main(start_now=False, manual=False):
         if now_min >= ORDER_DEADLINE_MIN:
             print(f"  ⏰ 15:15を過ぎました。発注を中止します。")
             break
+
+        if is_friday:
+            print(f"  ↩️  {c['code']} 金曜のため発注見送り（AI判定は記録対象）")
+            continue
 
         if manual:
             # 手動確認モード: y/n で1件ずつ確認
