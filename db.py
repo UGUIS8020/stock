@@ -358,6 +358,19 @@ DAILY_PRICE_COLS = {
     "prev_close",
 }
 
+def get_daily_prices(code, days=None):
+    """2026-09-30追加: strategy_n.pyの相関計算用に、指定銘柄の日次終値を
+    date昇順のDataFrame(列: date, close)で返す。daysを指定すると直近N日分のみ。
+    データが無ければ空のDataFrameを返す。"""
+    conn = get_conn()
+    sql = "SELECT Date as date, Close as close FROM daily_prices WHERE code = ? ORDER BY Date"
+    df = pd.read_sql(sql, conn, params=(str(code),))
+    conn.close()
+    if days and len(df) > days:
+        df = df.tail(days).reset_index(drop=True)
+    return df
+
+
 def bulk_insert_daily_prices(code, df):
     """
     DataFrame 丸ごとを daily_prices に一括挿入（移行用）。

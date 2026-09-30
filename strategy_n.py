@@ -44,6 +44,7 @@ import json
 import time
 import argparse
 import urllib3
+import pandas as pd
 import tachibana_order
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -80,6 +81,13 @@ MIN_UNIT_SHARES = 100   # 単元株数。shares_per_buyは常にこの倍数に�
 MAX_BUYS_HARD_CAP    = 20          # 資金上限とは独立のバックストップ
 MIN_BUYS_PER_CAMPAIGN = 10  # 投入上限までに最低これだけ買い増しできることを求める
                             # (stock_usa側と同じ、株価が高すぎて割に合わない銘柄を除外)
+
+# 2026-09-30追加: stock_usa/strategy_n_us.pyと同じ相関回避ロジックをJP側にも移植。
+# 実際に候補プール12銘柄で検証したところ平均相関0.39、同業種ペア(旭化成×帝人)は
+# 0.64と要注意水準だったため、「選べる時はなるべく避ける」優先度として導入する
+# (絶対条件ではない、stock_usa側と同じ設計思想)。
+CORRELATION_THRESHOLD = 0.7      # これ以上は「相関が高い」とみなす
+CORRELATION_LOOKBACK_DAYS = 504  # 約2年分の営業日
 
 ACT_HOUR, ACT_MIN = 15, 0   # closing_watch.pyのSCAN_STARTと同じタイミングに合わせる
 SELL_POLL_INTERVAL_SEC = 900  # 2026-09-18追加: 15:00までの間、この間隔で売却判定だけ繰り返す
@@ -189,12 +197,42 @@ def get_price_and_trend(url_price, code):
     return price, is_downtrend
 
 
+def _max_correlation_with_held(code, held_codes, lookback_days=CORRELATION_LOOKBACK_DAYS):
+    """codeと、既に保有中の各銘柄との日次リターン相関係数のうち最大値を返す。
+    held_codesが空、またはデータ不足で計算できない場合はNone(制約なし扱い)を返す。
+    (stock_usa/strategy_n_us.pyの_max_correlation_with_heldと同じ設計)"""
+    if not held_codes:
+        return None
+    df_a = db.get_daily_prices(code)
+    if len(df_a) < 60:
+        return None
+    ret_a = df_a.set_index("date")["close"].tail(lookback_days).pct_change().dropna()
+
+    max_corr = None
+    for held in held_codes:
+        df_b = db.get_daily_prices(held)
+        if len(df_b) < 60:
+            continue
+        ret_b = df_b.set_index("date")["close"].tail(lookback_days).pct_change().dropna()
+        joined = ret_a.to_frame("a").join(ret_b.to_frame("b"), how="inner")
+        if len(joined) < 60:
+            continue
+        c = joined["a"].corr(joined["b"])
+        if c is not None and (max_corr is None or c > max_corr):
+            max_corr = c
+    return max_corr
+
+
 def _pick_candidate_for_slot(sc, ranking, held_codes, get_price_and_trend_fn):
-    """ランキング上位から順に試し、株価と資金枠(max_campaign_capital)のバランスが
-    妥当な(=投入上限までにMIN_BUYS_PER_CAMPAIGN回以上買い増しできる)銘柄の中から、
-    その時点で下降トレンド中の銘柄を優先する。条件を満たす銘柄が一つも無い場合は、
-    資金バランスより「候補が居ないよりはまし」を優先し最上位にフォールバックする。"""
-    best_fit = None
+    """ランキング上位から、株価と資金枠(max_campaign_capital)のバランスが妥当
+    (=投入上限までにMIN_BUYS_PER_CAMPAIGN回以上買い増しできる)な候補を集め、以下の
+    優先順位で選ぶ(stock_usa/strategy_n_us.pyの_pick_candidate_for_slotと同じ設計):
+      ①下降トレンド中 かつ 既存保有銘柄との相関がCORRELATION_THRESHOLD未満
+      ②下降トレンド中(相関は問わない、従来ロジック)
+      ③相関がCORRELATION_THRESHOLD未満(トレンドは問わない)
+      ④ランキング最上位（条件を完全に満たす候補が無い場合のフォールバック）
+    相関は「選べる時はなるべく避ける」という優先度であり絶対条件ではない。"""
+    eligible = []
     for r in ranking:
         code = r["code"]
         if code in held_codes:
@@ -213,23 +251,35 @@ def _pick_candidate_for_slot(sc, ranking, held_codes, get_price_and_trend_fn):
                   f"{shares_per_buy}株/回、上限までの想定買い増し回数{implied_buys:.1f}回"
                   f"(<{MIN_BUYS_PER_CAMPAIGN}回) → 見送り、次点を検討")
             continue
-
+        max_corr = _max_correlation_with_held(code, held_codes)
+        corr_str = f"{max_corr:.2f}" if max_corr is not None else "N/A"
         trend_str = "下降トレンド" if is_downtrend else "上昇トレンド"
-        candidate = {"code": code, "name": r["name"], "shares_per_buy": shares_per_buy}
-        if best_fit is None:
-            best_fit = candidate
-        if is_downtrend:
-            print(f"  slot {sc['slot']}: {code} {r['name']} 株価{price:,.1f}円 → "
-                  f"{shares_per_buy}株/回、想定買い増し回数{implied_buys:.1f}回、{trend_str} "
-                  f"→ 採用(下降トレンド優先)")
-            return candidate
         print(f"  slot {sc['slot']}: {code} {r['name']} 株価{price:,.1f}円 → "
-              f"{shares_per_buy}株/回、想定買い増し回数{implied_buys:.1f}回、{trend_str} "
-              f"→ 条件は満たすが下降トレンドの候補を優先したいため保留、次点を確認")
-    if best_fit:
-        print(f"  slot {sc['slot']}: 下降トレンド中の適格候補が無いため、"
-              f"条件を満たす最上位({best_fit['code']} {best_fit['name']})を採用")
-    return best_fit
+              f"{shares_per_buy}株/回、想定買い増し回数{implied_buys:.1f}回、{trend_str}、"
+              f"既存保有との最大相関={corr_str}")
+        eligible.append({"code": code, "name": r["name"], "shares_per_buy": shares_per_buy,
+                          "is_downtrend": is_downtrend, "max_corr": max_corr})
+
+    if not eligible:
+        return None
+
+    def low_corr(c):
+        return c["max_corr"] is None or c["max_corr"] < CORRELATION_THRESHOLD
+
+    for cond, label in (
+        (lambda c: c["is_downtrend"] and low_corr(c), "下降トレンド×低相関"),
+        (lambda c: c["is_downtrend"], "下降トレンド優先(相関は妥協)"),
+        (lambda c: low_corr(c), "低相関優先(トレンドは妥協)"),
+    ):
+        for c in eligible:
+            if cond(c):
+                print(f"  slot {sc['slot']}: {c['code']} {c['name']} を採用({label})")
+                return {"code": c["code"], "name": c["name"], "shares_per_buy": c["shares_per_buy"]}
+
+    best = eligible[0]
+    print(f"  slot {sc['slot']}: 条件を完全に満たす候補が無いため、"
+          f"ランキング最上位({best['code']} {best['name']})を採用")
+    return {"code": best["code"], "name": best["name"], "shares_per_buy": best["shares_per_buy"]}
 
 
 def resolve_slot_candidates(get_price_and_trend_fn):
