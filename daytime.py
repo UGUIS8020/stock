@@ -505,8 +505,12 @@ def log_noon_ad_observation(time_label, ad_ratio, nikkei_change, scanned_cond, c
         pass
 
 
-def save_signal(code, name, sig):
-    """シグナルを DB（daytime_signals テーブル）に保存する。"""
+def save_signal(code, name, sig, condition=None):
+    """シグナルを DB（daytime_signals テーブル）に保存する。
+    2026-09-30追加: conditionはシグナル発報した瞬間の地合いを記録する
+    (9:30/13:00の実測補正で日中に変わり得るため、「発注時点」の値が重要)。
+    事後に「STRONG限定ルール(REQUIRE_STRONG)が実際に守られていたか」を
+    検証できるようにするため。"""
     db.save_daytime_signal({
         "date":           TODAY,
         "time":           datetime.now(JST).strftime("%H:%M:%S"),
@@ -522,6 +526,7 @@ def save_signal(code, name, sig):
         "volume_pace_ratio": 0,
         "tp_price":       round(sig["price"] * (1 + TP_PCT)),
         "sl_price":       round(sig["price"] * (1 - SL_PCT)),
+        "condition":      condition,
     })
 
 
@@ -752,7 +757,7 @@ def watch_loop(candidates, url_price, url_request, condition, start_now=False):
             if not is_retry:
                 alerted.add(code)
                 signal_count += 1
-                save_signal(code, name, sig)
+                save_signal(code, name, sig, condition=condition)
 
         # ── Step2: adj_score 降順でソートして優先発注 ────────
         new_signals.sort(key=lambda x: -x[3])

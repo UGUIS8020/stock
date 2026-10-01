@@ -176,6 +176,7 @@ def init_db():
             volume_pace_ratio  REAL,
             tp_price           REAL,
             sl_price           REAL,
+            condition          TEXT,
             PRIMARY KEY (date, code)
         );
         CREATE INDEX IF NOT EXISTS idx_ds_date ON daytime_signals(date);
@@ -279,6 +280,7 @@ def init_db():
     migrate_positions_account_type()
     migrate_nanpin_slot_columns()
     migrate_ai_sl_checks_checkpoint()
+    migrate_daytime_signals_condition()
 
 
 # ══════════════════════════════════════════════════════
@@ -925,6 +927,20 @@ def migrate_nanpin_slot_columns():
     conn.close()
 
 
+def migrate_daytime_signals_condition():
+    """daytime_signals に condition 列が未追加の場合のみ追加する（冪等）。
+    2026-09-30: 戦略Dの9月成績を検証した際、「発注した瞬間の地合い」が
+    一切記録されておらず、STRONG限定(REQUIRE_STRONG)の設計通りに動いていたか
+    事後検証できなかった。今後はシグナル発報時点のconditionを記録し、
+    月次の勝率検証でSTRONG限定ルールが守られているか確認できるようにする。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(daytime_signals)").fetchall()}
+    if "condition" not in existing:
+        conn.execute("ALTER TABLE daytime_signals ADD COLUMN condition TEXT")
+    conn.commit()
+    conn.close()
+
+
 def migrate_ai_sl_checks_checkpoint():
     """ai_sl_checks に checkpoint 列が未追加の場合のみ追加する（冪等）。
     2026-09-22: 50%地点に加えて90%地点（最終判断・現状は観察のみ）の
@@ -1002,17 +1018,18 @@ def save_daytime_signal(row):
     """daytime_signals テーブルにシグナルを保存（同日同銘柄は上書き）。
     row: dict (date, time, code, name, price, change_pct, prev_high,
                conditions_met, breakout, volume_surge, momentum,
-               volume_pace_ratio, tp_price, sl_price)
+               volume_pace_ratio, tp_price, sl_price, condition)
     """
+    row = {**row, "condition": row.get("condition")}
     conn = get_conn()
     conn.execute("""
         INSERT OR REPLACE INTO daytime_signals
             (date, time, code, name, price, change_pct, prev_high,
              conditions_met, breakout, volume_surge, momentum,
-             volume_pace_ratio, tp_price, sl_price)
+             volume_pace_ratio, tp_price, sl_price, condition)
         VALUES (:date, :time, :code, :name, :price, :change_pct, :prev_high,
                 :conditions_met, :breakout, :volume_surge, :momentum,
-                :volume_pace_ratio, :tp_price, :sl_price)
+                :volume_pace_ratio, :tp_price, :sl_price, :condition)
     """, row)
     conn.commit()
     conn.close()
