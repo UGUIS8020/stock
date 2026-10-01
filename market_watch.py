@@ -133,10 +133,12 @@ AN_SURGE_LIMIT_PCT = 1.0
 AS_TP_PCT = 0.048
 AS_SL_PCT = 0.056
 
-# 戦略AN テスト運用中の建玉サイズ（2026-08-10: 通常の半分。MAX_ORDER_AMOUNT/DEFAULT_SHARES比を
-#   CHEAP_THRESHOLDと揃え、境界の断層を回避 = 150,000/100 = 1,500 = CHEAP_THRESHOLD）
-AN_DEFAULT_SHARES   = 100
-AN_MAX_ORDER_AMOUNT = 150_000
+# 戦略AN 建玉サイズ（2026-09-30: 9月実績が良好だったため、テスト運用中サイズ
+#   [2026-08-10導入、通常の半分]から本来のサイズへ倍増。MAX_ORDER_AMOUNT/
+#   DEFAULT_SHARES比はCHEAP_THRESHOLDと揃えたまま維持し、境界の断層を回避
+#   = 300,000/200 = 1,500 = CHEAP_THRESHOLD）
+AN_DEFAULT_SHARES   = 200
+AN_MAX_ORDER_AMOUNT = 300_000
 
 # 戦略AS 建玉サイズ（2026-08-10新設。実運用ゼロ日のためANと同じ半分サイズから開始）
 AS_DEFAULT_SHARES   = 100
@@ -211,9 +213,12 @@ def calc_shares(price, strategy="A", is_forward=False):
     if price * default_shares <= HIGH_PRICE_CAP_AMOUNT:
         return default_shares
 
-    # 固定株数テーブルで縮小。AN/AS/順張り(default_shares=100)は既に最低ロットのため
+    # 固定株数テーブルで縮小。AS/順張り(default_shares=100)は既に最低ロットのため
     # このテーブルに来ても不変（100株のまま、MAX_PRICE_HIGH_CAPが唯一の安全弁）。
-    if default_shares >= 300 and price < 10_000:
+    # 2026-09-30: AN_DEFAULT_SHARESを200に引き上げた際、この条件が従来
+    # `>=300`のままだと戦略AN(200)が条件に引っかからず、5,000〜10,000円帯で
+    # 意図せず100株に縮小されてしまうバグがあったため`>=200`に修正。
+    if default_shares >= 200 and price < 10_000:
         return 200
     return 100
 
