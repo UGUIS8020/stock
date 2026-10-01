@@ -134,11 +134,12 @@ AS_TP_PCT = 0.048
 AS_SL_PCT = 0.056
 
 # 戦略AN 建玉サイズ（2026-09-30: 9月実績が良好だったため、テスト運用中サイズ
-#   [2026-08-10導入、通常の半分]から本来のサイズへ倍増。MAX_ORDER_AMOUNT/
-#   DEFAULT_SHARES比はCHEAP_THRESHOLDと揃えたまま維持し、境界の断層を回避
-#   = 300,000/200 = 1,500 = CHEAP_THRESHOLD）
-AN_DEFAULT_SHARES   = 200
-AN_MAX_ORDER_AMOUNT = 300_000
+#   [2026-08-10導入、通常の半分=100株]からユーザー判断で300株へ引き上げ
+#   (戦略A本体DEFAULT_SHARESと同サイズ)。MAX_ORDER_AMOUNT/DEFAULT_SHARES比は
+#   CHEAP_THRESHOLDと揃えたまま維持し、境界の断層を回避
+#   = 450,000/300 = 1,500 = CHEAP_THRESHOLD）
+AN_DEFAULT_SHARES   = 300
+AN_MAX_ORDER_AMOUNT = 450_000
 
 # 戦略AS 建玉サイズ（2026-08-10新設。実運用ゼロ日のためANと同じ半分サイズから開始）
 AS_DEFAULT_SHARES   = 100
