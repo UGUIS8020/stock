@@ -28,6 +28,7 @@ import pandas as pd
 import yfinance as yf
 import tachibana_order
 import db
+from closing_watch import _fetch_price_batch, STRONG_AD, WEAK_AD, PANIC_AD
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
@@ -449,6 +450,53 @@ def _fetch_nikkei_905(url_price):
     return None
 
 
+# 2026-10-02追加: 9:03の地合い再判定(_refresh_condition_905)は日経実値(Layer3)
+# だけを見ており、市場全体の個別銘柄の値上がり比率(AD比率)を全く考慮していなかった。
+# 「朝のスコアはSTRONG(満点10点)だったのに実測は終日NORMAL/WEAK」という過去の
+# 検証(35日中33日=94.3%が外れ、しかもスコアの高さと結果に相関が無い)を受けて追加。
+# daytime.py/closing_watch.pyと同じAD比率の考え方を使うが、全銘柄(数千件)スキャンは
+# 9:03には重すぎるため、固定間隔でサンプリングした軽量版で代用する。
+AD_SAMPLE_SIZE = 300  # 全銘柄からの抽出数。120件/バッチなので3バッチ程度で完了する想定
+
+
+def _sample_codes_for_ad_check(n=AD_SAMPLE_SIZE):
+    """daily_prices登録済みの全銘柄コードから、コード順で等間隔に抽出した
+    サンプルを返す（再現性のため固定的な抽出方法。特定業種・値がさ株への
+    偏りを避けるため、ランダムではなくコード順の均等間引きを使う）。"""
+    all_codes = sorted(db.get_all_codes(exclude_etf=True))
+    if len(all_codes) <= n:
+        return all_codes
+    step = len(all_codes) / n
+    return [all_codes[int(i * step)] for i in range(n)]
+
+
+def _sample_ad_ratio_905(url_price):
+    """サンプル銘柄の前日終値→直近値の騰落比率(AD比率)を軽量に実測する。
+    戻り値: ad_ratio(0.0〜1.0)。取得失敗銘柄が多すぎる場合はNoneを返す。"""
+    http = urllib3.PoolManager(cert_reqs="CERT_NONE")
+    codes = _sample_codes_for_ad_check()
+    up = down = 0
+    for i in range(0, len(codes), 120):
+        chunk = codes[i:i + 120]
+        try:
+            quotes = _fetch_price_batch(url_price, chunk, http)
+        except Exception:
+            continue
+        for q in quotes.values():
+            price, prev = q.get("price"), q.get("prev_close")
+            if not price or not prev or prev <= 0:
+                continue
+            if price > prev:
+                up += 1
+            elif price < prev:
+                down += 1
+    total = up + down
+    if total < AD_SAMPLE_SIZE * 0.5:
+        print(f"  ⚠️  AD比率サンプル取得不足({total}件) → 実測チェックをスキップ")
+        return None
+    return up / total
+
+
 def _get_nikkei_prev_close():
     """yfinance ^N225 で前日終値を返す。取得失敗・タイムアウト時は None。
 
@@ -508,9 +556,35 @@ def _log_condition_minute_observation(minute_offset, nikkei_price, prev_close):
                     nikkei_price, prev_close, round(change_pct, 4), pts])
 
 
+def _verify_strong_with_ad_ratio(url_price):
+    """STRONG判定が出た場合に、実測AD比率(サンプル銘柄)で裏付けを取る。
+    2026-10-02追加: 過去の検証(朝STRONG予測35日中33日が実測で外れ、しかも
+    スコアの高さと実測結果に相関なし)を受けて、日経実値だけでなく市場全体の
+    個別銘柄の値上がり比率も確認する。「日経平均(大型株)は堅調だが、個別銘柄
+    全体では広がりが無い」日を検知するのが目的。
+    AD比率が取得できない場合は、サンプル不足で誤って格下げするリスクを避ける
+    ため、安全側に倒さず元の判定(STRONG)のまま進める。
+    戻り値: (判定後のcondition, 実測ad_ratio or None)"""
+    ad_ratio = _sample_ad_ratio_905(url_price)
+    if ad_ratio is None:
+        return "STRONG", None
+    print(f"  📊 実測AD比率(サンプル{AD_SAMPLE_SIZE}銘柄): {ad_ratio:.2f}"
+          f"  (STRONG基準: {STRONG_AD}以上)")
+    if ad_ratio < WEAK_AD:
+        print(f"  📉 STRONG→WEAK格下げ（実測AD比率{ad_ratio:.2f} < {WEAK_AD}）")
+        return "WEAK", ad_ratio
+    if ad_ratio < STRONG_AD:
+        print(f"  📉 STRONG→NORMAL格下げ（実測AD比率{ad_ratio:.2f} < {STRONG_AD}）")
+        return "NORMAL", ad_ratio
+    print(f"  ✅ 実測AD比率もSTRONG基準を満たす → STRONG判定を維持")
+    return "STRONG", ad_ratio
+
+
 def _refresh_condition_905(current_condition, market_info, url_price):
     """9:03に日経実値でLayer3スコアを再計算し、地合いが変われば新しい地合い文字列を返す。
     変化なし or 取得失敗時は None を返す。
+    STRONG判定(朝からの継続含む)になった場合は、必ず_verify_strong_with_ad_ratio()で
+    実測AD比率による裏付けを取り、個別銘柄の広がりが伴わないSTRONGを格下げする。
     """
     t_label = f"9:{CONDITION_REFRESH_MIN:02d}"
     actual_nk = _fetch_nikkei_905(url_price)
@@ -551,6 +625,15 @@ def _refresh_condition_905(current_condition, market_info, url_price):
                 print(f"  ⚠️  morning_log 更新失敗: {e}")
             print(f"  📉 NORMAL→WEAK格下げ（日経実値{actual_nk_chg:+.2f}% ≦ -0.3%）")
             return new_cond
+        # Layer3は変わらなくても、朝からSTRONGのままなら実測AD比率で裏付けを取る
+        if current_condition == "STRONG":
+            new_cond, ad_ratio = _verify_strong_with_ad_ratio(url_price)
+            if new_cond != "STRONG":
+                try:
+                    db.update_morning_log_condition(TODAY, new_cond, saved_score, actual_nk_chg)
+                except Exception as e:
+                    print(f"  ⚠️  morning_log 更新失敗: {e}")
+                return new_cond
         return None
 
     new_score = saved_score - old_pts + new_pts
@@ -579,6 +662,10 @@ def _refresh_condition_905(current_condition, market_info, url_price):
     if new_cond == "NORMAL" and actual_nk_chg <= -0.3:
         new_cond = "WEAK"
         print(f"  📉 NORMAL→WEAK格下げ（日経実値{actual_nk_chg:+.2f}% ≦ -0.3%）")
+
+    # スコア計算上STRONGになった場合も、実測AD比率で裏付けを取る
+    if new_cond == "STRONG":
+        new_cond, _ = _verify_strong_with_ad_ratio(url_price)
 
     try:
         db.update_morning_log_condition(TODAY, new_cond, new_score, actual_nk_chg)
