@@ -269,7 +269,9 @@ def init_db():
             judgment    TEXT,
             confidence  TEXT,
             reason      TEXT,
-            ordered     INTEGER DEFAULT 0
+            ordered     INTEGER DEFAULT 0,
+            consec_drop_days INTEGER,
+            quant_passed      INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_abec_date_code ON ai_b_entry_checks(date, code);
     """)
@@ -281,6 +283,7 @@ def init_db():
     migrate_nanpin_slot_columns()
     migrate_ai_sl_checks_checkpoint()
     migrate_daytime_signals_condition()
+    migrate_ai_b_entry_checks_columns()
 
 
 # ══════════════════════════════════════════════════════
@@ -941,6 +944,23 @@ def migrate_daytime_signals_condition():
     conn.close()
 
 
+def migrate_ai_b_entry_checks_columns():
+    """ai_b_entry_checks に consec_drop_days・quant_passed 列が未追加の場合のみ追加する（冪等）。
+    2026-10-05: 従来はcd>=3（量的フィルター全通過）の最終候補にしかAIチェックを
+    実行していなかったため、AI判定の実績データがほぼ溜まらなかった(2週間で1件)。
+    cd>=1まで対象を広げ観察するにあたり、「実際に連続下落何日だったか」
+    「量的フィルター(cd>=3等)を本来通過していたか」を記録し、後でAI判定の
+    精度をstreak帯別に検証できるようにする。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(ai_b_entry_checks)").fetchall()}
+    if "consec_drop_days" not in existing:
+        conn.execute("ALTER TABLE ai_b_entry_checks ADD COLUMN consec_drop_days INTEGER")
+    if "quant_passed" not in existing:
+        conn.execute("ALTER TABLE ai_b_entry_checks ADD COLUMN quant_passed INTEGER DEFAULT 0")
+    conn.commit()
+    conn.close()
+
+
 def migrate_ai_sl_checks_checkpoint():
     """ai_sl_checks に checkpoint 列が未追加の場合のみ追加する（冪等）。
     2026-09-22: 50%地点に加えて90%地点（最終判断・現状は観察のみ）の
@@ -1071,16 +1091,22 @@ def save_ai_sl_check(date, code, name, strategy, checked_at, buy_price, price_at
 
 
 def save_ai_b_entry_check(date, code, name, change_pct, price, rb_score,
-                           judgment, confidence, reason, ordered=0):
+                           judgment, confidence, reason, ordered=0,
+                           consec_drop_days=None, quant_passed=0):
     """戦略B候補のAI悪材料チェック結果をai_b_entry_checksへ記録する（2026-09-22追加）。
     買い判断には未反映の観察用データ。orderedは実際にその日買われたかどうか
-    （MAX_POSITIONS_PER_DAYの上限で漏れた候補は0になる）。"""
+    （MAX_POSITIONS_PER_DAYの上限で漏れた候補は0になる）。
+    2026-10-05: cd>=3の最終候補だけだと実績が溜まらないため対象をcd>=1まで拡大。
+    consec_drop_days(実際の連続下落日数)・quant_passed(cd>=3等の量的フィルターを
+    本来通過していたか)を併記し、後でstreak帯別にAI判定の精度を検証できるようにする。"""
     conn = get_conn()
     conn.execute("""
         INSERT INTO ai_b_entry_checks
-            (date, code, name, change_pct, price, rb_score, judgment, confidence, reason, ordered)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (date, code, name, change_pct, price, rb_score, judgment, confidence, reason, int(ordered)))
+            (date, code, name, change_pct, price, rb_score, judgment, confidence, reason,
+             ordered, consec_drop_days, quant_passed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (date, code, name, change_pct, price, rb_score, judgment, confidence, reason,
+          int(ordered), consec_drop_days, int(quant_passed)))
     conn.commit()
     conn.close()
 

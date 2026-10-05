@@ -254,6 +254,8 @@ def collect_and_save_ai_b_results(executor, futures, ordered_today):
                     judgment=parsed["judgment"], confidence=parsed.get("confidence", ""),
                     reason=parsed.get("reason", ""),
                     ordered=1 if str(c["code"]) in ordered_today else 0,
+                    consec_drop_days=c.get("consec_drop_days"),
+                    quant_passed=1 if c.get("quant_passed") else 0,
                 )
                 saved += 1
             except Exception as e:
@@ -574,22 +576,33 @@ def scan_dropping_stocks(url_price):
     return ad_ratio, nikkei_change, scanned_cond, dropping
 
 
+def _consec_drop_days(hist, max_count=6):
+    """連続下落日数（当日を含む）を返す。histは前日までの終値（db.get_stock_history）。
+    候補は必ず当日下落しているため最低1。cd=3は現行CD_MIN(前日・前々日も下落)に相当。
+    2026-10-05: AI観察用にcd>=1まで対象を広げるため、真偽値ではなく実際の日数を返す
+    よう一般化した（以前はcd=3かどうかの判定のみだった）。"""
+    streak = 1
+    if len(hist) < 1:
+        return streak
+    closes = hist["Close"].astype(float).values
+    i = len(closes) - 1
+    while streak < max_count and i >= 1 and closes[i] < closes[i - 1]:
+        streak += 1
+        i -= 1
+    return streak
+
+
 def enrich_with_rb(candidates):
-    """候補銘柄のRBスコア・連続下落日数・6営業日前比をSQLiteの履歴から計算して追加"""
-    print(f"  RBスコア＋連続下落チェック中（{len(candidates)}件）...", flush=True)
-    skip_cd = 0
+    """候補銘柄のRBスコア・連続下落日数・6営業日前比をSQLiteの履歴から計算して追加し、
+    RB_MIN以上の銘柄を返す（cd/落ちるナイフでの絞り込みはfilter_order_candidatesで
+    別途行う）。2026-10-05: AI悪材料チェックの観察対象をcd>=3の最終候補だけでなく
+    cd>=1まで広げて実績データを貯めるため、RB計算と量的フィルターを分離した。"""
+    print(f"  RBスコア＋連続下落日数チェック中（{len(candidates)}件）...", flush=True)
     for c in candidates:
         try:
             hist = db.get_stock_history(c["code"])
-            c["rb_score"]    = calc_rebound_score(hist) if len(hist) >= 26 else 0
-            # 連続下落チェック（cd≥3: 前日・前々日も下落していること）
-            if len(hist) >= 3:
-                y_close  = float(hist["Close"].iloc[-1])   # 前日終値
-                d2_close = float(hist["Close"].iloc[-2])   # 2日前終値
-                d3_close = float(hist["Close"].iloc[-3])   # 3日前終値
-                c["consec_drop_ok"] = y_close < d2_close and d2_close < d3_close
-            else:
-                c["consec_drop_ok"] = False
+            c["rb_score"]         = calc_rebound_score(hist) if len(hist) >= 26 else 0
+            c["consec_drop_days"] = _consec_drop_days(hist)
             # 6営業日前比（「落ちるナイフ」除外用、2026-08-19追加）
             if len(hist) >= 6 and c.get("price"):
                 close_6ago = float(hist["Close"].iloc[-6])
@@ -597,17 +610,27 @@ def enrich_with_rb(candidates):
             else:
                 c["prior_6d_pct"] = None
         except Exception:
-            c["rb_score"]       = 0
-            c["consec_drop_ok"] = False
-            c["prior_6d_pct"]   = None
+            c["rb_score"]         = 0
+            c["consec_drop_days"] = 1
+            c["prior_6d_pct"]     = None
 
     before = len(candidates)
-    result = [c for c in candidates
-              if c["rb_score"] >= RB_MIN and c.get("consec_drop_ok", False)]
-    skip_cd = before - len([c for c in candidates if c["rb_score"] >= RB_MIN])
-    skip_cd2 = len([c for c in candidates if c["rb_score"] >= RB_MIN]) - len(result)
-    if skip_cd2 > 0:
-        print(f"  cd≥{CD_MIN}フィルタ: {skip_cd2}件除外（前日も下落していない）", flush=True)
+    result = [c for c in candidates if c["rb_score"] >= RB_MIN]
+    skip_rb = before - len(result)
+    if skip_rb > 0:
+        print(f"  RBスコア{RB_MIN}未満: {skip_rb}件除外", flush=True)
+
+    return result
+
+
+def filter_order_candidates(rb_survivors):
+    """RB通過済み候補から、実際に発注する最終候補を絞り込む（cd≥{CD_MIN}・落ちるナイフ除外）。
+    2026-10-05: AI観察用のrb_survivors全体とは別に、発注ループはこの結果だけを使う。"""
+    before = len(rb_survivors)
+    result = [c for c in rb_survivors if c["consec_drop_days"] >= CD_MIN]
+    skip_cd = before - len(result)
+    if skip_cd > 0:
+        print(f"  cd≥{CD_MIN}フィルタ: {skip_cd}件除外（前日も下落していない）", flush=True)
 
     # 「落ちるナイフ」除外（6営業日前比がPRIOR_6D_MAX_DECLINEを超えて下落している銘柄）
     # 履歴不足でprior_6d_pctがNoneの場合はデータ不足で除外せず通過させる（安全側）
@@ -618,6 +641,8 @@ def enrich_with_rb(candidates):
     if skip_knife > 0:
         print(f"  落ちるナイフ除外: {skip_knife}件除外（6営業日前比{PRIOR_6D_MAX_DECLINE}%以下）", flush=True)
 
+    for c in result:
+        c["quant_passed"] = True
     return result
 
 
@@ -786,11 +811,14 @@ def main(start_now=False, manual=False):
 
     # ── RBスコア計算 ──
     print(f"\n【ステップ2】RBスコア計算...")
-    candidates = enrich_with_rb(raw_candidates)
+    candidates = enrich_with_rb(raw_candidates)  # RB_MIN通過済み（cd絞り込み前、AI観察母集団）
 
     if not candidates:
-        print(f"  RBスコア{RB_MIN}以上×連続下落{CD_MIN}日以上を両方満たす銘柄なし")
+        print(f"  RBスコア{RB_MIN}以上の銘柄なし")
         return
+
+    for c in candidates:
+        c["quant_passed"] = False
 
     # RBスコア降順 → 下落幅降順でソート
     candidates.sort(key=lambda c: (-c["rb_score"], c["change_pct"]))
@@ -821,33 +849,48 @@ def main(start_now=False, manual=False):
     for c in candidates:
         c["name"] = code_names.get(c["code"], c.get("name") or c["code"])
 
-    # ── 異常フラグ除外 + 低位株除外 + 高値株除外（コードで処理）──
+    # ── 低位株除外 + 高値株除外（価格帯フィルター）──
+    # 2026-10-05: 従来あった「-15%超暴落を除外」は、この時点の候補が既に
+    # scan_dropping_stocksでDROP_LO(-5.0%)〜DROP_HI(-3.1%)に絞り込み済みのため
+    # 構造的に発動し得ないデッドコードだったので削除した。
     before = len(candidates)
-    candidates = [c for c in candidates if c["change_pct"] > -15
-                  and MIN_PRICE <= c["price"] < MAX_PRICE_B]
+    candidates = [c for c in candidates if MIN_PRICE <= c["price"] < MAX_PRICE_B]
     removed = before - len(candidates)
     if removed > 0:
-        print(f"  異常フラグ除外: {removed}件（-15%超暴落 or 株価{MIN_PRICE:,}円未満 or {MAX_PRICE_B:,}円以上）")
+        print(f"  価格帯除外: {removed}件（株価{MIN_PRICE:,}円未満 or {MAX_PRICE_B:,}円以上）")
 
     if not candidates:
-        print(f"  異常フラグ除外後、該当銘柄なし")
+        print(f"  価格帯除外後、該当銘柄なし")
         return
 
-    print(f"\n{'='*62}")
-    print(f"【引け前候補】STRONG/NORMAL地合い × {DROP_HI}〜{DROP_LO}% × RB>={RB_MIN} × cd≥{CD_MIN}  {len(candidates)}件")
-    print(f"{'='*62}")
-    print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'TP目安':>8} {'SL目安':>8} {'出来高':>10}")
-    print(f"  {'─'*72}")
-    for c in candidates:
-        tp = round(c["price"] * (1 + TP_PCT))
-        sl = round(c["price"] * (1 - SL_PCT))
-        print(f"  {c['code']:<7} {c.get('name',''):<14} {c['change_pct']:>+6.2f}% "
-              f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
+    # ── ここまでがAI悪材料チェックの観察母集団（cd>=1、2026-10-05拡大）──
+    # 実際の発注対象は、ここからさらにcd≥CD_MIN(現行3)・落ちるナイフ除外を通過した銘柄のみ。
+    order_candidates = filter_order_candidates(candidates)
+
+    if order_candidates:
+        print(f"\n{'='*62}")
+        print(f"【引け前候補(発注対象)】STRONG/NORMAL地合い × {DROP_HI}〜{DROP_LO}% × "
+              f"RB>={RB_MIN} × cd≥{CD_MIN}  {len(order_candidates)}件")
+        print(f"{'='*62}")
+        print(f"  {'コード':<7} {'銘柄名':<14} {'下落率':>7} {'現在値':>8} {'RB':>4} {'TP目安':>8} {'SL目安':>8} {'出来高':>10}")
+        print(f"  {'─'*72}")
+        for c in order_candidates:
+            tp = round(c["price"] * (1 + TP_PCT))
+            sl = round(c["price"] * (1 - SL_PCT))
+            print(f"  {c['code']:<7} {c.get('name',''):<14} {c['change_pct']:>+6.2f}% "
+                  f"{c['price']:>8,.0f}円  {c['rb_score']:>3}点  {tp:>8,}円 {sl:>8,}円  {c['volume']:>10,}株")
+    else:
+        print(f"\n  発注対象(cd≥{CD_MIN}通過)の銘柄なし（RB>={RB_MIN}のみ通過: {len(candidates)}件、"
+              f"AI悪材料チェックの観察対象として記録します）")
 
     # ── 本日すでに発注済みの銘柄を取得（再実行時の重複防止）──
     ordered_today = db.get_today_ordered_codes(TODAY)
 
     # ── AI悪材料チェック起動（観察用、発注待機中にバックグラウンド実行）──
+    # 2026-10-05: cd≥{CD_MIN}の発注対象だけでなく、RB通過済み候補(cd>=1)全体を
+    # 対象にする。従来はcd≥3の最終候補にしかAIチェックが実行されず、候補自体が
+    # ほぼ0件の日が多かったため実績データがほとんど貯まらなかった(2週間で1件)。
+    # 対象を広げてAI判定の精度をstreak帯別に検証できるデータを蓄積する(買い判断には未反映)。
     ai_b_executor, ai_b_futures = start_ai_b_checks(candidates)
 
     # ── 発注待機（引けギリギリ約15:15執行）──
@@ -867,7 +910,7 @@ def main(start_now=False, manual=False):
     label = "手動確認" if manual else f"自動発注（上限{MAX_POSITIONS_PER_DAY}件）"
     print(f"\n【ステップ3】{label}...")
     order_count = 0
-    for c in candidates:
+    for c in order_candidates:
         if not manual and order_count >= MAX_POSITIONS_PER_DAY:
             print(f"  ⚠️  本日の上限{MAX_POSITIONS_PER_DAY}件に達しました。残り銘柄はスキップします。")
             break
@@ -909,7 +952,7 @@ def main(start_now=False, manual=False):
     collect_and_save_ai_b_results(ai_b_executor, ai_b_futures, ordered_today)
 
     # ── ログ保存 ──
-    save_closing_log(candidates)
+    save_closing_log(order_candidates)
 
     print(f"\n{'='*62}")
     print(f"  引け前スキャン完了  {datetime.now(JST).strftime('%H:%M:%S')}")
