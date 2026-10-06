@@ -155,6 +155,28 @@ AN_MAX_ORDER_AMOUNT = 500_000  # 2026-10-06: 450,000→500,000（A本体のMAX_O
                                 # 好成績が続いており、「テスト運用中の縮小サイズ」という位置づけを
                                 # A本体と揃えるのは妥当と判断）
 
+# 戦略AN 価格帯別株数テーブル（2026-10-06新設、ユーザー指定）。A本体/AS共通の
+# calc_shares固定カスケード(300→200→100)より1段階大きく、かつ¥20,000以上も
+# 100株で拾う（従来はMAX_PRICE_HIGH_CAP=20,000で発注対象外だった）。
+# ¥1,500未満はCHEAP_THRESHOLD予算ベース処理（calc_shares内）を引き続き使う。
+AN_SHARE_TIERS = [
+    (3_333,  400),   # ¥1,500〜¥3,333
+    (10_000, 300),   # ¥3,333〜¥10,000
+    (20_000, 200),   # ¥10,000〜¥20,000
+    (30_000, 100),   # ¥20,000〜¥30,000
+]
+AN_MAX_PRICE = 30_000  # これ以上は発注対象外（ユーザー判断。100株固定でも建玉が
+                        # 過大化しすぎない上限として、他戦略の上限[¥10,000〜20,000]の
+                        # 約1.5〜3倍を目安に設定）
+
+
+def _an_shares_by_price(price):
+    """AN_SHARE_TIERSに基づき株数を返す。price>=AN_MAX_PRICEはNone（呼び出し側で判定）。"""
+    for threshold, shares in AN_SHARE_TIERS:
+        if price < threshold:
+            return shares
+    return None
+
 # 戦略AS 建玉サイズ（2026-08-10新設。実運用ゼロ日のためANと同じ半分サイズから開始）
 AS_DEFAULT_SHARES   = 100
 AS_MAX_ORDER_AMOUNT = 150_000
@@ -203,11 +225,13 @@ MAX_PRICE_HIGH_CAP = 20_000  # 100株の最低ロットでも建玉が過大に�
 
 
 def calc_shares(price, strategy="A", is_forward=False):
-    """価格に応じた発注株数を返す（100株単位）。None なら発注対象外（MAX_PRICE_HIGH_CAP以上）。
+    """価格に応じた発注株数を返す（100株単位）。None なら発注対象外。
     CHEAP_THRESHOLD円未満の安い株はMAX_ORDER_AMOUNT以内で買えるだけ。
     HIGH_PRICE_CAP_AMOUNTを超える高値株は固定株数テーブルで縮小する
-    （closing_watch.py/daytime.pyと同方式、2026-09-17統一）。
-    strategy="AN"/"AS"はテスト運用中のため半分サイズを使う。
+    （closing_watch.py/daytime.pyと同方式、2026-09-17統一）。MAX_PRICE_HIGH_CAP(¥20,000)
+    以上は発注対象外。strategy="AS"はテスト運用中のため半分サイズを使う。
+    strategy="AN"はAN_SHARE_TIERS（2026-10-06新設）を使い、AN_MAX_PRICE(¥30,000)
+    以上のみ発注対象外（他戦略よりは緩い上限）。
     is_forward=True（戦略A本体の順張りのみ）は縮小建玉を使う。"""
     if strategy == "AN":
         default_shares, max_order_amount = AN_DEFAULT_SHARES, AN_MAX_ORDER_AMOUNT
@@ -221,6 +245,13 @@ def calc_shares(price, strategy="A", is_forward=False):
     if price and price < CHEAP_THRESHOLD:
         lots = int(max_order_amount / price / 100)
         return max(lots, 1) * 100
+
+    # 戦略ANは専用の価格帯テーブル(AN_SHARE_TIERS)を使う（2026-10-06、ユーザー指定）。
+    # A本体/AS共通のHIGH_PRICE_CAP_AMOUNTベースのカスケードとは独立。
+    if strategy == "AN":
+        if not price or price >= AN_MAX_PRICE:
+            return None
+        return _an_shares_by_price(price)
 
     if not price or price >= MAX_PRICE_HIGH_CAP:
         return None
