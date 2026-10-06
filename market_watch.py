@@ -150,7 +150,10 @@ AS_SL_PCT = 0.056
 #   CHEAP_THRESHOLDと揃えたまま維持し、境界の断層を回避
 #   = 450,000/300 = 1,500 = CHEAP_THRESHOLD）
 AN_DEFAULT_SHARES   = 300
-AN_MAX_ORDER_AMOUNT = 450_000
+AN_MAX_ORDER_AMOUNT = 500_000  # 2026-10-06: 450,000→500,000（A本体のMAX_ORDER_AMOUNTと統一、
+                                # ユーザー判断。ANはn=22時点で勝率77.3%・合計+108,610円と
+                                # 好成績が続いており、「テスト運用中の縮小サイズ」という位置づけを
+                                # A本体と揃えるのは妥当と判断）
 
 # 戦略AS 建玉サイズ（2026-08-10新設。実運用ゼロ日のためANと同じ半分サイズから開始）
 AS_DEFAULT_SHARES   = 100
