@@ -47,7 +47,13 @@ def _prev_trading_day(today_str):
         d -= timedelta(days=1)
     return d.strftime("%Y-%m-%d")
 
-POLL_INTERVAL      = 15
+POLL_INTERVAL      = 10  # 2026-10-07: 15→10秒に短縮、ユーザー判断。J-Quants分足データで
+                          # AN実績を検証した結果、TP到達を一瞬(数秒)超えたのに15秒間隔の
+                          # ポーリングで検知し損ねたケースが2件判明(4419/8-18, 5232/10-5、
+                          # 合計約10,649円の機会損失)。立花証券APIの上限は日次10,000回と
+                          # 確認済み([[project_tachibana_api_load_warning]])で、10秒化後も
+                          # 直近最大(10/1基準)で合計約7,400回程度の見込みで十分な余裕を残す
+                          # （5秒化だと約8,800回とより上限に近づくため、余裕を優先して10秒を選択）。
 EXIT_HOUR          = 15
 EXIT_MIN           = 28
 JST                = timezone(timedelta(hours=9))
