@@ -115,6 +115,7 @@ def init_db():
             price      REAL,
             tp_price   REAL,
             sl_price   REAL,
+            consec_drop_days INTEGER,
             PRIMARY KEY (date, code)
         );
 
@@ -284,6 +285,7 @@ def init_db():
     migrate_ai_sl_checks_checkpoint()
     migrate_daytime_signals_condition()
     migrate_ai_b_entry_checks_columns()
+    migrate_closing_log_consec_drop_days()
 
 
 # ══════════════════════════════════════════════════════
@@ -688,15 +690,20 @@ def get_today_ordered_codes(date):
 def save_closing_log_db(rows):
     """
     closing_log テーブルに候補銘柄リストを保存する。
-    rows: list of dict (date, code, name, change_pct, rb_score, price, tp_price, sl_price)
+    rows: list of dict (date, code, name, change_pct, rb_score, price, tp_price, sl_price,
+          consec_drop_days)
+    2026-10-07: consec_drop_days追加。cd≥2緩和(CD_MIN 3→2)の効果を、発注時点の実際の
+    連続下落日数別(cd=2のみ通過 vs cd>=3で元々通過していた銘柄)に事後検証できるようにする。
     """
     if not rows:
         return
+    rows = [{**r, "consec_drop_days": r.get("consec_drop_days")} for r in rows]
     conn = get_conn()
     conn.executemany("""
         INSERT OR REPLACE INTO closing_log
-            (date, code, name, change_pct, rb_score, price, tp_price, sl_price)
-        VALUES (:date, :code, :name, :change_pct, :rb_score, :price, :tp_price, :sl_price)
+            (date, code, name, change_pct, rb_score, price, tp_price, sl_price, consec_drop_days)
+        VALUES (:date, :code, :name, :change_pct, :rb_score, :price, :tp_price, :sl_price,
+                :consec_drop_days)
     """, rows)
     conn.commit()
     conn.close()
@@ -940,6 +947,18 @@ def migrate_daytime_signals_condition():
     existing = {row[1] for row in conn.execute("PRAGMA table_info(daytime_signals)").fetchall()}
     if "condition" not in existing:
         conn.execute("ALTER TABLE daytime_signals ADD COLUMN condition TEXT")
+    conn.commit()
+    conn.close()
+
+
+def migrate_closing_log_consec_drop_days():
+    """closing_log に consec_drop_days 列が未追加の場合のみ追加する（冪等）。
+    2026-10-07: cd≥2緩和(CD_MIN 3→2)の効果を、cd=2のみ通過した銘柄とcd>=3で
+    元々通過していた銘柄に分けて事後検証できるようにするため追加。"""
+    conn = get_conn()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(closing_log)").fetchall()}
+    if "consec_drop_days" not in existing:
+        conn.execute("ALTER TABLE closing_log ADD COLUMN consec_drop_days INTEGER")
     conn.commit()
     conn.close()
 

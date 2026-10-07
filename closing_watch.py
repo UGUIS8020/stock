@@ -743,6 +743,7 @@ def save_closing_log(candidates):
         "price":      c["price"],
         "tp_price":   round(c["price"] * (1 + TP_PCT)),
         "sl_price":   round(c["price"] * (1 - SL_PCT)),
+        "consec_drop_days": c.get("consec_drop_days"),
     } for c in candidates]
     db.save_closing_log_db(rows)
     print(f"\n  💾 ログ保存: closing_log（{len(rows)}件）")
